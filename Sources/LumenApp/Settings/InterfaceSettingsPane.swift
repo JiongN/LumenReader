@@ -1,7 +1,7 @@
 import SwiftUI
 import LumenKit
 
-/// 「界面」设置页：面板宽度 + 动效。
+/// 「界面」设置页：界面字体 + 动效。
 ///
 /// 单独开一页而不是塞进「阅读」：这两类都是全局外壳行为，跟主题、字号这些
 /// "读这本书时怎么显示"不是一回事。混在一起会让「阅读」页越堆越长。
@@ -11,8 +11,6 @@ struct InterfaceSettingsPane: View {
 
     var body: some View {
         Form {
-            panelWidthSection
-
             Section("界面字体") {
                 FontFamilyPicker(
                     selection: $settings.ui.uiFontFamilyName,
@@ -65,67 +63,14 @@ struct InterfaceSettingsPane: View {
         .scrollContentBackground(.hidden)
     }
 
-    // MARK: - 面板宽度
-
-    /// 面板宽度的显式入口。
-    ///
-    /// 为什么要在「设置」里再做一遍已经能在窗口里拖的事：**可发现性**。
-    /// 那两条分隔线视觉上只有 1pt，和原来的静态分割线长得一模一样，
-    /// 用户不会去悬停它，也就不会知道它能拖——功能做完了却等于不存在。
-    /// 这里给一个看得见、带数值、可复位的入口，代价只是多一个 Section。
-    ///
-    /// `range` / `defaultWidth` 从 `UISettings.PanelWidth` 取，不另写常量：
-    /// 两处各写一份，迟早会变成「滑杆能拉到 500，但拖分隔线只能到 420」。
-    private var panelWidthSection: some View {
-        Section("面板宽度") {
-            panelWidthRow(
-                title: "侧栏",
-                value: $settings.ui.sidebarWidth,
-                range: UISettings.PanelWidth.sidebarRange,
-                defaultWidth: UISettings.PanelWidth.sidebarDefault
-            )
-            panelWidthRow(
-                title: "AI 面板",
-                value: $settings.ui.aiPanelWidth,
-                range: UISettings.PanelWidth.aiRange,
-                defaultWidth: UISettings.PanelWidth.aiDefault
-            )
-
-            Text("""
-            也可以直接在窗口里拖动面板之间的分隔线调整，双击分隔线恢复默认。\
-            拖到边界会自动停住，越界值不会被写进配置。
-            """)
-            .font(DS.Typo.ui(size: 11))
-            .foregroundStyle(DS.Palette.textTertiary)
-            .fixedSize(horizontal: false, vertical: true)
-        }
-    }
-
-    /// 一行宽度调节：滑杆 + 当前值 + 复位。
-    private func panelWidthRow(
-        title: String,
-        value: Binding<Double>,
-        range: ClosedRange<Double>,
-        defaultWidth: Double
-    ) -> some View {
-        VStack(alignment: .leading, spacing: DS.Space.xs) {
-            HStack(spacing: DS.Space.s) {
-                Text(title)
-                Spacer(minLength: DS.Space.s)
-                Text("\(Int(value.wrappedValue.rounded())) pt")
-                    .font(DS.Typo.ui(size: 11, design: .monospaced))
-                    .foregroundStyle(DS.Palette.textSecondary)
-                Button("复位") {
-                    withAnimation(DS.Motion.panel) { value.wrappedValue = defaultWidth }
-                }
-                .buttonStyle(.link)
-                .font(DS.Typo.ui(size: 11))
-                // 已经在默认值时没有什么可复位的，按钮就该是灰的
-                .disabled(abs(value.wrappedValue - defaultWidth) < 0.5)
-            }
-            Slider(value: value, in: range)
-        }
-    }
+    // 面板宽度**刻意不在这里设入口**：宽度只有一个入口才不会两边不同步，
+    // 而拖拽就在窗口里、看得见摸得着——这里再放一对滑杆，等于把同一个状态
+    // 做成两处可改，迟早出现「设置里改了、拖完又被覆盖」这类难查的毛病。
+    //
+    // 删掉这一节之后要确认「可发现性」没跟着丢——它原本是加这一节的理由。
+    // 现在靠 `PanelResizeHandle` 自己承担：1pt 视觉宽但 10pt 命中区、
+    // 悬停时线条变色加粗、光标变成左右箭头、悬停提示「拖动调整宽度，双击复位」、
+    // 双击复位到默认宽度。五条线索都指向「这条线能拖」，不再需要设置页重复一遍。
 
     /// 当前实际状态。系统偏好压过应用开关时，用户很容易以为设置没生效——
     /// 与其让他猜，不如直接把原因写出来。
