@@ -50,69 +50,111 @@ struct AIPanelView: View {
 
     // MARK: - 头部
 
+    /// 面板内三块（header / transcript / composer）统一的横向内边距。
+    ///
+    /// 14 而不是 `DS.Space.m`（12）：panel 默认 380、下限 300，正文与气泡贴到边缘会显得局促；
+    /// 而 16 在 300pt 时又把 footer 行的可用宽度压到 300−32−28=240pt 以下，放不下三个
+    /// 引用编号加四个动作按钮。14 是「看着不挤」与「300pt 时 footer 仍放得下」的交点。
+    private static let contentInset: CGFloat = 14
+
     private var header: some View {
         HStack(spacing: DS.Space.s) {
             Image(systemName: "sparkles")
                 .font(DS.Typo.ui(size: 12.5, weight: .semibold))
                 .foregroundStyle(DS.Palette.accent)
 
-            // 这里原来还有一行「AI 阅读」文字标题，现在让位给两个切换器。
-            // 面板默认宽 380pt、用户还能调到 280pt，标题 + 两个 chip 会把整行挤爆；
+            // 这里原来还有一行「AI 阅读」文字标题，现在让位给切换器。
+            // 面板默认宽 380pt、用户还能调到 300pt，标题 + 两个 chip 会把整行挤爆；
             // 而 sparkles 图标本身已经说明了这是 AI 面板，标题是纯冗余。
-            providerMenu
+            //
+            // 顺序（用户定的）：sparkles → globe（联网开关）→ 模板 → Agent → ⋯ → 收起。
+            // globe 从输入框左槽搬到这里、模型 chip 从头部搬到输入框左槽——两者换了位置：
+            // 「这一次要不要联网」属于发起的动作，和输入框放一起更顺手；
+            // 「用哪个模型」是长期设定，放在头部与模板 / Agent 并列更合逻辑。
+            webSearchToggle
             templateMenu
             agentMenu
 
             Spacer(minLength: 0)
 
-            Menu {
-                Button("总结本节") { run(.summarize(scope: .currentUnit)) }
-                Button("总结全书") { summarizeWholeDocument() }
-                Divider()
-                // 「重新生成」是**付费动作**，所以只放在菜单与气泡 footer 里，
-                // 不给键盘快捷键：一次误触的代价是一次真实的模型调用。
-                Button("重新生成上一条回答") { chat.rerunLast() }
-                    .disabled(!chat.canRerunLast)
-                Divider()
-                Button("记住选中内容") { rememberSelection() }
-                    .disabled(!hasSelection)
-                Button("记住当前这一节") { rememberCurrentUnit() }
-                    .disabled(bridge.isLoading)
-                Divider()
-                Button("导出摘要为 Markdown…") { exportSummary() }
-                    .disabled(chat.lastSubstantialAnswer.isEmpty)
-                Divider()
-                Button("清空对话") { chat.clear() }
-                    .disabled(chat.bubbles.isEmpty)
-                Button("AI 与阅读设置…") {
-                    openSettings()
-                    NSApp.activate(ignoringOtherApps: true)
-                }
-            } label: {
-                Image(systemName: "ellipsis.circle")
-                    .font(DS.Typo.ui(size: 13))
-            }
-            .menuStyle(.borderlessButton)
-            .menuIndicator(.hidden)
-            .frame(width: 22)
-            .help("更多")
+            moreMenu
+            collapseButton
         }
-        .padding(.horizontal, DS.Space.m)
+        .padding(.horizontal, Self.contentInset)
         .frame(height: DS.Size.toolbarHeight)
+    }
+
+    /// 面板内的「超长菜单」：总结 / 重新生成 / 记忆 / 导出 / 清空。
+    private var moreMenu: some View {
+        Menu {
+            Button("总结本节") { run(.summarize(scope: .currentUnit)) }
+            Button("总结全书") { summarizeWholeDocument() }
+            Divider()
+            // 「重新生成」是**付费动作**，所以只放在菜单与气泡 footer 里，
+            // 不给键盘快捷键：一次误触的代价是一次真实的模型调用。
+            Button("重新生成上一条回答") { chat.rerunLast() }
+                .disabled(!chat.canRerunLast)
+            Divider()
+            Button("记住选中内容") { rememberSelection() }
+                .disabled(!hasSelection)
+            Button("记住当前这一节") { rememberCurrentUnit() }
+                .disabled(bridge.isLoading)
+            Divider()
+            Button("导出摘要为 Markdown…") { exportSummary() }
+                .disabled(chat.lastSubstantialAnswer.isEmpty)
+            Divider()
+            Button("清空对话") { chat.clear() }
+                .disabled(chat.bubbles.isEmpty)
+            Button("AI 与阅读设置…") {
+                openSettings()
+                NSApp.activate(ignoringOtherApps: true)
+            }
+        } label: {
+            Image(systemName: "ellipsis.circle")
+                .font(DS.Typo.ui(size: 13))
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .frame(width: 22)
+        .help("更多")
+    }
+
+    /// 面板内的收起入口。
+    ///
+    /// 此前收起 AI 面板只有两个鼠标入口：工具栏那枚 sparkles 按钮、以及菜单项
+    /// 「显示 → 显示/隐藏 AI 面板」。用户在面板里读完一段回答、想把阅读区让出来时，
+    /// 眼睛和手都在面板上，却得跑去工具栏找——这就是「右侧边栏无法收起」的可用性根因。
+    /// 给它一个面板内的近在手边的按钮。
+    private var collapseButton: some View {
+        Button {
+            withAnimation(DS.Motion.panel) { state.isAIPanelVisible = false }
+        } label: {
+            Image(systemName: "sidebar.trailing")
+                .font(DS.Typo.ui(size: 13))
+                .foregroundStyle(DS.Palette.textSecondary)
+        }
+        .buttonStyle(.plain)
+        .help("收起 AI 面板 (\(state.keyBindings.combo(for: .toggleAIPanel)?.display ?? "—"))")
+        .accessibilityLabel("收起 AI 面板")
     }
 
     // MARK: - 服务商与提示词
 
-    /// 服务商切换。
+    /// 服务商 / 模型切换。**放在 composer 行的左槽**（本批与联网开关换了位置）。
     ///
     /// 从「点击跳设置页」改成菜单直选，解决的是一个很实际的摩擦：
     /// 读论文时常要在快模型和强模型之间来回切——随手问一句用便宜的，
     /// 细读论证用贵的。之前每切一次都要离开阅读、进设置、找到那一项、再切回来，
     /// 代价高到用户干脆不切，一直按最贵的那个跑。
+    ///
+    /// 面板下限 300pt 时模型名容易过长，所以这里**不加 `.fixedSize()`**：
+    /// 文本截断（`.truncationMode(.middle)`）把完整名字交给 `.help`，
+    /// 输入框因此不会被 chip 挤压。
     private var providerMenu: some View {
         let config = state.settingsStore.activeProvider
         let configured = config?.isConfigured ?? false
         let providers = state.settingsStore.ai.providers
+        let modelLabel = config.map { $0.selectedModel.isEmpty ? $0.name : $0.selectedModel } ?? "未配置"
 
         return Menu {
             if providers.isEmpty {
@@ -129,13 +171,17 @@ struct AIPanelView: View {
         } label: {
             chip(
                 dotColor: configured ? DS.Palette.success : DS.Palette.warning,
-                text: config.map { $0.selectedModel.isEmpty ? $0.name : $0.selectedModel } ?? "未配置"
+                text: modelLabel,
+                maxTextWidth: 132
             )
         }
         .menuStyle(.borderlessButton)
         .menuIndicator(.hidden)
-        .fixedSize()
-        .help(configured ? "切换 AI 服务商 / 模型" : "尚未配置 AI 服务商，点击开始配置")
+        // 不给 layoutPriority：让下面的输入框优先拿到宽度，chip 自行截断。
+        .layoutPriority(0)
+        .help(configured
+              ? "切换 AI 服务商 / 模型\n当前模型：\(modelLabel)"
+              : "尚未配置 AI 服务商，点击开始配置")
     }
 
     /// 服务商在菜单里的一项。模型多于一个时给二级菜单——
@@ -306,7 +352,15 @@ struct AIPanelView: View {
     ///
     /// 「状态点」做成可选是有意的：服务商有「配没配好」要表达，模板没有对应状态，
     /// 那就不要挂一个永远亮着的假指示灯——用户会以为它在表示什么。
-    private func chip(dotColor: Color?, text: String, icon: String? = nil) -> some View {
+    ///
+    /// - Parameter maxTextWidth: 文本最大宽度；给了就截断（`.truncationMode(.middle)`），
+    ///   chip 因此不会无限变宽、挤压同行的其它控件。完整文字交给 `.help`。
+    private func chip(
+        dotColor: Color?,
+        text: String,
+        icon: String? = nil,
+        maxTextWidth: CGFloat? = nil
+    ) -> some View {
         HStack(spacing: 4) {
             if let dotColor {
                 Circle().fill(dotColor).frame(width: 5, height: 5)
@@ -317,6 +371,8 @@ struct AIPanelView: View {
             Text(text)
                 .font(DS.Typo.ui(size: 10.5, weight: .medium))
                 .lineLimit(1)
+                .truncationMode(.middle)
+                .frame(maxWidth: maxTextWidth, alignment: .leading)
         }
         .foregroundStyle(DS.Palette.textSecondary)
         .padding(.horizontal, DS.Space.s)
@@ -356,7 +412,9 @@ struct AIPanelView: View {
                         }
                         Color.clear.frame(height: 1).id(Self.bottomAnchor)
                     }
-                    .padding(DS.Space.m)
+                    // 与 header / composer 共用同一个横向内边距，左右对称、内容不贴右边缘。
+                    .padding(.horizontal, Self.contentInset)
+                    .padding(.vertical, DS.Space.m)
                 }
             }
             .onScrollGeometryChange(for: Bool.self) { geometry in
@@ -410,7 +468,8 @@ struct AIPanelView: View {
                 setupCallout
             }
         }
-        .padding(DS.Space.m)
+        .padding(.horizontal, Self.contentInset)
+        .padding(.vertical, DS.Space.m)
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
@@ -496,7 +555,8 @@ struct AIPanelView: View {
             }
 
             HStack(alignment: .bottom, spacing: DS.Space.s) {
-                webSearchToggle
+                // 左槽现在是模型 chip（本批从头部搬来）；联网开关搬去了头部。
+                providerMenu
 
                 TextField("就当前内容提问…", text: $chat.draft, axis: .vertical)
                     .textFieldStyle(.plain)
@@ -512,6 +572,8 @@ struct AIPanelView: View {
                         RoundedRectangle(cornerRadius: DS.Radius.m, style: .continuous)
                             .strokeBorder(DS.Palette.separator, lineWidth: 0.5)
                     )
+                    // 输入框优先拿到宽度：模型 chip 会自截断，输入框不该被它挤压。
+                    .layoutPriority(1)
                     .onSubmit(sendDraft)
 
                 if chat.isStreaming {
@@ -536,10 +598,11 @@ struct AIPanelView: View {
                 }
             }
         }
-        .padding(DS.Space.m)
+        .padding(.horizontal, Self.contentInset)
+        .padding(.vertical, DS.Space.m)
     }
 
-    /// 输入框上的「联网检索」手动开关。
+    /// 头部的「联网检索」手动开关（本批从输入框左槽搬来）。
     ///
     /// 与 Agent 自己的联网开关是**两个独立条件**（满足其一即检索）：
     /// Agent 那个属于「这个角色定位上就要查文献」，跟着 Agent 走；
@@ -867,7 +930,11 @@ struct AIBubbleView: View {
                 }
 
                 if !bubble.text.isEmpty && !isStreaming && !bubble.failed {
-                    footerRow
+                    // 探针：给 footer 行的实际宽度一个可断言的读数。
+                    // 同名的多个探针会互相覆盖、消失时也会误注销，所以只有「最后一条」
+                    // （最可能满配：引用编号 + 重新生成 + 复制 + 批注 + 记住）挂正式名字，
+                    // 其余挂一个不参与断言的备用名，避免抢占。见 tools/layout_assert.py。
+                    footerRow.layoutProbe(isLast ? "aiFooter" : "aiFooter_inactive")
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -915,105 +982,151 @@ struct AIBubbleView: View {
         }
     }
 
+    /// 只显示目标编号的引用 chip：`→ 13`。
+    ///
+    /// 原来画的是 `→ 第 13 页`，一个 chip 就要吃掉近三分之一行宽；面板下限 300pt 时，
+    /// 三个 chip 加四个动作按钮挤不下（用户附图里「重新生成」「添加到批注」被压成两行）。
+    /// 现在 chip 里只留编号，完整语义（「跳回第 13 页」）放进 `.help`——
+    /// 悬停才需要它，而挤不挤是每一帧都要承担的代价。多条引用最多显示 3 个。
     private var citationRow: some View {
         HStack(spacing: DS.Space.xs) {
-            ForEach(Array(bubble.citations.prefix(4).enumerated()), id: \.offset) { _, locator in
+            ForEach(Array(bubble.citations.prefix(3).enumerated()), id: \.offset) { _, locator in
                 Button {
                     bridge.goTo?(locator)
                 } label: {
-                    HStack(spacing: 3) {
-                        Image(systemName: "arrow.turn.down.right")
-                            .font(DS.Typo.ui(size: 7.5, weight: .bold))
-                        Text(locator.displayLabel())
-                            .font(DS.Typo.ui(size: 10, weight: .medium))
-                    }
-                    .foregroundStyle(DS.Palette.accent)
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 3)
-                    .background(
-                        Capsule().fill(DS.Palette.accentSoft)
-                    )
+                    Text("→ \(citationNumber(locator))")
+                        .font(DS.Typo.ui(size: 10, weight: .medium))
+                        .lineLimit(1)
+                        .monospacedDigit()
+                        .foregroundStyle(DS.Palette.accent)
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 3)
+                        .background(Capsule().fill(DS.Palette.accentSoft))
+                        .contentShape(Capsule())
                 }
                 .buttonStyle(.plain)
-                .help("跳回原文")
+                .help(citationHelp(locator))
             }
         }
     }
 
-    /// 引用跳回 + 「复制」「添加到批注」+「记住这条」。
+    /// chip 上的编号（PDF 用页码、EPUB 用章节号，都是 1-based）。
+    private func citationNumber(_ locator: DocumentLocator) -> Int {
+        switch locator {
+        case .pdf(let page, _):        return page + 1
+        case .epub(let chapter, _, _): return chapter + 1
+        }
+    }
+
+    /// chip 的 tooltip：完整语义放这里，不放 chip 上（省宽度）。
+    private func citationHelp(_ locator: DocumentLocator) -> String {
+        switch locator {
+        case .pdf:  return "跳回第 \(citationNumber(locator)) 页"
+        case .epub: return "跳到第 \(citationNumber(locator)) 章"
+        }
+    }
+
+    /// 引用跳回 + 三个动作 +「记住」。
     ///
-    /// 「记住」放在这里而不是让用户去设置页手打：真正值得记的往往是模型刚刚
-    /// 说清楚的那句结论，离开这一屏就想不起来要记了。
-    /// 「复制」「添加到批注」紧挨页码放：用户认可一条回答后，最常用的两个动作
-    /// 就是把它拿走（复制）和把它留在书上（批注），这两件事不该要求选中文字再操作。
+    /// **整行左对齐的紧凑组，行尾自然留白**：从前的写法是
+    /// `HStack { citationRow; Spacer(minLength: 0); 按钮们 }`，把按钮顶到最右——
+    /// 结果引用编号与动作之间被拉开一大段空白，窄面板下按钮反而先被压缩换行。
+    /// 现在不放假 Spacer，动作紧挨引用，整行 `.fixedSize()` 防压缩，
+    /// 标签一律 `.lineLimit(1)`：宁可整行溢出被裁（有探针盯着），也不换行成两排。
+    ///
+    /// 「重新生成」是付费动作，所以**不给键盘快捷键**（项目里的既定约定：
+    /// 一次误触的代价是一次真实的模型调用）。它也不在流式输出期间出现——
+    /// 那时要的是「停止」，两个按钮同时亮着容易按错。
     private var footerRow: some View {
-        HStack(spacing: DS.Space.xs) {
+        HStack(spacing: 6) {
             citationRow
 
-            Spacer(minLength: 0)
-
-            // 「重新生成」是付费动作，所以**不给键盘快捷键**（项目里的既定约定：
-            // 一次误触的代价是一次真实的模型调用）。它也不在流式输出期间出现——
-            // 那时要的是「停止」，两个按钮同时亮着容易按错。
             if isLast && bubble.role == .assistant && !isStreaming {
-                Button {
-                    chat.rerunLast()
-                } label: {
-                    miniChip(
-                        icon: "arrow.clockwise",
-                        text: "重新生成",
-                        tint: chat.canRerunLast ? DS.Palette.accent : DS.Palette.textTertiary
-                    )
-                }
-                .buttonStyle(.plain)
-                .disabled(!chat.canRerunLast)
-                .help("用当前的模型 / 模板 / Agent 重新生成这条回答（不会改动你的提问）")
-            }
-
-            Button {
-                copyAnswer()
-            } label: {
-                miniChip(
-                    icon: justCopied ? "checkmark" : "doc.on.doc",
-                    text: justCopied ? "已复制" : "复制",
-                    tint: justCopied ? DS.Palette.success : DS.Palette.textTertiary
+                iconAction(
+                    systemImage: "arrow.clockwise",
+                    help: "用当前的模型 / 模板 / Agent 重新生成这条回答，是一次付费请求",
+                    tint: chat.canRerunLast ? DS.Palette.accent : DS.Palette.textTertiary,
+                    disabled: !chat.canRerunLast,
+                    action: { chat.rerunLast() }
                 )
             }
-            .buttonStyle(.plain)
-            .help("复制这条回答的完整内容")
 
-            Button {
-                annotateAnswer()
-            } label: {
-                miniChip(
-                    icon: justAnnotated ? "checkmark" : "square.and.pencil",
-                    text: justAnnotated ? "已批注" : "添加到批注",
-                    tint: justAnnotated ? DS.Palette.success : DS.Palette.textTertiary
-                )
-            }
-            .buttonStyle(.plain)
-            .help("把这条回答写进当前页（PDF）或当前章（EPUB）的批注")
+            iconAction(
+                systemImage: justCopied ? "checkmark" : "doc.on.doc",
+                help: justCopied ? "已复制" : "复制这条回答的完整内容",
+                tint: justCopied ? DS.Palette.success : DS.Palette.textTertiary,
+                action: copyAnswer
+            )
 
-            Button {
-                rememberAnswer()
-            } label: {
-                HStack(spacing: 3) {
-                    Image(systemName: justRemembered ? "checkmark" : "bookmark")
-                        .font(DS.Typo.ui(size: 9, weight: .semibold))
-                    Text(justRemembered ? "已记住" : "记住")
-                        .font(DS.Typo.ui(size: 10, weight: .medium))
-                }
-                .foregroundStyle(justRemembered ? DS.Palette.success : DS.Palette.textTertiary)
-                .padding(.horizontal, 6)
-                .padding(.vertical, 3)
-                .background(
-                    Capsule().fill(justRemembered ? DS.Palette.success.opacity(0.14) : DS.Palette.surfaceRaised)
-                )
-                .contentShape(Capsule())
-            }
-            .buttonStyle(.plain)
-            .help("把这条回答记入跨会话记忆，之后在任何文档里提问都会带上它")
+            iconAction(
+                systemImage: justAnnotated ? "checkmark" : "square.and.pencil",
+                help: justAnnotated ? "已添加到批注" : "把这条回答写进当前页（PDF）或当前章（EPUB）的批注",
+                tint: justAnnotated ? DS.Palette.success : DS.Palette.textTertiary,
+                action: annotateAnswer
+            )
+
+            rememberAnswerButton
         }
+        // 防压缩：不让 HStack 为了塞进可用宽度而把图标 / 文字挤成省略号。
+        // 溢出与否由 `aiFooter` 探针盯着（见 tools/layout_assert.py）。
+        .fixedSize(horizontal: true, vertical: false)
+        .padding(.top, 2)
+    }
+
+    /// 纯图标动作按钮（重新生成 / 复制 / 添加到批注）。
+    ///
+    /// 从「图标 + 文字」的小 chip 收成一枚图标：footer 一行要同时放引用编号、
+    /// 三个动作和「记住」，带文字一定会被压成两行或省略号——而用户的直接诉求
+    /// 就是「精简，只保留 `13`、`记住` 这类简洁表达」。动作语义交给 `.help`。
+    private func iconAction(
+        systemImage: String,
+        help: String,
+        tint: Color,
+        disabled: Bool = false,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            Image(systemName: systemImage)
+                .font(DS.Typo.ui(size: 11, weight: .medium))
+                .foregroundStyle(tint)
+                .frame(width: 20, height: 20)
+                .background(
+                    RoundedRectangle(cornerRadius: DS.Radius.s, style: .continuous)
+                        .fill(DS.Palette.surfaceRaised)
+                )
+                .contentShape(RoundedRectangle(cornerRadius: DS.Radius.s, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .disabled(disabled)
+        .help(help)
+    }
+
+    /// 「记住」按钮：图标 `bookmark` + 文字「记住」（用户点名保留这个词）。
+    ///
+    /// 与其余三个纯图标动作放在一起时，它是唯一带文字的——因为「记住」这个动作
+    /// 不像复制 / 批注那样有公认的图标语义，只放一个书签图标没人猜得出是它。
+    /// 「已记住」态也保持单行。
+    private var rememberAnswerButton: some View {
+        Button {
+            rememberAnswer()
+        } label: {
+            HStack(spacing: 3) {
+                Image(systemName: justRemembered ? "checkmark" : "bookmark")
+                    .font(DS.Typo.ui(size: 10, weight: .semibold))
+                Text(justRemembered ? "已记住" : "记住")
+                    .font(DS.Typo.ui(size: 10, weight: .medium))
+                    .lineLimit(1)
+            }
+            .foregroundStyle(justRemembered ? DS.Palette.success : DS.Palette.textTertiary)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 3)
+            .background(
+                Capsule().fill(justRemembered ? DS.Palette.success.opacity(0.14) : DS.Palette.surfaceRaised)
+            )
+            .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .help("把这条回答记入跨会话记忆，之后在任何文档里提问都会带上它")
     }
 
     private func rememberAnswer() {
@@ -1025,23 +1138,6 @@ struct AIBubbleView: View {
             locatorLabel: bubble.citations.first?.displayLabel() ?? ""
         )
         withAnimation(DS.Motion.quick) { justRemembered = true }
-    }
-
-    /// 「复制」「添加到批注」共用的迷你按钮外形，与「记住」保持同一种视觉语言。
-    private func miniChip(icon: String, text: String, tint: Color) -> some View {
-        HStack(spacing: 3) {
-            Image(systemName: icon)
-                .font(DS.Typo.ui(size: 9, weight: .semibold))
-            Text(text)
-                .font(DS.Typo.ui(size: 10, weight: .medium))
-        }
-        .foregroundStyle(tint)
-        .padding(.horizontal, 6)
-        .padding(.vertical, 3)
-        .background(
-            Capsule().fill(tint == DS.Palette.textTertiary ? DS.Palette.surfaceRaised : tint.opacity(0.14))
-        )
-        .contentShape(Capsule())
     }
 
     private func copyAnswer() {
