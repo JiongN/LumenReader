@@ -936,9 +936,24 @@ struct AIBubbleView: View {
             ZStack {
                 Circle()
                     .fill(bubble.failed ? DS.Palette.danger.opacity(0.14) : DS.Palette.accentSoft)
-                Image(systemName: bubble.failed ? "exclamationmark.triangle.fill" : "sparkles")
-                    .font(DS.Typo.ui(size: 9.5, weight: .semibold))
-                    .foregroundStyle(bubble.failed ? DS.Palette.danger : DS.Palette.accent)
+                // 补一条描边：`accentSoft` 只有 10% 不透明度，落在面板底色上
+                // 边界几乎不可见——用户看到的是「一枚浮在空白里的小图标」，
+                // 看不出它是有容器的头像。描边用 separator，不加颜色。
+                Circle()
+                    .strokeBorder(
+                        bubble.failed ? DS.Palette.danger.opacity(0.35) : DS.Palette.separator,
+                        lineWidth: 0.5
+                    )
+                if bubble.failed {
+                    // 失败态讲的是「出错了」，不是「这是 AI」，保留三角警示。
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(DS.Typo.ui(size: 9.5, weight: .semibold))
+                        .foregroundStyle(DS.Palette.danger)
+                } else {
+                    // 用环点字形，不用 sparkles：品牌规则禁用 sparkle 表达 AI
+                    // 语义（四芒星已是全行业万能符），且它在 9.5pt 下糊成一团。
+                    AIIcon(size: 11, color: DS.Palette.accent)
+                }
             }
             .frame(width: 20, height: 20)
             .padding(.top, 1)

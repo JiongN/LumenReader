@@ -16,13 +16,21 @@ struct OrbitRing: Shape {
         var p = Path()
         let r = min(rect.width, rect.height) / 2
         let c = CGPoint(x: rect.midX, y: rect.midY)
-        // 缺口开在右上 45°：从 280° 逆时针绕到 350°，留下 70° 的呼吸口
+        // 环体是「缺口以外的那 290°」，不是「缺口那 70°」。
+        //
+        // 一度写成 `startAngle: 280, endAngle: 350, clockwise: false`——
+        // 逆时针从 280° 走到 350° 只扫过 70°，画出来的正是**缺口本身**，
+        // 于是整个字形塌成右下角一小截弧加一个点：实测墨迹只有 4pt 见方，
+        // 而同栏的 SF Symbol 是 14pt。用户看到的是「一枚浮在空白里的小碎片」。
+        //
+        // 缺口开在右上 45°（280°…350°，居中在 315°）时，环要走另一边：
+        // 从 280° 顺时钟递减到 350°，正好 290°。
         p.addArc(
             center: c,
             radius: r,
             startAngle: .degrees(280),
             endAngle: .degrees(350),
-            clockwise: false
+            clockwise: true
         )
         return p
     }
@@ -39,13 +47,21 @@ struct AIIcon: View {
         ZStack {
             OrbitRing()
                 .stroke(
-                    style: StrokeStyle(lineWidth: size * 0.053, lineCap: .round)
+                    // 下限 1pt 是为了 1x（非高分屏）：size*0.07 在 14pt 下只有 0.98pt，
+                    // 2x 屏上是 2 个物理像素、看着还好，1x 屏上就落在半像素上被
+                    // 抗锯齿摊成一条灰雾。宁可细，也别在普通屏上糊掉。
+                    style: StrokeStyle(lineWidth: max(1, size * 0.07), lineCap: .round)
                 )
-                .frame(width: size * 0.566, height: size * 0.566)
+                // 0.78 而不是 0.566：14.5pt 的 SF Symbol 墨迹外框约 14pt、环类字形
+                // 直径约 11pt；环体 0.78·size 才与同栏邻居等重。此前 0.566 的方案
+                // 即使环画对了也只有 8.5pt，看起来像比别人小一号。
+                .frame(width: size * 0.78, height: size * 0.78)
 
             Circle()
-                .frame(width: size * 0.205, height: size * 0.205)
-                .offset(x: size * 0.20, y: -size * 0.20)
+                .frame(width: size * 0.26, height: size * 0.26)
+                // 点落在缺口里：距圆心 = 环半径（0.39·size），方向右上 45°
+                // （0.276 = 0.39 / √2，保证点正落在环线上而不是飘在环外）
+                .offset(x: size * 0.276, y: -size * 0.276)
         }
         .frame(width: size, height: size)
         .foregroundStyle(color)
