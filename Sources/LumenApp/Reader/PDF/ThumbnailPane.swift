@@ -63,9 +63,21 @@ struct ThumbnailPane: View {
                         }
                         .padding(.vertical, DS.Space.m)
                     }
-                    .onChange(of: bridge.currentUnitIndex) { _, newValue in
-                        withAnimation(DS.Motion.quick) {
-                            proxy.scrollTo(newValue, anchor: .center)
+                    .onChange(of: bridge.currentUnitIndex) { oldIndex, newIndex in
+                        // 联动的节奏要分两档：
+                        // 连续滚动时每页都会触发一次 here，若每跳都带动画，
+                        // 快速滑过 50 页就是 50 段互相打断的弹簧——侧栏看起来在「追」；
+                        // 跳幅大（快速滚动 / 跳页）时直接吸附，只有小幅翻页才用动画。
+                        if abs(newIndex - oldIndex) > 2 {
+                            var transaction = Transaction()
+                            transaction.disablesAnimations = true
+                            withTransaction(transaction) {
+                                proxy.scrollTo(newIndex, anchor: .center)
+                            }
+                        } else {
+                            withAnimation(DS.Motion.quick) {
+                                proxy.scrollTo(newIndex, anchor: .center)
+                            }
                         }
                     }
                 }
@@ -154,40 +166,11 @@ private struct ThumbnailRow: View {
 
     var body: some View {
         Button(action: onTap) {
-            VStack(spacing: 5) {
-                ZStack {
-                    RoundedRectangle(cornerRadius: DS.Radius.s, style: .continuous)
-                        .fill(DS.Palette.surfaceRaised)
+            VStack(spacing: 6) {
+                thumbnail
+                    .frame(width: width, height: width * aspect)
 
-                    if let image {
-                        Image(nsImage: image)
-                            .resizable()
-                            .aspectRatio(contentMode: .fit)
-                            .padding(2)
-                            // 淡入而不是硬闪：缩略图是逐个渲染出来的，
-                            // 硬切会让侧栏看起来一直在"跳"。
-                            .transition(.opacity)
-                    } else {
-                        skeleton
-                    }
-                }
-                .frame(width: width, height: width * aspect)
-                .overlay(
-                    RoundedRectangle(cornerRadius: DS.Radius.s, style: .continuous)
-                        .strokeBorder(borderColor, lineWidth: isCurrent ? 2 : 0.5)
-                )
-                .shadow(
-                    color: .black.opacity(isCurrent ? 0.16 : 0.08),
-                    radius: isCurrent ? 6 : 3,
-                    y: 1
-                )
-                // 当前页微微放大：一像素级的差别，但扫视时能立刻定位到读到哪儿
-                .scaleEffect(isCurrent ? 1.015 : 1)
-
-                Text("\(index + 1)")
-                    .font(DS.Typo.ui(size: 10, weight: isCurrent ? .semibold : .regular))
-                    .foregroundStyle(isCurrent ? DS.Palette.accent : DS.Palette.textTertiary)
-                    .monospacedDigit()
+                pageNumber
             }
             .frame(maxWidth: .infinity)
             .contentShape(Rectangle())
@@ -201,6 +184,70 @@ private struct ThumbnailRow: View {
         // 两者用同一个 value 会让翻页时的选中反馈被图片加载拖慢。
         .animation(DS.Motion.content, value: image == nil)
         .animation(DS.Motion.quick, value: isCurrent)
+    }
+
+    // MARK: 缩略图主体
+
+    /// 当前页 = 强调色描边 + 外圈柔光晕。光是描边只有 2pt，
+    /// 在整栏缩略图里扫过去容易漏；一圈低透明度的光晕把「选中」
+    /// 从一条线升格为一块面，视野边缘也能定位到。
+    private var thumbnail: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: DS.Radius.s, style: .continuous)
+                .fill(DS.Palette.surfaceRaised)
+
+            if let image {
+                Image(nsImage: image)
+                    .resizable()
+                    .aspectRatio(contentMode: .fit)
+                    .padding(2)
+                    // 淡入而不是硬闪：缩略图是逐个渲染出来的，
+                    // 硬切会让侧栏看起来一直在"跳"。
+                    .transition(.opacity)
+            } else {
+                skeleton
+            }
+        }
+        .overlay(
+            RoundedRectangle(cornerRadius: DS.Radius.s, style: .continuous)
+                .strokeBorder(borderColor, lineWidth: isCurrent ? 2 : 0.5)
+        )
+        .background(
+            RoundedRectangle(cornerRadius: DS.Radius.m, style: .continuous)
+                .fill(isCurrent ? DS.Palette.accentSoft : .clear)
+                .padding(-5)
+        )
+        .shadow(
+            color: .black.opacity(isCurrent ? 0.16 : 0.08),
+            radius: isCurrent ? 6 : 3,
+            y: 1
+        )
+    }
+
+    // MARK: 页码
+
+    /// 当前页的页码升级为实心徽章（参考用户提供的联动样式截图）：
+    /// 数字落在胶囊里，是滚动联动时唯一需要「看清」的信息；
+    /// 其余页保持裸数字，视觉重量全部让给当前页。
+    @ViewBuilder
+    private var pageNumber: some View {
+        if isCurrent {
+            Text("\(index + 1)")
+                .font(DS.Typo.ui(size: 10, weight: .semibold))
+                .foregroundStyle(Color.white)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 2.5)
+                .background(
+                    Capsule().fill(DS.Palette.accent)
+                )
+                .monospacedDigit()
+                .transition(.scale(scale: 0.8).combined(with: .opacity))
+        } else {
+            Text("\(index + 1)")
+                .font(DS.Typo.ui(size: 10, weight: .regular))
+                .foregroundStyle(isHovering ? DS.Palette.textSecondary : DS.Palette.textTertiary)
+                .monospacedDigit()
+        }
     }
 
     private var borderColor: Color {

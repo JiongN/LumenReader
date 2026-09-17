@@ -55,24 +55,38 @@ struct LeftRail: View {
         return Button {
             onSelect(tab)
         } label: {
-            Image(systemName: tab.systemImage)
-                .font(DS.Typo.ui(size: 14.5, weight: isActive ? .semibold : .regular))
-                .foregroundStyle(iconColor(isActive: isActive, isHovered: isHovered))
-                .frame(width: 36, height: 34)
-                .contentShape(RoundedRectangle(cornerRadius: DS.Radius.m, style: .continuous))
-                .background(
-                    RoundedRectangle(cornerRadius: DS.Radius.m, style: .continuous)
-                        .fill(background(isActive: isActive, isHovered: isHovered))
-                )
-                // 悬停时给图标栏加一条极淡的描边：图标本身在材质背景上对比度有限，
-                // 只靠底色变化在深色主题下几乎看不出来。
-                .overlay(
-                    RoundedRectangle(cornerRadius: DS.Radius.m, style: .continuous)
-                        .strokeBorder(
-                            isActive ? DS.Palette.accent.opacity(0.9) : DS.Palette.separator,
-                            lineWidth: isHovered && !isActive ? 0.5 : 0
-                        )
-                )
+            Group {
+                // AI 页签用统一的环点字形（AIIcon v3：细线圆环 + 缺口处一枚实心点），
+                // 与工具栏上的 AI 图标同形——
+                // SF Symbols 的 sparkles.rectangle.stack 在 14pt 下细节糊成一团。
+                if tab == .smartOutline {
+                    // 环点字形与工具栏同形；颜色跟随页签状态，
+                    // 不再单独调透明度（单色字形的层级靠颜色本身表达）
+                    AIIcon(
+                        size: 14,
+                        color: isActive
+                            ? DS.Palette.accent
+                            : (isHovered ? DS.Palette.textPrimary : DS.Palette.textSecondary)
+                    )
+                } else {
+                    Image(systemName: tab.systemImage)
+                        .font(DS.Typo.ui(size: 14.5, weight: isActive ? .semibold : .regular))
+                }
+            }
+            .foregroundStyle(iconColor(isActive: isActive, isHovered: isHovered))
+            .frame(width: 36, height: 34)
+            .contentShape(RoundedRectangle(cornerRadius: DS.Radius.m, style: .continuous))
+            .background(
+                RoundedRectangle(cornerRadius: DS.Radius.m, style: .continuous)
+                    .fill(background(isActive: isActive, isHovered: isHovered))
+            )
+            // 悬停时给一条极淡的描边：图标本身在材质背景上对比度有限，
+            // 只靠底色变化在深色主题下几乎看不出来。
+            // 选中态不再描边——选中已经由胶囊底色表达，双重强调反而重。
+            .overlay(
+                RoundedRectangle(cornerRadius: DS.Radius.m, style: .continuous)
+                    .strokeBorder(DS.Palette.separator, lineWidth: isHovered && !isActive ? 0.5 : 0)
+            )
         }
         .buttonStyle(.plain)
         // 悬停提示写全称（「AI 智能目录」而不是「智能」）：图标栏里没有文字标签，
@@ -92,13 +106,16 @@ struct LeftRail: View {
     }
 
     private func iconColor(isActive: Bool, isHovered: Bool) -> Color {
-        if isActive { return Color.white }
+        if isActive { return DS.Palette.accent }
         if isHovered { return DS.Palette.textPrimary }
         return DS.Palette.textSecondary
     }
 
+    /// 选中态改为**淡强调色胶囊 + 强调色图标**（Apple 侧栏惯例），
+    /// 不再是实心强调色块 + 白图标——后者在整条图标栏里是一块
+    /// 持续存在的「高亮补丁」，阅读时会一直拉扯注意力。
     private func background(isActive: Bool, isHovered: Bool) -> Color {
-        if isActive { return DS.Palette.accent }
+        if isActive { return DS.Palette.accentSoft }
         if isHovered { return DS.Palette.surfaceRaised.opacity(0.7) }
         return .clear
     }

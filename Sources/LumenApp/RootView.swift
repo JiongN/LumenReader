@@ -219,7 +219,11 @@ struct RootView: View {
             Button {
                 withAnimation(DS.Motion.panel) { state.isAIPanelVisible.toggle() }
             } label: {
-                Image(systemName: state.isAIPanelVisible ? "sparkles.rectangle.stack.fill" : "sparkles.rectangle.stack")
+                // 统一的环点 AI 字形（AIIcon v3：细线圆环 + 缺口处一枚实心点）；
+                // 面板展开时全亮，收起时降透明度表示「未激活」，
+                // 代替原来的 fill / outline 两枚不同形 symbol。
+                AIIcon(size: 15)
+                    .opacity(state.isAIPanelVisible ? 1 : 0.5)
             }
             .help(helpText(state.isAIPanelVisible ? "隐藏 AI 面板" : "显示 AI 面板", for: .toggleAIPanel))
             .disabled(state.document == nil)

@@ -68,9 +68,9 @@ struct AIPanelView: View {
 
     private var header: some View {
         HStack(spacing: DS.Space.s) {
-            Image(systemName: "sparkles")
-                .font(DS.Typo.ui(size: 12.5, weight: .semibold))
-                .foregroundStyle(DS.Palette.accent)
+            // v3 图标迭代：头部不再放 AI 图标。面板里是 chips + 对话，
+            // 再摆一个标记属于重复自我介绍；工具栏与侧栏页签上的
+            // 环点字形已经足够指认这里是 AI。
 
             // 这里原来还有一行「AI 阅读」文字标题，现在让位给切换器。
             // 面板默认宽 380pt、用户还能调到 300pt，标题 + 两个 chip 会把整行挤爆；

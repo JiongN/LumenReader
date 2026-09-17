@@ -65,15 +65,17 @@ public enum DS {
     // MARK: 语义色
 
     public enum Palette {
-        /// 主强调色：克制的靛蓝，接近 Apple 的 accent 但不抢阅读内容的注意力
+        /// 主强调色：低饱和的蓝紫灰。整个界面唯一的「彩色」来源，
+        /// 饱和度刻意压低（对比旧版 #2F5BEA）——阅读器里，UI 的任何颜色
+        /// 都是内容的竞争对手，强调色只需要「指路」，不需要「抢眼」。
         public static let accent = Color.dual(
-            light: NSColor(hex: 0x2F5BEA),
-            dark: NSColor(hex: 0x6B8CFF)
+            light: NSColor(hex: 0x56639F),
+            dark: NSColor(hex: 0x8E9BD1)
         )
 
         public static let accentSoft = Color.dual(
-            light: NSColor(hex: 0x2F5BEA, alpha: 0.10),
-            dark: NSColor(hex: 0x6B8CFF, alpha: 0.16)
+            light: NSColor(hex: 0x56639F, alpha: 0.10),
+            dark: NSColor(hex: 0x8E9BD1, alpha: 0.16)
         )
 
         /// 正文主色（UI 区域，不是阅读区）
