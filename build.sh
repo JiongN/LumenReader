@@ -64,10 +64,16 @@ done
 
 printf 'APPL????' > "$BUNDLE/Contents/PkgInfo"
 
-echo "▶︎ 签名（ad-hoc）…"
-# Apple Silicon 上未签名的二进制无法执行，ad-hoc 签名即可本地运行。
-# 没有 Developer ID 证书，所以不做公证，首次打开可能需要右键 → 打开。
-codesign --force --sign - --timestamp=none "$BUNDLE" >/dev/null 2>&1
+echo "▶︎ 签名…"
+# 优先用自签证书「Lumen Dev」（2026-09-17 建于 login 钥匙串，有效期 10 年）。
+# 它的身份稳定——重编译后 CDHash 不再变化，钥匙串 ACL 不会把新构建当成陌生
+# 程序，API 密钥的授权框从此只在切换身份那一次出现。
+# 证书若被删（换机器/重装钥匙串），自动退回 ad-hoc，构建不会失败。
+SIGN_IDENTITY="-"
+if security find-identity -v -p codesigning 2>/dev/null | grep -q '"Lumen Dev"'; then
+    SIGN_IDENTITY="Lumen Dev"
+fi
+codesign --force --sign "$SIGN_IDENTITY" --timestamp=none "$BUNDLE" >/dev/null 2>&1
 
 SIZE="$(du -sh "$BUNDLE" | cut -f1)"
 echo "✅ 构建完成：${BUNDLE}（${SIZE}）"
