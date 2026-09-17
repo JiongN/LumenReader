@@ -1,0 +1,12 @@
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg">
+  <!-- Lumen 主图标 · 浅色（纸底墨线）· 母版
+       语言：一页纸底 + 细线摊开的书 + 一点实心的光。
+       无渐变、无高光、无投影——颜色只有纸与墨两种。 -->
+  <rect x="100" y="100" width="824" height="824" rx="185" fill="#F5F2EB"/>
+  <rect x="102.5" y="102.5" width="819" height="819" rx="182.5" fill="none" stroke="#2F3540" stroke-opacity="0.05" stroke-width="3"/>
+  <g stroke="#2F3540" stroke-width="16" fill="none" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M 512 620 C 458 578 372 566 312 580 L 312 690 C 372 676 458 688 512 730"/>
+    <path d="M 512 620 C 566 578 652 566 712 580 L 712 690 C 652 676 566 688 512 730"/>
+  </g>
+  <circle cx="512" cy="462" r="27" fill="#2F3540"/>
+</svg>

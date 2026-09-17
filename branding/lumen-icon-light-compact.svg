@@ -1,0 +1,12 @@
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg">
+  <!-- Lumen 主图标 · 小尺寸紧凑版（≤64px 用）
+       小尺寸下 16/1024 的线宽不足 1px，会细成灰雾。
+       紧凑版：线宽加倍、光点加大、弧线拉直一档——
+       代价是牺牲一点「书页的弧度」，换来 16px 依然清晰可辨。 -->
+  <rect x="100" y="100" width="824" height="824" rx="185" fill="#F5F2EB"/>
+  <g stroke="#2F3540" stroke-width="30" fill="none" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M 512 616 C 462 582 384 572 320 584 L 320 682 C 384 670 462 680 512 714"/>
+    <path d="M 512 616 C 562 582 640 572 704 584 L 704 682 C 640 670 562 680 512 714"/>
+  </g>
+  <circle cx="512" cy="466" r="40" fill="#2F3540"/>
+</svg>

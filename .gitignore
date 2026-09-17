@@ -8,6 +8,12 @@
 # 换台机器或换个系统版本都得重新签，入库没有意义。
 dist/
 
+# tools/make_icons.swift 的产物目录：图标 PNG 与 icon.iconset。
+# 注意和 .build/ 区分——这个 build/ 不是 SwiftPM 的中间目录，
+# 而是我们自己脚本写出来的中间 PNG；能由 `swift tools/make_icons.swift`
+# 完整重建，和 dist/ 同理不入库。
+build/
+
 # 注意：Package.resolved **不**忽略。
 # 依赖锁定文件是构建可复现性的一部分，应当入库。
 
