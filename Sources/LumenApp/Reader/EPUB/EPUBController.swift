@@ -22,6 +22,13 @@ final class EPUBController: NSObject, ObservableObject {
     /// (chapterIndex, chapterCount, 章节内进度 0…1, 是否已到章末)
     var onProgress: ((Int, Int, Double, Bool) -> Void)?
 
+    /// 取某一章的批注（id + 引文）。由阅读视图提供（批注存在应用数据目录里）。
+    ///
+    /// 做成闭包而不是让 Controller 持有存储：Controller 只管渲染，
+    /// 「批注存在哪里」是视图层的事——PDF 那边批注写在文件里，两条路径的存储完全不同，
+    /// 在这里注入一个「取批注」的口子，两边就能共用同一套 JS。
+    var highlightsProvider: ((_ chapterIndex: Int) -> [(id: String, quote: String)])?
+
     private var theme: ReadingTheme
     private var reader: ReaderSettings
 
@@ -104,7 +111,94 @@ final class EPUBController: NSObject, ObservableObject {
               if (el) { el.scrollIntoView({ block: 'start' }); return true; }
               return false;
             },
-            scrollTop: function () { window.scrollTo(0, 0); }
+            scrollTop: function () { window.scrollTo(0, 0); },
+            // ── 批注高亮 ──
+            //
+            // 用「引文匹配」而不是字符偏移：EPUB 重新排版（换字号、换字体会重排）
+            // 之后偏移量全部失效，而引文还在。找不到引文就不画——宁可少一个高亮，
+            // 也不要在错误的位置划出一条线，那会让读者以为批注挂错了地方。
+            highlight: function (id, quote) {
+              if (!quote) { return false; }
+              var norm = function (s) { return (s || '').replace(/\\s+/g, ' ').trim(); };
+              var target = norm(quote);
+              if (!target) { return false; }
+
+              var walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, {
+                acceptNode: function (node) {
+                  if (!node.nodeValue || !node.nodeValue.trim()) { return NodeFilter.FILTER_REJECT; }
+                  var parent = node.parentElement;
+                  if (!parent) { return NodeFilter.FILTER_REJECT; }
+                  var tag = parent.tagName;
+                  if (tag === 'SCRIPT' || tag === 'STYLE' || tag === 'MARK') { return NodeFilter.FILTER_REJECT; }
+                  return NodeFilter.FILTER_ACCEPT;
+                }
+              });
+
+              var nodes = [];
+              var combined = '';
+              var node;
+              while ((node = walker.nextNode())) {
+                var piece = norm(node.nodeValue);
+                if (!piece) { continue; }
+                var start = combined.length;
+                combined += (combined ? ' ' : '') + piece;
+                nodes.push({ node: node, start: start, end: combined.length });
+              }
+              var index = combined.indexOf(target);
+              if (index < 0) { return false; }
+              var endIndex = index + target.length;
+
+              // 收集被覆盖的文本节点，逐个包进 <mark>
+              for (var i = 0; i < nodes.length; i++) {
+                var entry = nodes[i];
+                if (entry.end <= index || entry.start >= endIndex) { continue; }
+                var raw = entry.node.nodeValue;
+                var offsetInNode = Math.max(0, index - entry.start);
+                var lengthInNode = Math.min(raw.length, endIndex - entry.start) - offsetInNode;
+                if (lengthInNode <= 0) { continue; }
+                try {
+                  var range = document.createRange();
+                  range.setStart(entry.node, offsetInNode);
+                  range.setEnd(entry.node, offsetInNode + lengthInNode);
+                  var mark = document.createElement('mark');
+                  mark.className = 'lumen-hl';
+                  mark.setAttribute('data-lumen-id', id);
+                  range.surroundContents(mark);
+                } catch (e) {
+                  // surroundContents 遇到跨元素边界会抛错；跳过这一段，其余照画
+                }
+              }
+              return true;
+            },
+            unhighlight: function (id) {
+              var marks = document.querySelectorAll('mark.lumen-hl[data-lumen-id="' + id + '"]');
+              for (var i = marks.length - 1; i >= 0; i--) {
+                var mark = marks[i];
+                var parent = mark.parentNode;
+                if (!parent) { continue; }
+                while (mark.firstChild) { parent.insertBefore(mark.firstChild, mark); }
+                parent.removeChild(mark);
+                parent.normalize();
+              }
+              return true;
+            },
+            clearHighlights: function () {
+              var marks = document.querySelectorAll('mark.lumen-hl');
+              for (var i = marks.length - 1; i >= 0; i--) {
+                var mark = marks[i];
+                var parent = mark.parentNode;
+                if (!parent) { continue; }
+                while (mark.firstChild) { parent.insertBefore(mark.firstChild, mark); }
+                parent.removeChild(mark);
+                parent.normalize();
+              }
+              return true;
+            },
+            scrollToHighlight: function (id) {
+              var mark = document.querySelector('mark.lumen-hl[data-lumen-id="' + id + '"]');
+              if (mark) { mark.scrollIntoView({ block: 'center' }); return true; }
+              return false;
+            }
           };
           window.addEventListener('scroll', function () {
             if (window.__lumenRaf) { return; }
@@ -175,6 +269,17 @@ final class EPUBController: NSObject, ObservableObject {
     html, body {
       background: var(--lm-bg) !important;
       background-color: var(--lm-bg) !important;
+    }
+    /* 批注高亮。半透明黄底 + 极淡的下划线：既要一眼看见，又不能把正文压得看不清。
+       用 background 而不是 border，是因为高亮常跨行，border 会在行间断开。 */
+    mark.lumen-hl {
+      background: rgba(255, 214, 64, 0.42) !important;
+      color: inherit !important;
+      border-radius: 2px;
+      padding: 0 1px;
+    }
+    html.lumen-dark mark.lumen-hl {
+      background: rgba(255, 214, 64, 0.28) !important;
     }
     html.lumen-dark body, html.lumen-dark p, html.lumen-dark div, html.lumen-dark span,
     html.lumen-dark li, html.lumen-dark td, html.lumen-dark th, html.lumen-dark dd,
@@ -285,6 +390,33 @@ extension EPUBController {
             }
         }
     }
+
+    // MARK: - 批注高亮
+
+    var currentChapter: Int { currentChapterIndex }
+
+    /// 把当前章的批注画出来。
+    ///
+    /// 章节重新加载后必须重画——DOM 是新的一份，之前包裹的 `<mark>` 已经不存在了。
+    /// 所以 `didFinish` 里也要调它（见导航代理）。
+    func applyHighlights() {
+        guard let provider = highlightsProvider else { return }
+        for item in provider(currentChapterIndex) {
+            let id = Self.jsString(item.id)
+            let quote = Self.jsString(item.quote)
+            webView.evaluateJavaScript("window.__lumen && window.__lumen.highlight(\(id), \(quote));")
+        }
+    }
+
+    /// 移除一条高亮。删除批注时立刻反映到页面上，不必重新加载章节。
+    func removeHighlight(id: String) {
+        webView.evaluateJavaScript("window.__lumen && window.__lumen.unhighlight(\(Self.jsString(id)));")
+    }
+
+    /// 滚到某条高亮的位置。已经在本章才会命中；跨章由调用方先跳章。
+    func scrollToHighlight(id: String) {
+        webView.evaluateJavaScript("window.__lumen && window.__lumen.scrollToHighlight(\(Self.jsString(id)));")
+    }
 }
 
 // MARK: - WKNavigationDelegate
@@ -300,6 +432,8 @@ extension EPUBController: WKNavigationDelegate {
         } else {
             webView.evaluateJavaScript("window.__lumen && window.__lumen.scrollTop();")
         }
+        // 章节是新 DOM，批注高亮必须重画一遍（上一次包裹的 <mark> 已随旧文档消失）
+        applyHighlights()
         onProgress?(currentChapterIndex, chapterCount, 0, false)
     }
 

@@ -68,7 +68,7 @@ extension LumenAction {
         case .copyFullText:
             return hasDocument && state.bridge.extractFullText != nil
         case .toggleSidebar, .toggleAIPanel, .toggleImmersive, .showOutline,
-             .showSmartOutline, .showSearch:
+             .showSmartOutline, .showSearch, .showAnnotations:
             return hasDocument
         case .showThumbnails:
             return state.document?.kind == .pdf
@@ -104,6 +104,7 @@ extension LumenAction {
         case .showOutline:    state.revealSidebar(tab: .outline)
         case .showSmartOutline: state.revealSidebar(tab: .smartOutline)
         case .showSearch:     state.revealSidebar(tab: .search)
+        case .showAnnotations: state.revealSidebar(tab: .annotations)
         case .showThumbnails: state.revealSidebar(tab: .thumbnails)
 
         case .fontIncrease: state.stepFontScale(by: 0.1)

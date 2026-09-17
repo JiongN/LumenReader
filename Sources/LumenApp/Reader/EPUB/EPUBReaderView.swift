@@ -178,6 +178,16 @@ struct EPUBReaderView: View {
         bridge.goToNextUnit = { [weak controller] in controller?.goToNextChapter() }
         bridge.goToPreviousUnit = { [weak controller] in controller?.goToPreviousChapter() }
 
+        wireAnnotations(controller: controller)
+
+        bridge.revealSearchHit = { [weak controller] index in
+            // EPUB 的搜索命中定位就是跳到那一章：章内高亮要等 DOM 就绪，
+            // 而 `go(to:)` 是异步导航，这里没有可靠的「加载完成」回执，
+            // 硬塞一个延迟去画高亮只会时灵时不灵。跳到位、由读者自己找那一段。
+            guard index >= 0, index < bridge.searchResults.count else { return }
+            controller?.go(to: bridge.searchResults[index].locator)
+        }
+
         bridge.currentContextProvider = { [weak controller] in
             guard controller != nil else { return ("", .epub(chapterIndex: 0, anchor: "", charOffset: 0)) }
             let chapter = bridge.currentUnitIndex
@@ -188,6 +198,73 @@ struct EPUBReaderView: View {
             return (text, .epub(chapterIndex: chapter, anchor: "", charOffset: 0))
         }
     }
+    // MARK: - 批注
+
+    /// EPUB 批注接的是应用数据目录，不是文件——EPUB 是一份压缩包，
+    /// 往里写批注要么改坏原文件、要么读者换阅读器就看不见，都不如本机存一份如实。
+    /// 代价要说清楚：换设备/换阅读器看不到这些批注（界面上的说明也这么写）。
+    private func wireAnnotations(controller: EPUBController) {
+        let store = AnnotationStore(documentPath: document.url.standardizedFileURL.path)
+
+        // 章节加载完成时按章取批注，交给 JS 画高亮
+        controller.highlightsProvider = { chapter in
+            store.items
+                .filter { $0.locator.chapterIndex == chapter && $0.hasHighlight && !$0.quote.isEmpty }
+                .map { (id: $0.id, quote: $0.quote) }
+        }
+
+        bridge.addHighlight = { note in
+            guard let selection = bridge.selection, selection.isUsable else {
+                state.showToast("先在正文里划选一段文字", isError: true)
+                return
+            }
+            let item = AnnotationItem(
+                id: UUID().uuidString,
+                locator: selection.locator,
+                quote: selection.text,
+                note: note,
+                hasHighlight: true,
+                createdAt: Date()
+            )
+            guard store.add(item) else {
+                state.showToast("这一处已经标注过了")
+                return
+            }
+            controller.applyHighlights()
+            bridge.annotationRevision += 1
+            state.showToast(note.isEmpty ? "已高亮" : "已加入批注")
+        }
+
+        bridge.addPageNote = { chapterIndex, anchorText, body in
+            let locator = DocumentLocator.epub(chapterIndex: chapterIndex, anchor: "", charOffset: 0)
+            let trimmedAnchor = anchorText.trimmingCharacters(in: .whitespacesAndNewlines)
+            let item = AnnotationItem(
+                id: UUID().uuidString,
+                locator: locator,
+                quote: trimmedAnchor,
+                note: body,
+                hasHighlight: !trimmedAnchor.isEmpty,
+                createdAt: Date()
+            )
+            guard store.add(item) else {
+                state.showToast("这一章已有相同的批注")
+                return
+            }
+            if chapterIndex == controller.currentChapter { controller.applyHighlights() }
+            bridge.annotationRevision += 1
+            state.showToast("已加入第 \(chapterIndex + 1) 章的批注")
+        }
+
+        bridge.annotationsProvider = { store.items }
+
+        bridge.deleteAnnotation = { id in
+            guard store.remove(id: id) else { return false }
+            controller.removeHighlight(id: id)
+            bridge.annotationRevision += 1
+            return true
+        }
+    }
+
     /// 接通「整本书级别」的两条数据通道：检索与切片。
     /// EPUB 天然以章为单位，直接复用章节边界，不需要像 PDF 那样人为分块。
     private func wireDocumentWideProviders(source: EPUBDocumentSource) {

@@ -144,6 +144,15 @@ enum LaunchOptions {
     /// 这条通道把两边都打出来，一眼能看出是哪一半没做。
     static var themeReport: Bool { flag("--theme-report") }
 
+    /// 批注自检：在 /tmp 的副本上跑一遍「高亮 → 页面批注 → 写盘 → 重开核对 → 删除」。
+    static var annotateReport: Bool { flag("--annotate-report") }
+
+    /// 搜索高亮自检：验证页面高亮出现、定位准确、且**不会**被写进用户的书。
+    static var searchReport: Bool { flag("--search-report") }
+
+    /// Agent 自检：打印预设、拼装后的系统提示、以及一次真实的联网文献检索结果。
+    static var agentReport: Bool { flag("--agent-report") }
+
     /// 自检钥匙串访问成本：`--keychain-report 1`。
     ///
     /// 起因是「每重编译一次就疯狂弹钥匙串授权框」。这件事只有一条通道能验：

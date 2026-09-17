@@ -197,6 +197,14 @@ struct PDFReaderView: View {
         if LaunchOptions.autoOCR {
             await runOCR()
         }
+
+        // 自检通道：批注写盘 / 搜索高亮（都在 /tmp 副本上做，不碰用户文件）
+        if LaunchOptions.annotateReport {
+            await AnnotationAudit.runDocumentAudit(sourceURL: document.url)
+        }
+        if LaunchOptions.searchReport {
+            await AnnotationAudit.runSearchAudit(sourceURL: document.url)
+        }
     }
 
     private static func metadata(of pdf: PDFDocument) -> DocumentMetadata {
@@ -327,9 +335,48 @@ struct PDFReaderView: View {
                 bridge.isSearching = false
             }
         }
-        bridge.clearSearch = {
+        bridge.clearSearch = { [weak controller] in
+            controller?.clearSearchHighlights()
             bridge.searchResults = []
             bridge.searchQuery = ""
+        }
+        // 点搜索结果：定位到具体命中并选中，而不是只翻到那一页
+        bridge.revealSearchHit = { [weak controller] index in
+            controller?.revealSearchHit(index)
+        }
+
+        // MARK: 批注（写回原 PDF 文件）
+
+        // 只报告失败：成功那句由具体动作来说（「已写入原 PDF 文件」比
+        // 「已保存到原文件」更能说明改的是哪本书），两条 toast 叠着看只会打架。
+        controller.onFileSaved = { [weak state] ok, message in
+            if !ok { state?.showToast(message, isError: true) }
+        }
+        bridge.addHighlight = { [weak controller] note in
+            guard let controller else { return }
+            if !controller.addHighlight(fromCurrentSelection: note) {
+                state.showToast("高亮失败：选区已失效或该页没有文本层", isError: true)
+            } else {
+                // 让侧栏批注列表（若开着）立刻刷新
+                bridge.annotationRevision += 1
+            }
+        }
+        bridge.addPageNote = { [weak controller] pageIndex, anchorText, body in
+            guard let controller else { return }
+            if !controller.addNote(pageIndex: pageIndex, anchorText: anchorText, body: body) {
+                state.showToast("添加批注失败", isError: true)
+            } else {
+                bridge.annotationRevision += 1
+                state.showToast("已写入原 PDF 文件")
+            }
+        }
+        bridge.annotationsProvider = { [weak controller] in
+            await controller?.annotationsList() ?? []
+        }
+        bridge.deleteAnnotation = { [weak controller] id in
+            let ok = controller?.deleteAnnotation(id: id) ?? false
+            if ok { bridge.annotationRevision += 1 }
+            return ok
         }
 
         bridge.currentContextProvider = { [weak controller] in

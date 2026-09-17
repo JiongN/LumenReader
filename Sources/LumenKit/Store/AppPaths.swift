@@ -67,6 +67,12 @@ public enum AppPaths {
         documentDirectory(forPath: path).appendingPathComponent("smart-outline.json")
     }
 
+    /// EPUB 批注存储。PDF 批注写在 PDF 文件自身，不走这里——
+    /// 但侧栏的批注列表两种格式共用同一套交互。
+    public static func annotationsFile(forPath path: String) -> URL {
+        documentDirectory(forPath: path).appendingPathComponent("annotations.json")
+    }
+
     /// EPUB 解包后的临时目录（缓存在磁盘，可随时清理）。
     public static func epubExtractionDirectory(forPath path: String) -> URL {
         ensureDirectory(

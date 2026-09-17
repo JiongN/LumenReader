@@ -39,6 +39,11 @@ final class ReaderBridge: ObservableObject {
     /// 侧栏当前页签
     @Published var sidebarTab: SidebarTab = .outline
 
+    /// 批注变更计数。侧栏批注页签按它刷新——
+    /// 批注存在两种后端里（PDF 写文件、EPUB 存数据目录），没有统一的「已变更」事件，
+    /// 用一个自增计数把两条路径汇合成同一种刷新信号。
+    @Published var annotationRevision: Int = 0
+
     /// 当前文档是否为「没有文本层」的扫描件。为真时阅读区会给 OCR 入口。
     @Published var isScannedDocument: Bool = false
     /// 正在识别的页号（nil 表示空闲），供状态条显示进度
@@ -88,6 +93,21 @@ final class ReaderBridge: ObservableObject {
     /// 同步接口会逼调用方在主线程上干等。`progress` 每页回调一次，驱动进度卡片。
     var extractFullText: ((_ allowOCR: Bool, _ progress: (TextExtractionProgress) -> Void) async -> DocumentTextReport)?
 
+    // MARK: 批注（外壳 → 视图）
+
+    /// 高亮当前选区并写盘。note 为批注正文，可为空串。
+    /// PDF 直接写回原文件；EPUB 存应用数据目录并在页面里画高亮。
+    var addHighlight: ((_ note: String) -> Void)?
+    /// 把一段文字作为批注插到指定页 / 章。AI「添加到批注」用：
+    /// 给得出锚文本时优先锚到原文，否则退为页面便签 / 章节批注。
+    var addPageNote: ((_ unitIndex: Int, _ anchorText: String, _ body: String) -> Void)?
+    /// 全书批注清单（异步：PDF 要逐页扫）。
+    var annotationsProvider: (() async -> [AnnotationItem])?
+    /// 删除一条批注。
+    var deleteAnnotation: ((_ id: String) async -> Bool)?
+    /// 定位第 index 条搜索命中（滚动到具体位置并选中，比跳页更准）。
+    var revealSearchHit: ((_ index: Int) -> Void)?
+
     // MARK: 便利
 
     /// 载入新文档时重置全部状态，避免上一本的残留串台。
@@ -124,6 +144,11 @@ final class ReaderBridge: ObservableObject {
         extractFullText = nil
         unitSnippetProvider = nil
         sectionTextProvider = nil
+        addHighlight = nil
+        addPageNote = nil
+        annotationsProvider = nil
+        deleteAnnotation = nil
+        revealSearchHit = nil
     }
 }
 
@@ -131,6 +156,7 @@ enum SidebarTab: String, CaseIterable, Identifiable {
     case outline
     case smartOutline
     case search
+    case annotations
     case thumbnails
 
     var id: String { rawValue }
@@ -142,6 +168,7 @@ enum SidebarTab: String, CaseIterable, Identifiable {
         // 缩成两个字 + 星芒图标，指向仍然是唯一的（页内空状态写的是全称）。
         case .smartOutline: return "智能"
         case .search:       return "搜索"
+        case .annotations:  return "批注"
         case .thumbnails:   return "页面"
         }
     }
@@ -152,6 +179,7 @@ enum SidebarTab: String, CaseIterable, Identifiable {
         case .outline:      return "文档目录"
         case .smartOutline: return "AI 智能目录"
         case .search:       return "全文搜索"
+        case .annotations:  return "批注与高亮"
         case .thumbnails:   return "页面缩略图"
         }
     }
@@ -161,6 +189,7 @@ enum SidebarTab: String, CaseIterable, Identifiable {
         case .outline:      return "list.bullet.indent"
         case .smartOutline: return "sparkles.rectangle.stack"
         case .search:       return "magnifyingglass"
+        case .annotations:  return "square.and.pencil"
         case .thumbnails:   return "square.grid.2x2"
         }
     }

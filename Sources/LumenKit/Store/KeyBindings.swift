@@ -188,6 +188,7 @@ public enum LumenAction: String, CaseIterable, Codable, Sendable, Identifiable {
     case showOutline
     case showSmartOutline
     case showSearch
+    case showAnnotations
     case showThumbnails
 
     // 排版
@@ -216,6 +217,7 @@ public enum LumenAction: String, CaseIterable, Codable, Sendable, Identifiable {
         case .showOutline:    return "侧栏：目录"
         case .showSmartOutline: return "侧栏：AI 智能目录"
         case .showSearch:     return "侧栏：搜索"
+        case .showAnnotations: return "侧栏：批注"
         case .showThumbnails: return "侧栏：页面缩略图"
         case .fontIncrease:   return "放大字号"
         case .fontDecrease:   return "缩小字号"
@@ -229,7 +231,8 @@ public enum LumenAction: String, CaseIterable, Codable, Sendable, Identifiable {
             return .document
         case .toggleSidebar, .toggleAIPanel, .toggleImmersive, .commandPalette:
             return .panel
-        case .nextUnit, .previousUnit, .goToPage, .showOutline, .showSmartOutline, .showSearch, .showThumbnails:
+        case .nextUnit, .previousUnit, .goToPage, .showOutline, .showSmartOutline, .showSearch,
+             .showAnnotations, .showThumbnails:
             return .reading
         case .fontIncrease, .fontDecrease:
             return .typography
@@ -266,7 +269,11 @@ public enum LumenAction: String, CaseIterable, Codable, Sendable, Identifiable {
         case .showOutline:    return KeyCombo(key: "1", modifiers: [.command])
         case .showSmartOutline: return KeyCombo(key: "2", modifiers: [.command])
         case .showSearch:     return KeyCombo(key: "3", modifiers: [.command])
-        case .showThumbnails: return KeyCombo(key: "4", modifiers: [.command])
+        // 侧栏页签按**界面里的排列顺序**编号，插入「批注」后页面顺延到 ⌘5。
+        // 编号跟着顺序走而不是给新页签找个空位：⌘4 落在第 4 个页签上，
+        // 用户按一次就能建立映射；乱序编号要求他先记住哪一号对应哪一个。
+        case .showAnnotations: return KeyCombo(key: "4", modifiers: [.command])
+        case .showThumbnails: return KeyCombo(key: "5", modifiers: [.command])
 
         case .fontIncrease:   return KeyCombo(key: "+", modifiers: [.command])
         case .fontDecrease:   return KeyCombo(key: "-", modifiers: [.command])
@@ -293,6 +300,7 @@ public enum LumenAction: String, CaseIterable, Codable, Sendable, Identifiable {
         case .showOutline:    return "outline toc 目录"
         case .showSmartOutline: return "smart outline ai 智能目录 结构 章节"
         case .showSearch:     return "search find 搜索 查找"
+        case .showAnnotations: return "annotation highlight note 批注 高亮 笔记"
         case .showThumbnails: return "thumbnail page grid 缩略图 页面"
         case .fontIncrease:   return "font bigger 字号 放大"
         case .fontDecrease:   return "font smaller 字号 缩小"

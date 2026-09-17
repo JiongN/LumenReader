@@ -193,6 +193,7 @@ struct LumenCommands: Commands {
             item(.showOutline)
             item(.showSmartOutline)
             item(.showSearch)
+            item(.showAnnotations)
             item(.showThumbnails)
 
             Divider()

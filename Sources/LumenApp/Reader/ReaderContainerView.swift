@@ -493,13 +493,49 @@ struct SelectionActionBar: View {
     @EnvironmentObject private var bridge: ReaderBridge
     @EnvironmentObject private var state: AppState
 
+    /// 批注输入态。做成同一条浮层里就地展开，而不是弹出一个 sheet：
+    /// 手刚划完词，视线在原文上，弹窗把注意力拉走会让「批的是哪句」这件事变模糊。
+    @State private var isNoteEditing = false
+    @State private var noteText = ""
+    @FocusState private var isNoteFocused: Bool
+
     var body: some View {
+        VStack(spacing: DS.Space.xs) {
+            if isNoteEditing { noteEditor }
+            buttonRow
+        }
+        .background(
+            Capsule(style: .continuous)
+                .fill(.thickMaterial)
+                .overlay(Capsule(style: .continuous).strokeBorder(DS.Palette.separator, lineWidth: 0.5))
+        )
+        .shadow(color: .black.opacity(0.18), radius: 16, y: 6)
+        // 展开输入条时不重排布局：整条浮层本来就锚在底部中央
+        .animation(DS.Motion.reveal, value: isNoteEditing)
+    }
+
+    private var buttonRow: some View {
         HStack(spacing: DS.Space.xs) {
-            Label("\(selection.text.count) 字", systemImage: "text.quote")
-                .font(DS.Typo.caption)
-                .foregroundStyle(DS.Palette.textTertiary)
-                .padding(.horizontal, DS.Space.s)
-                .labelStyle(.titleAndIcon)
+            if isNoteEditing {
+                Label("批注", systemImage: "square.and.pencil")
+                    .font(DS.Typo.caption)
+                    .foregroundStyle(DS.Palette.accent)
+                    .padding(.horizontal, DS.Space.s)
+                    .labelStyle(.titleAndIcon)
+            } else {
+                Label("\(selection.text.count) 字", systemImage: "text.quote")
+                    .font(DS.Typo.caption)
+                    .foregroundStyle(DS.Palette.textTertiary)
+                    .padding(.horizontal, DS.Space.s)
+                    .labelStyle(.titleAndIcon)
+
+                Divider().frame(height: 16)
+
+                // 高亮与批注是「留在书里」的动作，排在 AI 三件套之前：
+                // 划词的瞬间最清楚自己要标哪句，等 AI 回答完再回来找就找不着了。
+                actionButton("高亮", icon: "highlighter") { highlight() }
+                actionButton("批注", icon: "square.and.pencil") { startNote() }
+            }
 
             Divider().frame(height: 16)
 
@@ -509,12 +545,51 @@ struct SelectionActionBar: View {
         }
         .padding(.horizontal, DS.Space.s)
         .padding(.vertical, DS.Space.xs)
-        .background(
-            Capsule(style: .continuous)
-                .fill(.thickMaterial)
-                .overlay(Capsule(style: .continuous).strokeBorder(DS.Palette.separator, lineWidth: 0.5))
-        )
-        .shadow(color: .black.opacity(0.18), radius: 16, y: 6)
+    }
+
+    private var noteEditor: some View {
+        HStack(spacing: DS.Space.xs) {
+            TextField("写下你的批注…", text: $noteText, axis: .vertical)
+                .textFieldStyle(.plain)
+                .font(DS.Typo.body)
+                .lineLimit(2...4)
+                .frame(minWidth: 260, maxWidth: 360)
+                .focused($isNoteFocused)
+                .onSubmit(commitNote)
+
+            Button("取消") {
+                withAnimation { isNoteEditing = false }
+                noteText = ""
+            }
+            .controlSize(.small)
+            .buttonStyle(.plain)
+            .foregroundStyle(DS.Palette.textTertiary)
+
+            Button("保存批注") { commitNote() }
+                .controlSize(.small)
+                .buttonStyle(.borderedProminent)
+                .tint(DS.Palette.accent)
+        }
+        .padding(.horizontal, DS.Space.s)
+        .padding(.vertical, DS.Space.xs)
+    }
+
+    // MARK: 动作
+
+    private func highlight() {
+        bridge.addHighlight?("")
+    }
+
+    private func startNote() {
+        noteText = ""
+        withAnimation { isNoteEditing = true }
+        isNoteFocused = true
+    }
+
+    private func commitNote() {
+        bridge.addHighlight?(noteText)
+        noteText = ""
+        withAnimation { isNoteEditing = false }
     }
 
     /// 投递请求前先把 AI 面板露出来——否则用户点了按钮却看不到任何反馈。

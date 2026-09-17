@@ -10,8 +10,8 @@ struct SidebarColumn: View {
 
     private var availableTabs: [SidebarTab] {
         state.document?.kind == .pdf
-            ? [.outline, .smartOutline, .search, .thumbnails]
-            : [.outline, .smartOutline, .search]
+            ? [.outline, .smartOutline, .search, .annotations, .thumbnails]
+            : [.outline, .smartOutline, .search, .annotations]
     }
 
     var body: some View {
@@ -30,6 +30,7 @@ struct SidebarColumn: View {
                 case .outline:      outlineList.transition(.opacity)
                 case .smartOutline: SmartOutlinePane().transition(.opacity)
                 case .search:       searchPane.transition(.opacity)
+                case .annotations:  AnnotationsPane().transition(.opacity)
                 case .thumbnails:   ThumbnailPane().transition(.opacity)
                 }
             }
@@ -167,8 +168,10 @@ struct SidebarColumn: View {
                             .padding(.horizontal, DS.Space.s)
                             .padding(.top, DS.Space.s)
 
-                        ForEach(bridge.searchResults) { hit in
-                            SearchHitRow(hit: hit)
+                        // 带上序号：定位要按「第几条命中」走，才能滚到具体那一处，
+                        // 而不是只翻到那一页的页顶。
+                        ForEach(Array(bridge.searchResults.enumerated()), id: \.element.id) { index, hit in
+                            SearchHitRow(hit: hit, index: index)
                         }
                     }
                     .padding(.horizontal, DS.Space.xs)
@@ -239,13 +242,19 @@ struct OutlineRow: View {
 struct SearchHitRow: View {
 
     let hit: SearchHit
+    /// 命中在结果列表中的序号，用于把页面滚到具体那一处
+    var index: Int = 0
 
     @EnvironmentObject private var bridge: ReaderBridge
     @State private var isHovering = false
 
     var body: some View {
         Button {
-            bridge.goTo?(hit.locator)
+            if let reveal = bridge.revealSearchHit {
+                reveal(index)
+            } else {
+                bridge.goTo?(hit.locator)
+            }
         } label: {
             VStack(alignment: .leading, spacing: 3) {
                 Text(hit.locator.displayLabel())
@@ -269,6 +278,149 @@ struct SearchHitRow: View {
         .buttonStyle(.plain)
         .onHover { hovering in
             withAnimation(DS.Motion.hover) { isHovering = hovering }
+        }
+    }
+}
+
+// MARK: - 批注页签
+
+/// 全书批注与高亮的清单。
+///
+/// 数据来自 `bridge.annotationsProvider`，也就是**当前阅读视图的实现**：
+/// PDF 从原文件里的 PDFKit 批注扫出来，EPUB 从应用数据目录的 JSON 读出来。
+/// 这一层不关心后端是哪种——两种格式的批注在这里汇合成同一套「点进去看、删掉」的交互。
+struct AnnotationsPane: View {
+
+    @EnvironmentObject private var bridge: ReaderBridge
+    @EnvironmentObject private var state: AppState
+
+    @State private var items: [AnnotationItem] = []
+    @State private var isLoading = false
+
+    var body: some View {
+        Group {
+            if isLoading && items.isEmpty {
+                VStack(spacing: DS.Space.s) {
+                    ProgressView().controlSize(.small)
+                    Text("正在扫描批注…").font(DS.Typo.callout).foregroundStyle(DS.Palette.textTertiary)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if items.isEmpty {
+                SidebarEmptyState(
+                    icon: "square.and.pencil",
+                    title: "还没有批注",
+                    message: "在正文里划选文字，点浮条上的「高亮」或「批注」即可标记；"
+                        + "AI 回答下的「添加到批注」会把整条回复写进当前页。"
+                )
+            } else {
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: DS.Space.xs) {
+                        Text("\(items.count) 条批注")
+                            .font(DS.Typo.caption)
+                            .foregroundStyle(DS.Palette.textTertiary)
+                            .padding(.horizontal, DS.Space.s)
+                            .padding(.top, DS.Space.s)
+
+                        ForEach(items) { item in
+                            AnnotationRow(item: item) { deleted in
+                                guard deleted else { return }
+                                withAnimation(DS.Motion.quick) {
+                                    items.removeAll { $0.id == item.id }
+                                }
+                            }
+                        }
+                    }
+                    .padding(.horizontal, DS.Space.xs)
+                    .padding(.bottom, DS.Space.m)
+                }
+            }
+        }
+        // 按批注变更计数刷新：无论批注是写进 PDF 还是写进数据目录，
+        // 两条路径都会把 `annotationRevision` 加一。
+        .task(id: bridge.annotationRevision) { await reload() }
+    }
+
+    private func reload() async {
+        guard let provider = bridge.annotationsProvider else { items = []; return }
+        isLoading = true
+        items = await provider()
+        isLoading = false
+    }
+}
+
+struct AnnotationRow: View {
+
+    let item: AnnotationItem
+    let onDelete: (Bool) -> Void
+
+    @EnvironmentObject private var bridge: ReaderBridge
+    @State private var isHovering = false
+    @State private var isDeleting = false
+
+    var body: some View {
+        HStack(alignment: .top, spacing: DS.Space.xs) {
+            Button {
+                bridge.goTo?(item.locator)
+            } label: {
+                VStack(alignment: .leading, spacing: 3) {
+                    HStack(spacing: 4) {
+                        Image(systemName: item.hasHighlight ? "highlighter" : "note.text")
+                            .font(DS.Typo.ui(size: 9.5, weight: .semibold))
+                        Text(item.locator.displayLabel(chapterTitles: bridge.outline.map(\.title)))
+                            .font(DS.Typo.ui(size: 10, weight: .semibold))
+                    }
+                    .foregroundStyle(DS.Palette.accent)
+
+                    if !item.quote.isEmpty {
+                        Text(item.quote)
+                            .font(DS.Typo.ui(size: 11))
+                            .foregroundStyle(DS.Palette.textTertiary)
+                            .lineLimit(2)
+                            .multilineTextAlignment(.leading)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    Text(item.preview)
+                        .font(DS.Typo.ui(size: 11.5))
+                        .foregroundStyle(DS.Palette.textSecondary)
+                        .lineLimit(4)
+                        .multilineTextAlignment(.leading)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+
+            if isHovering {
+                Button {
+                    delete()
+                } label: {
+                    Image(systemName: isDeleting ? "clock" : "trash")
+                        .font(DS.Typo.ui(size: 10))
+                        .foregroundStyle(DS.Palette.danger)
+                }
+                .buttonStyle(.plain)
+                .disabled(isDeleting)
+                .help("删除这条批注")
+                .transition(.opacity)
+            }
+        }
+        .padding(DS.Space.s)
+        .background(
+            RoundedRectangle(cornerRadius: DS.Radius.s, style: .continuous)
+                .fill(isHovering ? DS.Palette.surfaceRaised : .clear)
+        )
+        .onHover { hovering in
+            withAnimation(DS.Motion.hover) { isHovering = hovering }
+        }
+    }
+
+    private func delete() {
+        isDeleting = true
+        Task {
+            let ok = await bridge.deleteAnnotation?(item.id) ?? false
+            isDeleting = false
+            onDelete(ok)
         }
     }
 }
