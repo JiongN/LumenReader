@@ -378,6 +378,26 @@ struct PDFReaderView: View {
             if ok { bridge.annotationRevision += 1 }
             return ok
         }
+        // 侧栏点一条批注 → 正文翻到那一处（滚到位置 + 划线类短暂选中原文）
+        bridge.revealAnnotation = { [weak controller] id in
+            _ = controller?.revealAnnotation(id: id)
+        }
+        // 批注面板里编辑正文 → 改批注 contents 并写回原文件
+        bridge.updateAnnotationNote = { [weak controller] id, note in
+            let ok = controller?.updateNote(id: id, body: note) ?? false
+            if ok { bridge.annotationRevision += 1 }
+            return ok
+        }
+        // 批注面板「新建」→ 当前页一条空白便签，返回条目让面板直接进入编辑
+        bridge.addNoteAtCurrentPosition = { [weak controller] in
+            controller?.addPageNoteAtCurrentPosition()
+        }
+        // 正文里点批注（PDFViewAnnotationHit）→ 侧栏聚焦对应行。
+        // 若批注页签不在前台，顺势切过去——用户点的是批注，就该看到批注清单。
+        controller.onAnnotationTapped = { [weak bridge, weak state] id in
+            bridge?.focusedAnnotationID = id
+            state?.revealSidebar(tab: .annotations)
+        }
 
         bridge.currentContextProvider = { [weak controller] in
             let page = controller?.currentPageIndex ?? 0

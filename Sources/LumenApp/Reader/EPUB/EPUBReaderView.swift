@@ -263,6 +263,47 @@ struct EPUBReaderView: View {
             bridge.annotationRevision += 1
             return true
         }
+
+        // 侧栏点一条批注 → 跳到所在章（若不在）再滚到高亮处。
+        // 跳章是异步导航，滚高亮要等新 DOM 画完，所以延迟交给章节加载后的重画节奏。
+        bridge.revealAnnotation = { [weak controller] id in
+            guard let controller,
+                  let item = store.items.first(where: { $0.id == id }) else { return }
+            if item.locator.chapterIndex != controller.currentChapter {
+                controller.go(to: item.locator)
+                Task { @MainActor in
+                    try? await Task.sleep(nanoseconds: 700_000_000)
+                    controller.scrollToHighlight(id: id)
+                }
+            } else {
+                controller.scrollToHighlight(id: id)
+            }
+        }
+        // 批注面板编辑正文 → 改数据目录里的批注（当前章的高亮立即重画）
+        bridge.updateAnnotationNote = { id, note in
+            guard store.updateNote(id: id, note: note) else { return false }
+            bridge.annotationRevision += 1
+            return true
+        }
+        // 批注面板「新建」→ 当前章一条空白批注，返回条目让面板直接进入编辑
+        bridge.addNoteAtCurrentPosition = {
+            let item = AnnotationItem(
+                id: UUID().uuidString,
+                locator: .epub(chapterIndex: controller.currentChapter, anchor: "", charOffset: 0),
+                quote: "",
+                note: "",
+                hasHighlight: false,
+                createdAt: Date()
+            )
+            guard store.add(item) else { return nil }
+            bridge.annotationRevision += 1
+            return item
+        }
+        // 正文里点高亮 → 侧栏聚焦对应行（与 PDF 侧的 onAnnotationTapped 对应）
+        controller.onHighlightTapped = { [weak bridge, weak state] id in
+            bridge?.focusedAnnotationID = id
+            state?.revealSidebar(tab: .annotations)
+        }
     }
 
     /// 接通「整本书级别」的两条数据通道：检索与切片。

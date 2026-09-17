@@ -256,7 +256,7 @@ struct SearchHitRow: View {
                 bridge.goTo?(hit.locator)
             }
         } label: {
-            VStack(alignment: .leading, spacing: 3) {
+            VStack(alignment: .leading, spacing: 5) {
                 Text(hit.locator.displayLabel())
                     .font(DS.Typo.ui(size: 10, weight: .semibold))
                     .foregroundStyle(DS.Palette.accent)
@@ -267,7 +267,8 @@ struct SearchHitRow: View {
                     .multilineTextAlignment(.leading)
                     .fixedSize(horizontal: false, vertical: true)
             }
-            .padding(DS.Space.s)
+            .padding(.horizontal, DS.Space.s)
+            .padding(.vertical, DS.Space.s)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(
                 RoundedRectangle(cornerRadius: DS.Radius.s, style: .continuous)
@@ -288,7 +289,8 @@ struct SearchHitRow: View {
 ///
 /// 数据来自 `bridge.annotationsProvider`，也就是**当前阅读视图的实现**：
 /// PDF 从原文件里的 PDFKit 批注扫出来，EPUB 从应用数据目录的 JSON 读出来。
-/// 这一层不关心后端是哪种——两种格式的批注在这里汇合成同一套「点进去看、删掉」的交互。
+/// 这一层不关心后端是哪种——两种格式的批注在这里汇合成同一套
+/// 「点进去定位、就地编辑、新建、删除」的交互。
 struct AnnotationsPane: View {
 
     @EnvironmentObject private var bridge: ReaderBridge
@@ -296,6 +298,9 @@ struct AnnotationsPane: View {
 
     @State private var items: [AnnotationItem] = []
     @State private var isLoading = false
+    /// 正在编辑的批注。编辑态由面板统一持有而不是各行自持：
+    /// 「新建」要直接进入编辑态，而新建的行要等刷新后才出现，行内的 @State 接不住。
+    @State private var editingID: String?
 
     var body: some View {
         Group {
@@ -306,38 +311,94 @@ struct AnnotationsPane: View {
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else if items.isEmpty {
-                SidebarEmptyState(
-                    icon: "square.and.pencil",
-                    title: "还没有批注",
-                    message: "在正文里划选文字，点浮条上的「高亮」或「批注」即可标记；"
-                        + "AI 回答下的「添加到批注」会把整条回复写进当前页。"
-                )
+                emptyState
             } else {
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: DS.Space.xs) {
-                        Text("\(items.count) 条批注")
-                            .font(DS.Typo.caption)
-                            .foregroundStyle(DS.Palette.textTertiary)
-                            .padding(.horizontal, DS.Space.s)
-                            .padding(.top, DS.Space.s)
-
-                        ForEach(items) { item in
-                            AnnotationRow(item: item) { deleted in
-                                guard deleted else { return }
-                                withAnimation(DS.Motion.quick) {
-                                    items.removeAll { $0.id == item.id }
-                                }
-                            }
-                        }
-                    }
-                    .padding(.horizontal, DS.Space.xs)
-                    .padding(.bottom, DS.Space.m)
-                }
+                list
             }
         }
         // 按批注变更计数刷新：无论批注是写进 PDF 还是写进数据目录，
         // 两条路径都会把 `annotationRevision` 加一。
         .task(id: bridge.annotationRevision) { await reload() }
+    }
+
+    // MARK: 头部（计数 + 新建）
+
+    private var header: some View {
+        HStack(spacing: DS.Space.xs) {
+            Text("\(items.count) 条批注")
+                .font(DS.Typo.caption)
+                .foregroundStyle(DS.Palette.textTertiary)
+            Spacer(minLength: 0)
+            Button {
+                addNote()
+            } label: {
+                Label("新建批注", systemImage: "plus")
+                    .font(DS.Typo.ui(size: 11, weight: .medium))
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(DS.Palette.accent)
+            .help("在当前阅读位置加一条空白批注")
+        }
+        .padding(.horizontal, DS.Space.s)
+        .padding(.vertical, DS.Space.s)
+    }
+
+    private var emptyState: some View {
+        VStack(spacing: 0) {
+            header
+            Divider().overlay(DS.Palette.separator)
+            SidebarEmptyState(
+                icon: "square.and.pencil",
+                title: "还没有批注",
+                message: "在正文里划选文字，点浮条上的「高亮」或「批注」即可标记；"
+                    + "点正文里的高亮，这里会定位到对应条目。"
+            )
+        }
+    }
+
+    private var list: some View {
+        VStack(spacing: 0) {
+            header
+            Divider().overlay(DS.Palette.separator)
+
+            ScrollViewReader { proxy in
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: DS.Space.xs) {
+                        ForEach(items) { item in
+                            AnnotationRow(
+                                item: item,
+                                isFocused: bridge.focusedAnnotationID == item.id,
+                                isInEditMode: editingID == item.id,
+                                onBeginEdit: { editingID = item.id },
+                                onEndEdit: { editingID = nil }
+                            )
+                            .id(item.id)
+                        }
+                    }
+                    .padding(.horizontal, DS.Space.xs)
+                    .padding(.top, DS.Space.xs)
+                    .padding(.bottom, DS.Space.m)
+                }
+                // 正文里点了批注（或刚新建）→ 列表滚到对应行，聚焦环指明是哪一条。
+                // 聚焦值会被 reset 清掉，滚动的发起只认「从 nil 变为有值」。
+                .onChange(of: bridge.focusedAnnotationID) { _, newValue in
+                    guard let id = newValue else { return }
+                    withAnimation(DS.Motion.quick) { proxy.scrollTo(id, anchor: .center) }
+                }
+            }
+        }
+    }
+
+    private func addNote() {
+        Task {
+            guard let item = await bridge.addNoteAtCurrentPosition?() else {
+                state.showToast("新建批注失败", isError: true)
+                return
+            }
+            await reload()
+            bridge.focusedAnnotationID = item.id
+            editingID = item.id
+        }
     }
 
     private func reload() async {
@@ -348,70 +409,145 @@ struct AnnotationsPane: View {
     }
 }
 
+// MARK: 批注行
+
+/// 一条批注的卡片。信息**纵向**排列：定位 → 引文 → 批注正文，每层独立一行——
+/// 批注面板经常被拖到 200pt 上下的宽度，横向塞两列会互相挤压成省略号；
+/// 纵向排列后每层都能占满整行宽，行数换可读性是划算的。
+/// 编辑、删除收进悬停出现的头部操作区，平时不占空间。
 struct AnnotationRow: View {
 
     let item: AnnotationItem
-    let onDelete: (Bool) -> Void
+    /// 正文刚点中这条批注（或刚新建）时的聚焦态：描边 + 淡色底
+    let isFocused: Bool
+    let isInEditMode: Bool
+    let onBeginEdit: () -> Void
+    let onEndEdit: () -> Void
 
     @EnvironmentObject private var bridge: ReaderBridge
     @State private var isHovering = false
     @State private var isDeleting = false
+    @State private var isSaving = false
+    @State private var draft: String = ""
 
     var body: some View {
-        HStack(alignment: .top, spacing: DS.Space.xs) {
-            Button {
-                bridge.goTo?(item.locator)
-            } label: {
-                VStack(alignment: .leading, spacing: 3) {
-                    HStack(spacing: 4) {
-                        Image(systemName: item.hasHighlight ? "highlighter" : "note.text")
-                            .font(DS.Typo.ui(size: 9.5, weight: .semibold))
-                        Text(item.locator.displayLabel(chapterTitles: bridge.outline.map(\.title)))
-                            .font(DS.Typo.ui(size: 10, weight: .semibold))
+        VStack(alignment: .leading, spacing: DS.Space.xs) {
+            // 定位行：类型图标 + 所在位置，悬停时右端浮出操作按钮
+            HStack(spacing: 4) {
+                Image(systemName: item.hasHighlight ? "highlighter" : "note.text")
+                    .font(DS.Typo.ui(size: 9.5, weight: .semibold))
+                Text(item.locator.displayLabel(chapterTitles: bridge.outline.map(\.title)))
+                    .font(DS.Typo.ui(size: 10, weight: .semibold))
+                    .lineLimit(1)
+                Spacer(minLength: 0)
+                if isHovering && !isInEditMode {
+                    HoverActionButton(systemImage: "pencil", help: "编辑批注", role: .normal) {
+                        draft = item.note
+                        onBeginEdit()
                     }
-                    .foregroundStyle(DS.Palette.accent)
-
-                    if !item.quote.isEmpty {
-                        Text(item.quote)
-                            .font(DS.Typo.ui(size: 11))
-                            .foregroundStyle(DS.Palette.textTertiary)
-                            .lineLimit(2)
-                            .multilineTextAlignment(.leading)
-                            .fixedSize(horizontal: false, vertical: true)
+                    HoverActionButton(systemImage: isDeleting ? "clock" : "trash",
+                                       help: "删除这条批注", role: .danger) {
+                        delete()
                     }
-                    Text(item.preview)
-                        .font(DS.Typo.ui(size: 11.5))
-                        .foregroundStyle(DS.Palette.textSecondary)
-                        .lineLimit(4)
-                        .multilineTextAlignment(.leading)
-                        .fixedSize(horizontal: false, vertical: true)
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .contentShape(Rectangle())
             }
-            .buttonStyle(.plain)
+            .foregroundStyle(DS.Palette.accent)
 
-            if isHovering {
-                Button {
-                    delete()
-                } label: {
-                    Image(systemName: isDeleting ? "clock" : "trash")
-                        .font(DS.Typo.ui(size: 10))
-                        .foregroundStyle(DS.Palette.danger)
+            // 引文（划了哪段原文）。有高亮的批注才可能有引文。
+            if !item.quote.isEmpty {
+                Text(item.quote)
+                    .font(DS.Typo.ui(size: 11))
+                    .foregroundStyle(DS.Palette.textTertiary)
+                    .lineLimit(3)
+                    .multilineTextAlignment(.leading)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            // 批注正文 / 编辑器
+            if isInEditMode {
+                VStack(alignment: .leading, spacing: DS.Space.xs) {
+                    TextEditor(text: $draft)
+                        .font(DS.Typo.ui(size: 11.5))
+                        .frame(minHeight: 56, maxHeight: 120)
+                        .scrollContentBackground(.hidden)
+                        .padding(4)
+                        .background(
+                            RoundedRectangle(cornerRadius: DS.Radius.xs, style: .continuous)
+                                .fill(DS.Palette.surfaceSunken)
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: DS.Radius.xs, style: .continuous)
+                                .strokeBorder(DS.Palette.separator, lineWidth: 0.5)
+                        )
+                    HStack(spacing: DS.Space.s) {
+                        Button {
+                            save()
+                        } label: {
+                            Text(isSaving ? "保存中…" : "保存")
+                                .font(DS.Typo.ui(size: 11, weight: .medium))
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 3)
+                                .background(
+                                    Capsule().fill(DS.Palette.accent)
+                                )
+                                .foregroundStyle(Color.white)
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(isSaving)
+
+                        Button("取消") { onEndEdit() }
+                            .font(DS.Typo.ui(size: 11))
+                            .buttonStyle(.plain)
+                            .foregroundStyle(DS.Palette.textSecondary)
+                    }
                 }
-                .buttonStyle(.plain)
-                .disabled(isDeleting)
-                .help("删除这条批注")
-                .transition(.opacity)
+            } else if !item.note.isEmpty {
+                Text(item.note)
+                    .font(DS.Typo.ui(size: 11.5))
+                    .foregroundStyle(DS.Palette.textSecondary)
+                    .lineLimit(6)
+                    .multilineTextAlignment(.leading)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
-        .padding(DS.Space.s)
+        .padding(.horizontal, DS.Space.s)
+        .padding(.vertical, DS.Space.s + 2)
+        .frame(maxWidth: .infinity, alignment: .leading)
         .background(
             RoundedRectangle(cornerRadius: DS.Radius.s, style: .continuous)
-                .fill(isHovering ? DS.Palette.surfaceRaised : .clear)
+                .fill(cardColor)
         )
+        .overlay(
+            RoundedRectangle(cornerRadius: DS.Radius.s, style: .continuous)
+                .strokeBorder(isFocused ? DS.Palette.accent.opacity(0.55) : .clear, lineWidth: 1)
+        )
+        .contentShape(RoundedRectangle(cornerRadius: DS.Radius.s, style: .continuous))
+        .onTapGesture {
+            // 点击卡片 = 正文里定位到这一处（翻页 + 滚到位置 + 划线类选中原文）
+            bridge.revealAnnotation?(item.id)
+        }
         .onHover { hovering in
             withAnimation(DS.Motion.hover) { isHovering = hovering }
+        }
+    }
+
+    private var cardColor: Color {
+        if isFocused { return DS.Palette.accentSoft }
+        if isHovering { return DS.Palette.surfaceRaised }
+        return .clear
+    }
+
+    private func save() {
+        isSaving = true
+        let note = draft
+        Task {
+            let ok = await bridge.updateAnnotationNote?(item.id, note) ?? false
+            isSaving = false
+            if ok {
+                onEndEdit()
+            } else {
+                // 保存失败时留在编辑态，草稿不丢——关掉等于让用户重打一遍
+            }
         }
     }
 
@@ -420,8 +556,39 @@ struct AnnotationRow: View {
         Task {
             let ok = await bridge.deleteAnnotation?(item.id) ?? false
             isDeleting = false
-            onDelete(ok)
+            if ok {
+                // 列表按 annotationRevision 刷新，这里只处理本地即时反馈
+            }
         }
+    }
+}
+
+/// 卡片头部的悬停小按钮。图标 + 语义色，悬停给反馈。
+private struct HoverActionButton: View {
+
+    let systemImage: String
+    let help: String
+    let role: Role
+    let action: () -> Void
+
+    enum Role { case normal, danger }
+
+    @State private var isHovered = false
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: systemImage)
+                .font(DS.Typo.ui(size: 10))
+                .foregroundStyle(role == .danger ? DS.Palette.danger : DS.Palette.textSecondary)
+                .padding(3)
+                .background(
+                    RoundedRectangle(cornerRadius: DS.Radius.xs, style: .continuous)
+                        .fill(isHovered ? DS.Palette.surfaceSunken : .clear)
+                )
+        }
+        .buttonStyle(.plain)
+        .help(help)
+        .onHover { isHovered = $0 }
     }
 }
 

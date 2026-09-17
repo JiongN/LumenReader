@@ -141,6 +141,42 @@ enum AnnotationAudit {
                   "\(afterWrite) → \(afterDelete)")
         }
 
+        // ⑥ 编辑（批注面板「编辑」走的路径）：改正文 → 重开文件，内容必须真的变了。
+        // 只看返回 true 不够——「函数返回 true 但没写盘」正是这条通道要防的失败形态。
+        // 注意用**删除后仍存在**的条目：listed.first 已经在 ⑤ 被删掉了
+        // （第一版就栽在这里——拿刚删掉的条目去编辑，失败被误判成「编辑坏了」）。
+        let remaining = await controller.annotationsList()
+        if let target = remaining.first {
+            let newBody = "自检批注：编辑后的正文 \(Int.random(in: 100...999))"
+            let updated = controller.updateNote(id: target.id, body: newBody)
+            check("编辑批注返回成功", updated)
+            if updated {
+                let bodyNow = annotationContents(in: copy, id: target.id)
+                check("编辑后的正文写进了文件", bodyNow == newBody,
+                      "文件里 = \(bodyNow.prefix(40).debugDescription)")
+            }
+        }
+
+        // ⑦ 定位（侧栏 → 正文方向）：点清单条目，当前页必须是批注所在的页
+        if let item = remaining.first(where: { $0.locator.pageIndex == targetPage }) ?? remaining.first {
+            _ = controller.revealAnnotation(id: item.id)
+            check("定位落到批注所在的页", controller.currentPageIndex == item.locator.pageIndex,
+                  "批注在第 \(item.locator.pageIndex + 1) 页，定位后在第 \(controller.currentPageIndex + 1) 页")
+        }
+
+        // ⑧ 新建（批注面板「新建」按钮的路径）：文件里多一条；且清单 id 无重复。
+        // id 去重这条有来历：跨行高亮的多条批注共享同一个 modificationDate，
+        // 只按时间戳生成 id 会撞车，ForEach 撞上重复 id 的行为是未定义的。
+        let beforeAdd = annotationCount(in: copy)
+        if controller.addPageNoteAtCurrentPosition() != nil {
+            let afterAdd = annotationCount(in: copy)
+            check("新建批注写进文件", afterAdd == beforeAdd + 1, "\(beforeAdd) → \(afterAdd)")
+            let all = await controller.annotationsList()
+            let unique = Set(all.map(\.id)).count
+            check("清单 id 无重复", unique == all.count,
+                  "\(all.count) 条 / \(unique) 个唯一 id")
+        }
+
         NSLog("[Lumen][annotate] 自检：通过 \(passed) 项，失败 \(failures.count) 项"
             + (failures.isEmpty ? " ✅" : " ❌ " + failures.joined(separator: "；")))
         NSLog("[Lumen][annotate] 自检产物保留在 \(copy.path)（可直接用预览打开核对）")
@@ -189,6 +225,21 @@ enum AnnotationAudit {
             }
         }
         return count
+    }
+
+    /// 按 id 从**磁盘文件**里取出批注正文（编辑断言用）。
+    private static func annotationContents(in url: URL, id: String) -> String {
+        guard let doc = PDFDocument(url: url) else { return "<打不开>" }
+        for index in 0..<doc.pageCount {
+            guard let page = doc.page(at: index) else { continue }
+            for annotation in page.annotations {
+                if annotation.lumenTypeName == "Popup" { continue }
+                if PDFController.entryID(annotation, pageIndex: index) == id {
+                    return annotation.contents ?? ""
+                }
+            }
+        }
+        return "<未找到>"
     }
 
     private static func firstSentence(in text: String) -> String {

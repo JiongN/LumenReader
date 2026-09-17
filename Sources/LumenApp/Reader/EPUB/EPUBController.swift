@@ -21,6 +21,9 @@ final class EPUBController: NSObject, ObservableObject {
     var onSelection: ((ReaderSelection?) -> Void)?
     /// (chapterIndex, chapterCount, 章节内进度 0…1, 是否已到章末)
     var onProgress: ((Int, Int, Double, Bool) -> Void)?
+    /// 点中正文里的批注高亮（<mark class="lumen-hl">）时回调，参数是批注条目 id。
+    /// 与 PDF 侧的 onAnnotationTapped 对应：两侧 → 侧栏聚焦。
+    var onHighlightTapped: ((String) -> Void)?
 
     /// 取某一章的批注（id + 引文）。由阅读视图提供（批注存在应用数据目录里）。
     ///
@@ -244,6 +247,17 @@ final class EPUBController: NSObject, ObservableObject {
           document.addEventListener('mouseup', function () { setTimeout(reportSelection, 0); });
           document.addEventListener('keyup', function () { setTimeout(reportSelection, 40); });
           document.addEventListener('touchend', function () { setTimeout(reportSelection, 0); });
+          // 点批注高亮 → 上报条目 id（正文 → 侧栏的联动方向）
+          document.addEventListener('click', function (e) {
+            var node = e.target;
+            if (!node || !node.closest) { return; }
+            var mark = node.closest('mark.lumen-hl');
+            if (!mark) { return; }
+            var id = mark.getAttribute('data-lumen-id');
+            if (id) {
+              window.webkit.messageHandlers.\(Self.messageHandlerName).postMessage({ type: 'highlight', id: id });
+            }
+          });
         })();
         """
 
@@ -515,6 +529,11 @@ extension EPUBController: WKScriptMessageHandler {
             let progress = body["progress"] as? Double ?? 0
             let atEnd = body["atEnd"] as? Bool ?? false
             onProgress?(currentChapterIndex, chapterCount, progress, atEnd)
+
+        case "highlight":
+            if let id = body["id"] as? String, !id.isEmpty {
+                onHighlightTapped?(id)
+            }
 
         default:
             break

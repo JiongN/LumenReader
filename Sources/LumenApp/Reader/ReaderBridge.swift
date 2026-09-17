@@ -44,6 +44,10 @@ final class ReaderBridge: ObservableObject {
     /// 用一个自增计数把两条路径汇合成同一种刷新信号。
     @Published var annotationRevision: Int = 0
 
+    /// 当前被「聚焦」的批注（正文里点中的、或刚新建的）。
+    /// 侧栏批注页签据此滚动到对应行并高亮——双向联动的侧栏一侧。
+    @Published var focusedAnnotationID: String?
+
     /// 当前文档是否为「没有文本层」的扫描件。为真时阅读区会给 OCR 入口。
     @Published var isScannedDocument: Bool = false
     /// 正在识别的页号（nil 表示空闲），供状态条显示进度
@@ -107,6 +111,13 @@ final class ReaderBridge: ObservableObject {
     var deleteAnnotation: ((_ id: String) async -> Bool)?
     /// 定位第 index 条搜索命中（滚动到具体位置并选中，比跳页更准）。
     var revealSearchHit: ((_ index: Int) -> Void)?
+    /// 定位一条批注：翻页 + 滚到位置 + 划线类短暂选中原文（侧栏 → 正文方向）。
+    var revealAnnotation: ((_ id: String) -> Void)?
+    /// 更新批注正文并落盘（批注面板的「编辑」保存走这里）。
+    var updateAnnotationNote: ((_ id: String, _ note: String) async -> Bool)?
+    /// 在当前位置新建一条空白批注，返回清单条目（面板的「新建」按钮用）。
+    /// 返回 nil 表示创建失败。
+    var addNoteAtCurrentPosition: (() async -> AnnotationItem?)?
 
     // MARK: 便利
 
@@ -149,6 +160,10 @@ final class ReaderBridge: ObservableObject {
         annotationsProvider = nil
         deleteAnnotation = nil
         revealSearchHit = nil
+        revealAnnotation = nil
+        updateAnnotationNote = nil
+        addNoteAtCurrentPosition = nil
+        focusedAnnotationID = nil
     }
 }
 

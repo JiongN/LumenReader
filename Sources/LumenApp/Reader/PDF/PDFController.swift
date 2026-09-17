@@ -33,6 +33,11 @@ final class PDFController: NSObject, ObservableObject {
     /// 写回原文件的结果回报（成功给 toast，失败给 toast + 错误文案）
     var onFileSaved: ((Bool, String) -> Void)?
 
+    /// 正文里点中批注时回调（参数与批注清单里的条目 id 一致）。
+    /// 链路：PDFViewAnnotationHit 系统通知 → 这里 → 视图层 → 侧栏批注页签聚焦该行。
+    /// 这是「双向联动」的正文 → 侧栏方向；侧栏 → 正文走 `revealAnnotation(id:)`。
+    var onAnnotationTapped: ((String) -> Void)?
+
     var onPositionChange: ((Int, Int) -> Void)?          // (pageIndex, pageCount)
     var onSelectionChange: ((ReaderSelection?) -> Void)?
     var onOutline: (([OutlineNode]) -> Void)?
@@ -85,6 +90,29 @@ final class PDFController: NSObject, ObservableObject {
 
     private func installObservers() {
         let center = NotificationCenter.default
+
+        // 点正文里的批注（高亮 / 便签图标）→ 回报条目 id，让侧栏聚焦对应行。
+        // PDFView 自己会把点击路由给批注并发出这个通知，不需要自己摆鼠标事件。
+        observers.append(center.addObserver(
+            forName: .PDFViewAnnotationHit, object: view, queue: .main
+        ) { [weak self] notification in
+            MainActor.assumeIsolated {
+                guard let self,
+                      let annotation = notification.userInfo?["PDFAnnotationHitKey"] as? PDFAnnotation
+                else { return }
+                // 搜索临时高亮与便签自动带的 Popup 影子不是批注条目，点了不响应
+                guard annotation.userName != Self.searchHighlightMarker,
+                      annotation.lumenTypeName != "Popup" else { return }
+                guard let doc = self.document else { return }
+                for index in 0..<doc.pageCount {
+                    guard let page = doc.page(at: index) else { continue }
+                    if page.annotations.contains(annotation) {
+                        self.onAnnotationTapped?(Self.entryID(annotation, pageIndex: index))
+                        break
+                    }
+                }
+            }
+        })
 
         observers.append(center.addObserver(
             forName: .PDFViewPageChanged, object: view, queue: .main
@@ -780,23 +808,13 @@ final class PDFController: NSObject, ObservableObject {
                     quote = annotation.contents ?? ""
                 }
 
-                let stamp = annotation.modificationDate
-                let id: String
-                if let stamp {
-                    id = "t\(stamp.timeIntervalSinceReferenceDate)"
-                } else {
-                    // 外来批注可能没有修改时间：用位置当 id（同一处不会有两个批注）
-                    let origin = annotation.bounds.origin
-                    id = "p\(index)-\(Int(origin.x))x\(Int(origin.y))"
-                }
-
                 items.append(AnnotationItem(
-                    id: id,
+                    id: Self.entryID(annotation, pageIndex: index),
                     locator: .pdf(page: index, charOffset: 0),
                     quote: String(quote.prefix(400)),
                     note: annotation.contents ?? "",
                     hasHighlight: isMarkup,
-                    createdAt: stamp ?? Date.distantPast
+                    createdAt: annotation.modificationDate ?? Date.distantPast
                 ))
             }
         }
@@ -819,12 +837,90 @@ final class PDFController: NSObject, ObservableObject {
         return false
     }
 
-    private static func matchesID(_ id: String, annotation: PDFAnnotation, pageIndex: Int) -> Bool {
-        if let stamp = annotation.modificationDate, id == "t\(stamp.timeIntervalSinceReferenceDate)" {
-            return true
-        }
+    /// 清单条目 id 的唯一来源（列表、删除、更新、定位共用）。
+    ///
+    /// 组成是「页号 + 原点 + 类型」，**刻意不含时间戳**：
+    /// - 跨行高亮会一口气画出多条共享同一个 `modificationDate` 的批注，
+    ///   只按时间戳生成 id 必然撞车，ForEach 撞上重复 id 的行为是未定义的；
+    /// - 更隐蔽的是精度：PDF 日期格式只存到**秒**，而内存里的 Date 带亚秒——
+    ///   写盘再重开 id 就变了，「编辑后从文件里核对」永远对不上账。
+    /// 同一页同一原点还同类型的两条批注实际上不存在，位置足以消歧；
+    /// 四舍五入而不是截断，避免存取之间的小数漂移恰好跨过整数边界。
+    /// nonisolated：自检的独立 PDFDocument 也要用同一套 id 对账。
+    nonisolated static func entryID(_ annotation: PDFAnnotation, pageIndex: Int) -> String {
         let origin = annotation.bounds.origin
-        return id == "p\(pageIndex)-\(Int(origin.x))x\(Int(origin.y))"
+        return "\(pageIndex)-\(Int(origin.x.rounded()))x\(Int(origin.y.rounded()))-\(annotation.lumenTypeName)"
+    }
+
+    private static func matchesID(_ id: String, annotation: PDFAnnotation, pageIndex: Int) -> Bool {
+        // Popup 是 Text 便签自动带的影子批注，不参与按 id 定位——
+        // 它常与正文批注共享时间戳，不排除的话「更新/删除」可能命中影子而不是本体
+        if annotation.lumenTypeName == "Popup" { return false }
+        return id == Self.entryID(annotation, pageIndex: pageIndex)
+    }
+
+    /// 按 id 更新批注正文并写盘（批注面板的「编辑」走这里）。
+    /// 找不到返回 false——比如文档已经换掉了。
+    @discardableResult
+    func updateNote(id: String, body: String) -> Bool {
+        guard let doc = document else { return false }
+        for index in 0..<doc.pageCount {
+            guard let page = doc.page(at: index) else { continue }
+            for annotation in page.annotations {
+                guard Self.matchesID(id, annotation: annotation, pageIndex: index) else { continue }
+                annotation.contents = body
+                return saveToFile()
+            }
+        }
+        return false
+    }
+
+    /// 按 id 定位一条批注：翻到所在页、滚到批注的位置，划线类还会短暂选中原文——
+    /// 「是哪一处」要有明确的视觉回应，只翻页是找不到一条便签图标的。
+    @discardableResult
+    func revealAnnotation(id: String) -> Bool {
+        guard let doc = document else { return false }
+        for index in 0..<doc.pageCount {
+            guard let page = doc.page(at: index) else { continue }
+            for annotation in page.annotations {
+                guard Self.matchesID(id, annotation: annotation, pageIndex: index) else { continue }
+                go(to: index)
+                view.go(to: PDFDestination(page: page, at: annotation.bounds.origin))
+                if annotation.lumenIsMarkup, let selection = page.selection(for: annotation.bounds) {
+                    view.setCurrentSelection(selection, animate: true)
+                }
+                return true
+            }
+        }
+        return false
+    }
+
+    /// 在当前页加一条空白便签并返回它的清单条目（批注面板「新建」走这里）。
+    /// 返回 nil 表示创建或写盘失败。
+    func addPageNoteAtCurrentPosition() -> AnnotationItem? {
+        guard let doc = document else { return nil }
+        let pageIndex = min(max(currentPageIndex, 0), doc.pageCount - 1)
+        guard let page = doc.page(at: pageIndex) else { return nil }
+
+        let stamp = Date()
+        let pageBounds = page.bounds(for: .mediaBox)
+        let iconBounds = CGRect(x: pageBounds.width - 44, y: pageBounds.height - 44, width: 24, height: 24)
+        let annotation = PDFAnnotation(bounds: iconBounds, forType: .text, withProperties: nil)
+        annotation.contents = ""
+        annotation.userName = Self.annotationAuthor
+        annotation.modificationDate = stamp
+        annotation.color = NSColor.systemTeal
+        page.addAnnotation(annotation)
+        guard saveToFile() else { return nil }
+
+        return AnnotationItem(
+            id: Self.entryID(annotation, pageIndex: pageIndex),
+            locator: .pdf(page: pageIndex, charOffset: 0),
+            quote: "",
+            note: "",
+            hasHighlight: false,
+            createdAt: stamp
+        )
     }
 
     /// 右键菜单命中批注后回调：`AnnotatedPDFView` 负责找批注，这里负责动作。
