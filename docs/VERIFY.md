@@ -60,10 +60,11 @@
 | `--layout-report 1` | 打印所有 `layoutProbe` 上报的 frame（窗口内容区坐标） |
 | `--sidebar 0` / `--ai 0` | 钉住初始面板可见性（三态：不传参 = 按默认） |
 | `--window-size 920x620` | 设定窗口内容区尺寸。布局缺陷几乎都藏在最小尺寸下 |
-| `--panel-width 400x300` | 直接设左右面板宽度（侧栏 x AI 面板）。走的是和拖拽**同一个设置项** |
+| `--panel-width 300x300` | 设 **AI 面板**宽度。第一个数（侧栏）已废弃、只接受并忽略（侧栏是常量 248pt），第二个数是 AI 面板宽度。越界值走与拖拽同一个钳制闸 |
 | `--sidebar-tab thumbnails` | 直接把侧栏钉在某个页签（`outline` / `smartOutline` / `search` / `annotations` / `thumbnails`） |
 | `--immersive 1` | 启动即进沉浸模式，走真实入口 `setImmersive` |
-| `--demo-selection 1` | 塞一段假选区（正常要鼠标划词才能触发，没有辅助功能权限） |
+| `--demo-selection 1` | 塞一段**拖动来源**的假选区（正常要鼠标划词才能触发，没有辅助功能权限）。浮条应当出现 |
+| `--demo-click 1` | 塞一段**单击来源**的假选区（内容与上一条完全相同，只把来源标成单击）。用于证伪「划词条只在拖动时出现」——此时 `selectionBar` 探针应当**缺席** |
 
 ### 行为
 
@@ -78,7 +79,7 @@
 | `--agent-report 1` | Agent 自检（20 项）：预设稳定性、系统提示拼装顺序、温度覆盖、容错解码、真实联网检索 |
 | `--websearch-report 1` | **联网文献检索自检**：逐源跑一遍，记录命中数 / 失败 / 耗时；断言至少一个源命中且总命中 ≥ 3 |
 | `--rerun-report 1` | 「重新生成」自检：需配合 `--mock-ai 1`；断言气泡被替换、history 未叠加 |
-| `--resize-report 1` | 面板宽度自检（12 项）：写入组 6 项（布局跟随、上下限钳制、逐帧写入）+ 窗口缩放组 6 项（阅读区保底、显示宽度按容器重算、图标栏不被推出屏幕、落库偏好不被覆写、拉宽后偏好还原、极窄容器的算式层不变量）。**窗口尺寸由自检自己控制**，并走一遍「宽 → 最挤 → 再拉宽」 |
+| `--resize-report 1` | 面板宽度自检（12 项）。**新语义**：写入组 7 项（AI 面板宽度写入后布局跟随、越界钳制、下限钳回、逐帧写入不越界 / 终值 / 布局一致、**侧栏宽度是常量不受设置影响**）+ 窗口缩放组 5 项（最挤时阅读区 ≥ 320pt、图标栏完整在窗内、AI 面板不越右缘、拉宽后回到落库偏好、极窄容器不超出预算）。**窗口尺寸由自检自己控制**，并走一遍「宽 → 最挤 → 再拉宽」 |
 | `--ask "问题"` | 启动后自动发起一次提问（端到端跑 AI 链路） |
 
 ### AI 与桩服务
@@ -94,7 +95,8 @@
 
 | 开关 | 用途 |
 | --- | --- |
-| `--keys-report 1` | 打印快捷键表 + 撞车检查 + 实跑一遍改绑规则 |
+| `--keys-report 1` | 打印快捷键表 + 撞车检查 + 实跑一遍改绑规则（含全角→半角归一化表、载入期迁移、不可键入绑定被丢弃；共 55 项） |
+| `--ocr-menu-report 1` | OCR 右键菜单自检：表驱动断言「该出现哪些项 / 叫什么文案 / 该不该禁用」（纯函数 `PDFContextMenuPlanner.items`，16 项） |
 | `--keychain-report 1` | 打印钥匙串访问成本与缓存状态（**只读**，不写不删用户钥匙串） |
 | `--font-report 1` | 打印字体目录统计与断言 |
 | `--palette 1` | 启动后打开命令面板 |
@@ -331,6 +333,38 @@ dist/Lumen.app/Contents/MacOS/Lumen --keys-report 1 --capture /tmp/x.png --captu
 ```
 
 会打印全表、撞车检查、系统保留键占用、改绑规则实跑结果（用临时文件，不碰用户配置）。
+新增的 55 项里，与「不可键入的绑定导致失效」直接相关的几条：
+
+- 全角映射表**逐项**实跑（`】→]`、`（→(`、`：→:` …）；
+- 归一化拒绝 `é` / emoji / 汉字 / 全角空格；
+- 载入期把含 `】` 的文件迁移成 `]`（modifiers 不动）；
+- 载入期丢弃不可键入的绑定并回落默认；
+- **所有生效绑定的 key 都在可键入集合内**——修正前用户的 `toggleAIPanel = ⌥】` 会让它红；
+- `set()` 拒绝不可键入的 key（录制器归一化之后的第二道闸）。
+
+### 验证「划词条只在拖动时出现」与 OCR 右键菜单
+
+```bash
+# 拖动来源：浮条应出现
+dist/Lumen.app/Contents/MacOS/Lumen --open /tmp/lumen-test/large.pdf \
+  --demo-selection 1 --layout-report 1 --capture /tmp/a.png --capture-delay 6
+#   日志应有： [Lumen][layout] selectionBar  x=… w=… maxX=…
+
+# 单击来源：浮条应缺席（同一段选区，只把来源标成单击）
+dist/Lumen.app/Contents/MacOS/Lumen --open /tmp/lumen-test/large.pdf \
+  --demo-click 1 --layout-report 1 --capture /tmp/b.png --capture-delay 6
+#   日志应**没有** selectionBar —— 这一条是可证伪的：删掉 selectionFromDrag 这道门，
+#   --demo-click 立刻会重新出现浮条
+
+# AI 面板收起后探针必须消失（布局探针生命周期）
+dist/Lumen.app/Contents/MacOS/Lumen --open /tmp/lumen-test/large.pdf \
+  --run-action toggleAIPanel --layout-report 1 --capture /tmp/c.png --capture-delay 6
+#   日志应**没有** aiPanel —— 探针不注销时会留下越界的最后一帧（maxX=1431）
+
+# OCR 右键菜单：菜单本身没法自动化，验的是纯函数判定
+dist/Lumen.app/Contents/MacOS/Lumen --ocr-menu-report 1 --capture /tmp/d.png --capture-delay 3
+#   日志： [Lumen][ocr-menu] 自检：通过 16 项，失败 0 项 ✅
+```
 
 ### 自检会留下什么（副作用清单）
 
@@ -340,6 +374,7 @@ dist/Lumen.app/Contents/MacOS/Lumen --keys-report 1 --capture /tmp/x.png --captu
 | --- | --- | --- |
 | **recent.json（最近打开）** | 已修：自检跑不写 | `LaunchOptions.isAuditRun`（命令行里带任一 `--*-report` / `--capture` / `--mock-ai`）时不记最近打开。此前每次自检都会把 /tmp 里的测试书插到列表最前，跑几次就把用户真实记录顶下去了。正常从命令行开一本书照旧记录 |
 | **settings.json（偏好）** | 已修：自检跑不落盘 | 各 audit 开头就 `SettingsStore.suppressSave = true`（`--mock-ai` 也是）。验证方式：跑前跑后比对 `md5 ~/Library/Application\ Support/com.jn.lumen/settings.json` |
+| **keybindings.json（快捷键）** | **会写一次**（仅当检测到需要迁移 / 丢弃时） | `KeyBindingStore` 载入时逐条校验：全角 key（`】`）→ 半角（`]`）一次性迁移，不可键入的绑定丢弃并回落默认。**这是刻意的修复行为**，不是污染：用户的 `⌥】` 物理上按不出来，迁移后「显示 / 隐藏 AI 面板」才真的能用。文件已合法时不再写 |
 | **测试书的 chats.json** | 仍会写（按文档目录存） | `--rerun-report` / `--ask` 会在**被打开的那本书**的 `chats.json` 里留下气泡。对 /tmp 里的测试书无所谓；**拿真实书籍跑 `--ask` 会往它的会话里追加内容**，需要干净的会话就先备份那一本书的 `chats.json` |
 | **剪贴板** | 会被覆盖 | `--run-action copyFullText` 之类把结果写进系统剪贴板，跑之前别留着要用的东西 |
 | **AI 花费** | 有 | 除 `--agent-report` / `--websearch-report` 的联网检索（免密钥公开库）外，凡是要模型的通道都先加 `--mock-ai 1` |

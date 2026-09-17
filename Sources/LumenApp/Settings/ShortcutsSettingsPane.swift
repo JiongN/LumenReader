@@ -71,12 +71,31 @@ struct ShortcutsSettingsPane: View {
     private func row(for action: LumenAction) -> some View {
         HStack(spacing: DS.Space.s) {
             VStack(alignment: .leading, spacing: 1) {
-                Text(action.title)
-                    .font(DS.Typo.ui(size: 12.5))
-                    .foregroundStyle(DS.Palette.textPrimary)
+                HStack(spacing: DS.Space.xs) {
+                    Text(action.title)
+                        .font(DS.Typo.ui(size: 12.5))
+                        .foregroundStyle(DS.Palette.textPrimary)
+
+                    // 「已自定义」显式标出来：只看组合键本身分不清「改过的」和
+                    // 「碰巧就长这样的默认值」，用户排查冲突时需要一眼看出哪些是自己动过的。
+                    if keyBindings.isCustomized(action) {
+                        Text("已自定义")
+                            .font(DS.Typo.ui(size: 9, weight: .semibold))
+                            .foregroundStyle(DS.Palette.accent)
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 1)
+                            .background(Capsule().fill(DS.Palette.accentSoft))
+                    }
+                }
 
                 if keyBindings.isCleared(action) {
                     Text("已清空")
+                        .font(DS.Typo.ui(size: 10))
+                        .foregroundStyle(DS.Palette.warning)
+                } else if let warning = warning(for: action) {
+                    // 不可键入 / 与系统保留键冲突：这类绑定按下去要么没反应、要么
+                    // 抢掉系统功能，必须在设置页就露出来，而不是等用户按了发现没用。
+                    Label(warning, systemImage: "exclamationmark.triangle.fill")
                         .font(DS.Typo.ui(size: 10))
                         .foregroundStyle(DS.Palette.warning)
                 } else if keyBindings.isCustomized(action) {
@@ -107,6 +126,16 @@ struct ShortcutsSettingsPane: View {
             .frame(width: 138, height: 24)
         }
         .padding(.vertical, 1)
+    }
+
+    /// 这一项当前是否有需要提醒的问题。返回 nil 表示没问题。
+    private func warning(for action: LumenAction) -> String? {
+        guard let combo = keyBindings.combo(for: action) else { return nil }
+        // 载入期已经会把不可键入的绑定丢弃，但设置页仍要能显示——用户可能刚录进来
+        // 一个被 `set` 拒绝前的值，或从别处拷进来一份坏配置。
+        if !combo.isTypeableKey { return "这个键不可键入，绑定不会生效" }
+        if combo.isReservedBySystem { return "与系统保留键冲突" }
+        return nil
     }
 
     private func commit(_ combo: KeyCombo?, for action: LumenAction) {
@@ -333,13 +362,16 @@ struct ShortcutRecorder: NSViewRepresentable {
             }
 
             // 纯修饰键按下时 characters 为空串，此时返回 nil 让录制继续等下一个键
-            guard let characters = event.charactersIgnoringModifiers?.lowercased(),
+            guard let characters = event.charactersIgnoringModifiers,
                   !characters.isEmpty else { return nil }
             // 过滤控制字符（含 ⌫ 产生的 \u{7F}）
             guard let scalar = characters.unicodeScalars.first,
                   scalar.value >= 32, scalar.value != 127 else { return nil }
 
-            return String(characters.prefix(1))
+            let raw = String(characters.prefix(1))
+            // 归一化：输入法产出的全角字符（】）折回物理键（]）。做得到就用半角，
+            // 做不到（é、emoji 这类）就原样返回，交给 `KeyBindingStore.set` 拒绝并给出提示。
+            return KeyCombo.normalizedKey(raw) ?? raw
         }
     }
 }

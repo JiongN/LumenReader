@@ -42,6 +42,13 @@ final class PDFController: NSObject, ObservableObject {
     var onSelectionChange: ((ReaderSelection?) -> Void)?
     var onOutline: (([OutlineNode]) -> Void)?
 
+    /// 右键菜单点了「识别本页文字（OCR）」时递增。
+    ///
+    /// 用计数器而不是把「识别」的闭包直接存到 `view` 上：后者会让
+    /// controller → view → 闭包 → 视图 struct → StateObject → controller 形成引用环。
+    /// 视图层用 `onReceive(controller.$ocrRequestTick)` 接住，再跑识别。
+    @Published var ocrRequestTick = 0
+
     override init() {
         // 子类化而不是直接用 PDFView：右键菜单里要能删批注，
         // 命中判断需要拿到事件坐标 → 页面 → 批注，这个职责放在视图层最自然。
@@ -206,6 +213,28 @@ final class PDFController: NSObject, ObservableObject {
             followingContext: String(following.prefix(900))
         ))
     }
+
+    /// 鼠标手势结束后重新发布一次选区。
+    ///
+    /// 由 `AnnotatedPDFView.mouseUp` 调用：PDFKit 在拖动**过程中**就发过一批
+    /// `.PDFViewSelectionChanged`，那一轮的来源标记可能还没越过 4pt 阈值；松手这一刻
+    /// 补发，保证「最终选区 + 最终来源标记」一起同步到桥。
+    func refreshSelectionFromGesture() {
+        publishSelection()
+    }
+
+    /// 最近一次选区是否来自**拖动划选**（阈值判定见 `AnnotatedPDFView`）。
+    /// 视图层据此写进 `ReaderBridge.selectionFromDrag`。程序化选区（搜索定位、侧栏
+    /// 联动）不经过鼠标手势，会保留上一次手势的值——这不影响主诉求（单击不弹），
+    /// 且程序化选中一段并显示浮条在语义上也说得通。
+    var isSelectionFromDrag: Bool { view.lastGestureWasDrag }
+
+    /// 当前页此刻的 OCR 菜单状态。视图层把它写进 `AnnotatedPDFView.ocrMenuDescriptor`。
+    func ocrMenuDescriptor(isRunning: Bool) -> OCRMenuDescriptor {
+        if isRunning { return .running }
+        return hasCachedOCR(currentPageIndex) ? .alreadyDone : .idle
+    }
+
 
     private func publishOutline(_ doc: PDFDocument) {
         guard let root = doc.outlineRoot else {
@@ -1018,37 +1047,204 @@ extension PDFAnnotation {
 
 // MARK: - 支持批注右键菜单的 PDFView
 
-/// 右键点在批注上时给出「删除 / 拷贝内容」菜单，其余情况回落系统默认菜单。
+/// 右键菜单里「我们这一侧」追加的项。
+///
+/// 做成枚举而不是直接拼 `NSMenuItem`：`menu(for:)` 没法自动化验证（这台机器没有
+/// 辅助功能权限，合成不出真实右键），所以把「该出现哪些项、该叫什么文案」这段**判定**
+/// 抽成纯函数（`PDFContextMenuPlanner.items`），用断言去验它；视图层只负责把判定结果
+/// 翻译成 `NSMenuItem`，不做任何决策。
+enum PDFContextMenuItem: Equatable {
+    case deleteAnnotation
+    case copyAnnotation
+    case ocr(OCRMenuDescriptor)
+}
+
+/// OCR 菜单项此刻的状态。
+enum OCRMenuDescriptor: Equatable {
+    /// 空闲：还没识别过这一页
+    case idle
+    /// 正在识别：项要**禁用**（不能重复触发付费动作），文案给进度感
+    case running
+    /// 这一页已识别过：文案变成「重新识别」，仍然可点
+    case alreadyDone
+
+    var title: String {
+        switch self {
+        case .idle:        return "识别本页文字（OCR）"
+        case .running:     return "识别中…"
+        case .alreadyDone: return "重新识别本页文字"
+        }
+    }
+
+    var isEnabled: Bool { self != .running }
+}
+
+/// 右键菜单项的**纯判定**（无副作用、无 AppKit 依赖），专为可断言而存在。
+enum PDFContextMenuPlanner {
+
+    /// 算出应当追加的菜单项。
+    ///
+    /// - Parameters:
+    ///   - annotationHit: 右键是否命中了一条批注。
+    ///   - annotationHasContents: 命中的批注是否有正文（没正文时不该给「拷贝批注内容」）。
+    ///   - ocr: 当前页的 OCR 状态。
+    /// - Returns: 追加项，顺序即菜单里的显示顺序；OCR 项**任何情况下都在末尾**。
+    static func items(
+        annotationHit: Bool,
+        annotationHasContents: Bool,
+        ocr: OCRMenuDescriptor
+    ) -> [PDFContextMenuItem] {
+        var result: [PDFContextMenuItem] = []
+        if annotationHit {
+            result.append(.deleteAnnotation)
+            if annotationHasContents { result.append(.copyAnnotation) }
+        }
+        // OCR 入口无条件提供：即便这一页有文本层，「重新识别」也可能是用户想要的
+        // （文本层残缺、复制出来乱码时用它补齐）。把它放在最末，与批注动作之间有分隔线。
+        result.append(.ocr(ocr))
+        return result
+    }
+}
+
+/// 右键点在批注上时给出「删除 / 拷贝内容」，并且**任何情况下都追加 OCR 入口**。
 ///
 /// 命中链路：窗口坐标 → 视图坐标 → 页面坐标 → `page.annotation(at:)`。
+///
+/// 与旧实现的关键差别：过去命中批注时**整份替换**系统菜单，把自带的「拷贝 / 查找 /
+/// 缩放」全丢了；现在一律在 `super.menu(for:)` 的结果上**追加**，系统项照旧。
 @MainActor
 final class AnnotatedPDFView: PDFView {
 
     weak var controller: PDFController?
 
+    /// 拖动划选的判定阈值（pt）：低于它一律按**单击**算。
+    ///
+    /// 取 4pt 而不是 0：真实拖拽的第一帧位移通常就超过几个像素，而「手抖的单击」
+    /// 一般落在 2–3pt 内，4pt 能把两者干净地分开。这个门是「单击不弹、拖动才弹」的核心。
+    static let dragThreshold: CGFloat = 4
+
+    /// 最近一次鼠标手势是否属于拖动划选。
+    ///
+    /// 生命周期：`mouseDown` 复位为 false → `mouseDragged` / `mouseUp` 一旦位移越过阈值置 true。
+    /// 于是它描述的始终是「产出当前这段选区的那次手势」是否为拖动，而不是历史里最近一次。
+    /// `PDFController` 把它连同选区一起上报给 `ReaderBridge.selectionFromDrag`。
+    private(set) var lastGestureWasDrag = false
+    /// 按下点（视图坐标）。仅在手势进行中有值。
+    private var gestureStart: NSPoint?
+
+    /// 「识别本页文字（OCR）」被点中时的回调，由视图层接上 `Task { await runOCR() }`。
+    ///
+    /// 用闭包而不是让 `PDFController` 直接引用 `AppState`：保持
+    /// PDFView → controller → 视图层 这条现有分层，controller 不做任何 UI 决策。
+    var onOCRRequested: (() -> Void)?
+
+    /// OCR 菜单项此刻的状态。由视图层维护（只有它知道 `isOCRRunning` 与当前页），
+    /// `menu(for:)` 只读它。默认空闲。
+    var ocrMenuDescriptor: OCRMenuDescriptor = .idle
+
+    // MARK: 鼠标手势 → 拖动 / 单击来源
+
+    override func mouseDown(with event: NSEvent) {
+        // 每次手势开始都复位：来源标记必须描述「产出当前选区的那一次手势」。
+        gestureStart = convert(event.locationInWindow, from: nil)
+        lastGestureWasDrag = false
+        super.mouseDown(with: event)
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        if !lastGestureWasDrag, let start = gestureStart {
+            let point = convert(event.locationInWindow, from: nil)
+            if hypot(point.x - start.x, point.y - start.y) >= Self.dragThreshold {
+                lastGestureWasDrag = true
+            }
+        }
+        super.mouseDragged(with: event)
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        // 松手时再按「按下点 → 松开点」的总位移判一次：这才是最可靠的判据，
+        // 拖动过程中 `mouseDragged` 未必每帧都送达。
+        if let start = gestureStart {
+            let point = convert(event.locationInWindow, from: nil)
+            if hypot(point.x - start.x, point.y - start.y) >= Self.dragThreshold {
+                lastGestureWasDrag = true
+            }
+        }
+        gestureStart = nil
+        super.mouseUp(with: event)
+        // 手势结束后补发一次选区：PDFKit 在拖动过程中已经发过 selectionChanged，
+        // 那一轮的来源标记可能还没越过阈值；松手这一刻再发布，保证最终状态同步到桥。
+        controller?.refreshSelectionFromGesture()
+    }
+
+    // MARK: 右键菜单
+
     override func menu(for event: NSEvent) -> NSMenu? {
+        // 一律从系统菜单出发再追加：命中批注时**不再替换**整份菜单，
+        // 系统自带的「拷贝 / 查找 / 缩放」必须保留。
+        let base = super.menu(for: event) ?? NSMenu()
+
         let location = convert(event.locationInWindow, from: nil)
+        let hit = hitAnnotationInfo(at: location)
+        let plan = PDFContextMenuPlanner.items(
+            annotationHit: hit != nil,
+            annotationHasContents: hit?.hasContents ?? false,
+            ocr: ocrMenuDescriptor
+        )
+        guard !plan.isEmpty else { return base.items.isEmpty ? nil : base }
+
+        if !base.items.isEmpty {
+            base.addItem(.separator())
+        }
+        hitAnnotation = hit?.annotation
+
+        for item in plan {
+            switch item {
+            case .deleteAnnotation:
+                let menuItem = NSMenuItem(
+                    title: "删除批注",
+                    action: #selector(deleteHitAnnotation(_:)),
+                    keyEquivalent: ""
+                )
+                menuItem.target = self
+                base.addItem(menuItem)
+
+            case .copyAnnotation:
+                let menuItem = NSMenuItem(
+                    title: "拷贝批注内容",
+                    action: #selector(copyHitAnnotation(_:)),
+                    keyEquivalent: ""
+                )
+                menuItem.target = self
+                menuItem.representedObject = hit?.contents
+                base.addItem(menuItem)
+
+            case .ocr(let descriptor):
+                // 识别中时 action 留空：`NSMenu` 的自动启用逻辑会把「没有 action 的项」
+                // 显示为禁用，正好表达「进行中、别重复点」。不用去动
+                // `autoenablesItems`，免得把系统菜单项的自启用行为一起关掉。
+                let menuItem = NSMenuItem(
+                    title: descriptor.title,
+                    action: descriptor.isEnabled ? #selector(triggerOCR(_:)) : nil,
+                    keyEquivalent: ""
+                )
+                menuItem.target = descriptor.isEnabled ? self : nil
+                base.addItem(menuItem)
+            }
+        }
+        return base
+    }
+
+    /// 右键命中批注的判定，返回批注本身与它是否有正文。
+    private func hitAnnotationInfo(
+        at location: NSPoint
+    ) -> (annotation: PDFAnnotation, contents: String, hasContents: Bool)? {
         guard let page = self.page(for: location, nearest: true),
               let annotation = page.annotation(at: convert(location, to: page)),
               !annotation.lumenIsInteractive
-        else { return super.menu(for: event) }
-
-        let menu = NSMenu()
-        if let controller {
-            let deleteItem = NSMenuItem(title: "删除批注", action: #selector(deleteHitAnnotation(_:)), keyEquivalent: "")
-            deleteItem.target = self
-            menu.addItem(deleteItem)
-            _ = controller // 保持引用语义清晰：删除走 controller.saveToFile
-        }
+        else { return nil }
         let contents = (annotation.contents ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-        if !contents.isEmpty {
-            let copyItem = NSMenuItem(title: "拷贝批注内容", action: #selector(copyHitAnnotation(_:)), keyEquivalent: "")
-            copyItem.target = self
-            copyItem.representedObject = contents
-            menu.addItem(copyItem)
-        }
-        hitAnnotation = annotation
-        return menu.items.isEmpty ? super.menu(for: event) : menu
+        return (annotation, contents, !contents.isEmpty)
     }
 
     private var hitAnnotation: PDFAnnotation?
@@ -1063,5 +1259,9 @@ final class AnnotatedPDFView: PDFView {
         guard let text = sender.representedObject as? String else { return }
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(text, forType: .string)
+    }
+
+    @objc private func triggerOCR(_ sender: Any?) {
+        onOCRRequested?()
     }
 }

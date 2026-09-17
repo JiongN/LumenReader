@@ -68,6 +68,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // 快捷键自检：打印当前表并实跑一遍改绑规则（用临时文件，不碰用户配置）
         KeyBindingsAudit.run()
 
+        // OCR 右键菜单自检：纯函数表驱动断言（菜单本身没法自动化验证）
+        OCRMenuAudit.run()
+
         // Agent 自检：预设、提示词拼装、一次真实的联网文献检索
         if LaunchOptions.agentReport {
             Task { await AgentAudit.run() }

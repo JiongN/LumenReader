@@ -63,6 +63,17 @@ struct PDFReaderView: View {
         .onChange(of: reader.flowMode) { _, newValue in controller.apply(flowMode: newValue) }
         .onChange(of: isOCRRunning) { _, running in
             bridge.ocrRunningPage = running ? controller.currentPageIndex : nil
+            // OCR 状态一变，右键菜单的启用/禁用与文案也要跟着变（识别中 → 禁用）。
+            syncOCRMenuDescriptor()
+        }
+        // 翻页后「本页是否已识别」会变，菜单文案（识别 / 重新识别）也要跟着刷新。
+        .onChange(of: bridge.currentUnitIndex) { _, _ in syncOCRMenuDescriptor() }
+        // 右键菜单点了「识别本页文字（OCR）」：controller 递增计数器，这里接住并跑识别。
+        // 走计数器而不是「把闭包直接存到 view 上」是为了避开引用环：
+        // controller → view → 闭包 → 视图 struct → StateObject → controller。
+        .onReceive(controller.$ocrRequestTick.dropFirst()) { _ in
+            // 与横幅按钮**同一个** runOCR，不复制一份逻辑（重复实现迟早只改一处）。
+            Task { await runOCR() }
         }
         .onDisappear {
             store?.flush()
@@ -128,6 +139,15 @@ struct PDFReaderView: View {
     }
 
     // MARK: - OCR
+
+    /// 把「当前页 + 是否识别中」换算成菜单文案，写进 PDFView。
+    ///
+    /// 右键菜单本身没法自动化验证（本机没有辅助功能权限，合成不出真实右键），
+    /// 所以可断言的部分抽成了纯函数 `PDFContextMenuPlanner.items`；
+    /// 这里只负责把纯函数的输入（当前页是否已识别、是否正在识别）喂给视图。
+    private func syncOCRMenuDescriptor() {
+        controller.view.ocrMenuDescriptor = controller.ocrMenuDescriptor(isRunning: isOCRRunning)
+    }
 
     /// 识别当前页。识别结果同时进缓存——AI 上下文、整书总结都会从这里取。
     private func runOCR() async {
@@ -304,7 +324,7 @@ struct PDFReaderView: View {
             controller?.objectWillChange.send()
         }
 
-        controller.onSelectionChange = { (selection: ReaderSelection?) in
+        controller.onSelectionChange = { [weak controller] (selection: ReaderSelection?) in
             // 必须包 `withAnimation`：划词条自己写了 transition（淡入 + 上浮 10pt），
             // 但 transition 只在「状态变化处于动画事务内」时才跑。这里裸赋值的话
             // 那条 transition 等于白写——拖完鼠标，条子是「啪」地闪出来的。
@@ -312,8 +332,21 @@ struct PDFReaderView: View {
             // 弹一下反而显得迟钝。
             withAnimation(DS.Motion.reveal) {
                 bridge.selection = selection
+                // 拖动 / 单击来源同步：单击也会产生 1 字符选区，浮条只在
+                // `isUsable && selectionFromDrag` 时出现（见 `SelectionActionBarLayer`）。
+                // 选区为空时来源也一并复位，避免残留的 true 让下一次单击错误地弹条。
+                bridge.selectionFromDrag = selection == nil
+                    ? false
+                    : (controller?.isSelectionFromDrag ?? false)
             }
         }
+
+        // 右键菜单里的「识别本页文字（OCR）」：菜单项动作只递增计数器，真正的识别
+        // 由视图层的 `onReceive(controller.$ocrRequestTick)` 在当前视图上跑。
+        controller.view.onOCRRequested = { [weak controller] in
+            controller?.ocrRequestTick += 1
+        }
+        syncOCRMenuDescriptor()
 
         controller.onOutline = { (nodes: [OutlineNode]) in
             bridge.outline = nodes

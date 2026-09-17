@@ -156,6 +156,12 @@ struct EPUBReaderView: View {
             }
         }
 
+        // 来源标记（拖动 / 单击）。与选区分开来、先于选区上报，一起写进桥：
+        // 划词条只在 `isUsable && selectionFromDrag` 时出现（单击不弹）。
+        controller.onSelectionSourceChange = { fromDrag in
+            bridge.selectionFromDrag = fromDrag
+        }
+
         // 搜索走解包后的纯文本，而不是让 WebKit 去 `window.find`：
         // 前者能跨章节一次搜完，并且在后台线程跑得动。
         bridge.performSearch = { query in

@@ -141,6 +141,59 @@ enum KeyBindingsAudit {
         check("坏文件退回空表而不是崩溃", broken.overrides.isEmpty)
         check("坏文件保持原样（便于用户对照修复）", FileManager.default.fileExists(atPath: temp.path))
 
+        // 13. 全角 → 半角 归一化：**表驱动**逐项实跑，别只验一个。
+        //     这是用户 keybindings.json 里 `】` 能生效的前提。
+        for (full, half) in KeyCombo.fullWidthMap {
+            check("归一化「\(full)」→「\(half)」",
+                  KeyCombo.normalizedKey(String(full)) == String(half))
+        }
+        check("归一化大写 S → 小写 s", KeyCombo.normalizedKey("S") == "s")
+        check("归一化数字 1 原样", KeyCombo.normalizedKey("1") == "1")
+        check("归一化斜杠 / 原样", KeyCombo.normalizedKey("/") == "/")
+        check("归一化接受特殊键名 leftArrow",
+              KeyCombo.normalizedKey(KeyCombo.SpecialKey.leftArrow) == KeyCombo.SpecialKey.leftArrow)
+        check("归一化拒绝 é（非 ASCII 可键入字符）", KeyCombo.normalizedKey("é") == nil)
+        check("归一化拒绝 emoji", KeyCombo.normalizedKey("🙂") == nil)
+        check("归一化拒绝汉字", KeyCombo.normalizedKey("中") == nil)
+        // 全角空格（U+3000）虽在「全角」范畴，但空格不是可键入的「键」——
+        // 空格键用特殊键名 `space` 表示，裸空格字符一律拒绝。
+        check("归一化拒绝全角空格", KeyCombo.normalizedKey("　") == nil)
+
+        // 14. 载入期迁移：含全角 】 的文件读进来，应被迁移成 ]（modifiers 不动）。
+        //     对应用户现有那份坏配置——不迁移，「显示 / 隐藏 AI 面板」永远按不出来。
+        let fullWidthJSON = #"{"toggleAIPanel":{"key":"】","modifiers":["option"]}}"#
+        try? fullWidthJSON.data(using: .utf8)?.write(to: temp)
+        let migrated = KeyBindingStore(fileURL: temp)
+        check("载入时把全角 】 迁移成 ]",
+              migrated.combo(for: .toggleAIPanel) == KeyCombo(key: "]", modifiers: [.option]))
+        check("迁移保留 modifiers（仍是 ⌥）",
+              migrated.combo(for: .toggleAIPanel)?.modifiers == [.option])
+
+        // 15. 载入期丢弃不可键入的绑定并回落默认。
+        let badKeyJSON = #"{"toggleAIPanel":{"key":"é","modifiers":["option"]}}"#
+        try? badKeyJSON.data(using: .utf8)?.write(to: temp)
+        let dropped = KeyBindingStore(fileURL: temp)
+        check("载入时丢弃不可键入的绑定，回落默认",
+              dropped.combo(for: .toggleAIPanel) == LumenAction.toggleAIPanel.defaultCombo)
+
+        // 16. 「所有生效绑定的 key 都在可键入集合内」。
+        //     修正前，用户的 toggleAIPanel 是 ⌥】，这条会红；迁移生效后必须绿。
+        //     注意读的是**用户真实文件**（只读载入 + 必要的一次性迁移），不是临时文件。
+        let live = KeyBindingStore()
+        let notTypeable = LumenAction.allCases.compactMap { action -> String? in
+            guard let combo = live.combo(for: action), !combo.isTypeableKey else { return nil }
+            return "\(action.title)=\(combo.display)"
+        }
+        check("所有生效绑定的 key 都在可键入集合内", notTypeable.isEmpty)
+
+        // 17. 不可键入的键经 set() 会被拒绝（录制器归一化之后的第二道闸）。
+        //     用临时文件上的 store，避免万一归一化逻辑退化时把测试值写进用户配置。
+        if case .keyNotTypeable = dropped.set(KeyCombo(key: "é", modifiers: [.command]), for: .goToPage) {
+            check("set() 拒绝不可键入的 key", true)
+        } else {
+            check("set() 拒绝不可键入的 key", false)
+        }
+
         NSLog(
             "[Lumen][keys] 规则验证：通过 \(passed) 项，失败 \(failures.count) 项"
                 + (failures.isEmpty ? " ✅" : " ❌ " + failures.joined(separator: "；"))

@@ -19,6 +19,12 @@ final class EPUBController: NSObject, ObservableObject {
     private var pendingAnchor: String = ""
 
     var onSelection: ((ReaderSelection?) -> Void)?
+    /// 选区的来源是否为「拖动划选」（false = 单击）。
+    ///
+    /// 与 `onSelection` 分开上报而不是塞进 `ReaderSelection`：来源是**交互属性**、
+    /// 不是文本的一部分，模型层不该为它加字段。两条回调在同一轮 runloop 里先后触发，
+    /// 视图层用它们一起写 `ReaderBridge.selection / selectionFromDrag`，不会错位。
+    var onSelectionSourceChange: ((Bool) -> Void)?
     /// (chapterIndex, chapterCount, 章节内进度 0…1, 是否已到章末)
     var onProgress: ((Int, Int, Double, Bool) -> Void)?
     /// 点中正文里的批注高亮（<mark class="lumen-hl">）时回调，参数是批注条目 id。
@@ -215,7 +221,19 @@ final class EPUBController: NSObject, ObservableObject {
               });
             });
           }, { passive: true });
-          function reportSelection() {
+          // 拖动 / 单击来源判定：与 PDF 侧同一套规则（按下点 → 移动距离 ≥ 4px 才算拖动）。
+          // 单击产生的 1 字符选区不该弹出划词条，这道门专门挡它。
+          var __lumenDownX = null, __lumenDownY = null, __lumenDragGesture = false;
+          var LUMEN_DRAG_MIN = 4;
+          document.addEventListener('mousedown', function (e) {
+            __lumenDownX = e.clientX; __lumenDownY = e.clientY; __lumenDragGesture = false;
+          });
+          document.addEventListener('mousemove', function (e) {
+            if (__lumenDownX === null) { return; }
+            var dx = e.clientX - __lumenDownX, dy = e.clientY - __lumenDownY;
+            if (Math.sqrt(dx * dx + dy * dy) >= LUMEN_DRAG_MIN) { __lumenDragGesture = true; }
+          });
+          function reportSelection(deliberate) {
             var sel = window.getSelection();
             if (!sel || sel.isCollapsed || sel.rangeCount === 0) {
               window.webkit.messageHandlers.\(Self.messageHandlerName).postMessage({ type: 'selection', empty: true });
@@ -241,12 +259,15 @@ final class EPUBController: NSObject, ObservableObject {
               text: text,
               offset: index < 0 ? 0 : index,
               preceding: index > 0 ? full.slice(Math.max(0, index - 900), index) : '',
-              following: index >= 0 ? full.slice(index + text.length, index + text.length + 900) : ''
+              following: index >= 0 ? full.slice(index + text.length, index + text.length + 900) : '',
+              fromDrag: __lumenDragGesture || deliberate === true
             });
           }
-          document.addEventListener('mouseup', function () { setTimeout(reportSelection, 0); });
-          document.addEventListener('keyup', function () { setTimeout(reportSelection, 40); });
-          document.addEventListener('touchend', function () { setTimeout(reportSelection, 0); });
+          // 键盘框选（shift+方向键）与触摸选择都是**有意为之**的选择，不算单击，放行；
+          // 鼠标则按拖动距离判定。deliberate=true 仅这两条路径传。
+          document.addEventListener('mouseup', function () { setTimeout(function () { reportSelection(false); }, 0); });
+          document.addEventListener('keyup', function () { setTimeout(function () { reportSelection(true); }, 40); });
+          document.addEventListener('touchend', function () { setTimeout(function () { reportSelection(true); }, 0); });
           // 点批注高亮 → 上报条目 id（正文 → 侧栏的联动方向）
           document.addEventListener('click', function (e) {
             var node = e.target;
@@ -509,15 +530,21 @@ extension EPUBController: WKScriptMessageHandler {
 
         switch type {
         case "selection":
+            // 来源标记先于选区上报：视图层据此决定划词条显不显示，两者要在同一轮
+            // runloop 里都到位，否则会先闪一下浮条再被门收掉。
+            let fromDrag = body["fromDrag"] as? Bool ?? false
             if body["empty"] as? Bool == true {
+                onSelectionSourceChange?(false)
                 onSelection?(nil)
                 return
             }
             guard let text = body["text"] as? String, !text.isEmpty else {
+                onSelectionSourceChange?(false)
                 onSelection?(nil)
                 return
             }
             let offset = body["offset"] as? Int ?? 0
+            onSelectionSourceChange?(fromDrag)
             onSelection?(ReaderSelection(
                 text: text,
                 locator: .epub(chapterIndex: currentChapterIndex, anchor: "", charOffset: offset),

@@ -246,6 +246,7 @@ struct ReaderContainerView: View {
 
         let needsWork = LaunchOptions.sidebarTab != nil
             || LaunchOptions.injectsDemoSelection
+            || LaunchOptions.injectsDemoClick
             || LaunchOptions.runAction != nil
             || LaunchOptions.jumpToUnit != nil
             || LaunchOptions.smartOutline
@@ -259,10 +260,23 @@ struct ReaderContainerView: View {
         }
 
         if LaunchOptions.injectsDemoSelection {
+            // 拖动来源：浮条应当出现。这里显式标 true，是为了让这条自检在「只拖动才弹」
+            // 这道门之后仍然能看见浮条——不标的话它会被门挡掉，自检红得没有意义。
             bridge.selection = ReaderSelection(
                 text: "文化资本的传递并不经过市场，而是在家庭日常中完成。",
                 locator: .pdf(page: 0, charOffset: 0)
             )
+            bridge.selectionFromDrag = true
+        }
+
+        if LaunchOptions.injectsDemoClick {
+            // 单击来源：内容与上面完全相同，唯独来源是「单击」——用来证伪那道门。
+            // 若有人把门删了，这条注入会让浮条出现，`--demo-click` 的「探针缺席」断言立刻红。
+            bridge.selection = ReaderSelection(
+                text: "文化资本的传递并不经过市场，而是在家庭日常中完成。",
+                locator: .pdf(page: 0, charOffset: 0)
+            )
+            bridge.selectionFromDrag = false
         }
 
         if let raw = LaunchOptions.runAction {
@@ -561,13 +575,18 @@ struct ControlChip: View {
 /// 没有做成跟随选区的浮动气泡：PDF 里把选区矩形换算成窗口坐标要跨 PDFKit / AppKit / SwiftUI
 /// 三层坐标系，缩放与滚动时极易错位；EPUB 里虽然能用 JS 拿到 rect，但两者行为就不一致了。
 /// 固定在底部中央既稳定又不会遮挡正在读的那一行。
+///
+/// **只在拖动划选时出现**（见 `ReaderBridge.selectionFromDrag`）：单击产生的 1 字符选区
+/// 不该把它叫出来。
 struct SelectionActionBarLayer: View {
 
     @EnvironmentObject private var bridge: ReaderBridge
     @EnvironmentObject private var state: AppState
 
     var body: some View {
-        if let selection = bridge.selection, selection.isUsable {
+        // **只在拖动划选时出现**。`selectionFromDrag` 是新加的门：单击也会产生
+        // 一个 1 字符选区，没有这道门的话随手点一下正文就会弹出浮条（用户明确否掉了这种）。
+        if let selection = bridge.selection, selection.isUsable, bridge.selectionFromDrag {
             SelectionActionBar(selection: selection)
                 // 76 而不是默认的 32：阅读区右下角常驻一条状态条（页码 + 缩放），
                 // 它从底边起占到约 64pt。划词条按 32 起算会正好压在它上面——实测
@@ -638,6 +657,10 @@ struct SelectionActionBar: View {
             actionButton("翻译", icon: "character.book.closed") { trigger(.translate) }
             actionButton("追问", icon: "bubble.left.and.text.bubble.right") { trigger(.ask) }
         }
+        // 防压缩：整条浮层锚在底部中央、内容宽度本来就固定，没有 `.fixedSize()` 时
+        // 父级会把最右那一项（追问）压成省略号——实测「追问 → …」。
+        // 这是「文字被渲染成 …」的定义级缺陷，加一行把它钉死。
+        .fixedSize()
         .padding(.horizontal, DS.Space.s)
         .padding(.vertical, DS.Space.xs)
     }

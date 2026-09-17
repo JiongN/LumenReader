@@ -88,6 +88,80 @@ public struct KeyCombo: Codable, Sendable, Equatable, Hashable {
     /// 抢走那个字符，是不能接受的默认行为。
     public var isUsable: Bool { !key.isEmpty && !modifiers.isEmpty }
 
+    /// 全角 → 半角 的**显式映射表**。
+    ///
+    /// 为什么必须显式：录制器拿到的是 `event.charactersIgnoringModifiers`，也就是
+    /// **输入法产出的字符**而不是物理键。中文输入法下按 `]` 会得到全角 `】`（U+3011），
+    /// 直接存进 keybindings.json 后**物理上按不出来**，绑定必然失效——
+    /// 用户报的「AI 面板快捷键不生效」根因就是它（他的文件里躺着 `⌥】`）。
+    ///
+    /// 覆盖两类：FF01–FF5E 那一段可以用码位平移（`char − 0xFEE0`）批量处理，
+    /// 但 CJK 符号区这些标点的码位不连续、平移不过来，只能一条条写死。
+    public static let fullWidthMap: [Character: Character] = [
+        "【": "[", "】": "]", "〔": "[", "〕": "]",
+        "（": "(", "）": ")",
+        "，": ",", "、": ",", "。": ".", "．": ".",
+        "；": ";", "：": ":",
+        "？": "?", "！": "!",
+        "“": "\"", "”": "\"", "‘": "'", "’": "'",
+        "～": "~", "﹣": "-",
+    ]
+
+    /// 把一个「录制到的字符」归一化成可键入的物理键名。
+    ///
+    /// 规则：显式表 → FF01–FF5E 码位平移 → 只接受 ASCII 可见字符（0x21…0x7E）→
+    /// 字母统一折成小写（与 `defaultCombo` 的写法一致：⇧S 记作 `s` + shift）。
+    ///
+    /// - Parameter raw: 录制器拿到的原始字符串（可能含全角字符 / 大写字母 / emoji）。
+    /// - Returns: 可键入的键名；无法归一化成可键入字符时返回 `nil`（调用方应拒绝写入）。
+    public static func normalizedKey(_ raw: String) -> String? {
+        // 特殊键名（方向键、Esc…）本身就是我们的内部表示，原样接受。
+        if SpecialKey.all.contains(raw) { return raw }
+
+        guard raw.count == 1, let character = raw.first else { return nil }
+
+        let mapped: Character
+        if let hit = fullWidthMap[character] {
+            mapped = hit
+        } else if character.unicodeScalars.count == 1,
+                  let scalar = character.unicodeScalars.first,
+                  (0xFF01...0xFF5E).contains(scalar.value),
+                  let half = UnicodeScalar(scalar.value - 0xFEE0) {
+            // 全角 ASCII 区：码位整体平移 0xFEE0 即得半角。
+            mapped = Character(half)
+        } else {
+            mapped = character
+        }
+
+        // 只接受 ASCII 可见字符：控制字符、空格、非 ASCII（é、emoji、汉字）一律拒。
+        guard let ascii = mapped.asciiValue, (0x21...0x7E).contains(ascii) else { return nil }
+        if mapped.isLetter { return String(mapped).lowercased() }
+        return String(mapped)
+    }
+
+    /// `key` 是否落在「物理上按得出来」的集合内。
+    ///
+    /// 空串（显式清空）算合法；特殊键名算可键入；其余必须能被 `normalizedKey`
+    /// 原样接受（`normalizedKey(key) == key` 排除了「大写字母」「全角字符」这类
+    /// 需要归一化才能用的值）。
+    public var isTypeableKey: Bool {
+        if key.isEmpty { return true }
+        if SpecialKey.all.contains(key) { return true }
+        return Self.normalizedKey(key) == key
+    }
+
+    /// 把一条可能含「不可键入 key」的绑定迁移成合法形式。
+    ///
+    /// - Returns: 迁移后的组合（含全角→半角、大写→小写的归一化）；
+    ///   `nil` 表示这条绑定**无法合法化**，应当丢弃并回落默认值。
+    /// - Note: 「显式清空」（空 key + 空修饰键）原样保留——它是一个有意的用户状态，
+    ///   不是坏数据。
+    public var migrated: KeyCombo? {
+        if key.isEmpty && modifiers.isEmpty { return self }
+        guard let normalized = Self.normalizedKey(key) else { return nil }
+        return KeyCombo(key: normalized, modifiers: modifiers)
+    }
+
     /// 系统保留的组合，不允许用户占用。
     ///
     /// 这些键一旦被应用吃掉，用户就找不回退出、隐藏、切窗口这些基本操作，
@@ -324,7 +398,12 @@ public final class KeyBindingStore: ObservableObject {
 
     public init(fileURL: URL = AppPaths.keyBindingsFile) {
         self.fileURL = fileURL
-        self.overrides = Self.load(from: fileURL)
+        let (loaded, didChange) = Self.load(from: fileURL)
+        self.overrides = loaded
+        // 载入时发生了迁移 / 丢弃就写回一次，让迁移成为**一次性**的：
+        // 否则每次启动都会重打一遍日志，用户也无从在文件里看出已被修正过。
+        // 只在确实改动过时写，正常启动（文件已合法）不会碰用户文件。
+        if didChange { save() }
     }
 
     // MARK: 查询
@@ -359,6 +438,7 @@ public final class KeyBindingStore: ObservableObject {
 
     public enum Rejection: Equatable {
         case needsModifier
+        case keyNotTypeable(combo: KeyCombo)
         case reservedBySystem(combo: KeyCombo)
         case conflict(with: LumenAction, combo: KeyCombo)
 
@@ -366,6 +446,8 @@ public final class KeyBindingStore: ObservableObject {
             switch self {
             case .needsModifier:
                 return "至少要带一个修饰键。裸字母会抢走输入框里的正常打字。"
+            case .keyNotTypeable(let combo):
+                return "「\(combo.key)」这个键不可键入（多半是输入法产出的全角字符或非 ASCII 字符），换了也不会生效。请重新录制。"
             case .reservedBySystem(let combo):
                 return "\(combo.display) 是系统保留的组合（退出 / 隐藏 / 切换窗口一类），不能占用。"
             case .conflict(let action, let combo):
@@ -378,6 +460,9 @@ public final class KeyBindingStore: ObservableObject {
     @discardableResult
     public func set(_ combo: KeyCombo, for action: LumenAction) -> Rejection? {
         guard combo.isUsable else { return .needsModifier }
+        // 拒绝「物理上按不出来」的 key。录制器会先做一遍归一化（全角→半角），
+        // 这里再兜一道：任何入口（含将来的脚本 / 手改 JSON）塞进不可键入的键，都拦得住。
+        guard combo.isTypeableKey else { return .keyNotTypeable(combo: combo) }
         guard !combo.isReservedBySystem else { return .reservedBySystem(combo: combo) }
         if let other = conflictingAction(for: combo, excluding: action) {
             return .conflict(with: other, combo: combo)
@@ -412,16 +497,44 @@ public final class KeyBindingStore: ObservableObject {
 
     // MARK: 持久化
 
-    private static func load(from url: URL) -> [String: KeyCombo] {
-        guard let data = try? Data(contentsOf: url), !data.isEmpty else { return [:] }
+    /// 从磁盘载入绑定表。
+    ///
+    /// 逐条**迁移 + 校验**，而不是整份信任：
+    /// - 全角字符（`】`）折回半角（`]`）——这是用户的真实文件里躺着的坏绑定，
+    ///   不迁移的话他的「显示 / 隐藏 AI 面板」永远按不出来；
+    /// - 归一化后仍不可键入的绑定**丢弃并回落默认值**，同时 `NSLog` 说明是哪一个
+    ///   （不要静默：用户会以为是自己改错了却找不到原因）。
+    ///
+    /// - Returns: (有效的绑定表, 是否发生过改动)。改动过就要写回，见 `init`。
+    private static func load(from url: URL) -> ([String: KeyCombo], Bool) {
+        guard let data = try? Data(contentsOf: url), !data.isEmpty else { return ([:], false) }
         guard let decoded = try? JSONDecoder().decode([String: KeyCombo].self, from: data) else {
             // 解不出来就当没改过，不要把整个文件删掉——用户可能是手改坏了，
             // 保留原文件他才好对照着修。
-            return [:]
+            return ([:], false)
         }
         // 过滤掉已经不存在的动作名（改版删过动作时留下的残迹）
         let known = Set(LumenAction.allCases.map(\.rawValue))
-        return decoded.filter { known.contains($0.key) }
+        var result: [String: KeyCombo] = [:]
+        var didChange = decoded.count != known.intersection(decoded.keys).count
+
+        for (actionName, combo) in decoded where known.contains(actionName) {
+            let label = LumenAction(rawValue: actionName)?.title ?? actionName
+            guard let migrated = combo.migrated else {
+                NSLog("[Lumen][keys] 丢弃不可键入的绑定「\(label)」：key=「\(combo.key)」"
+                      + "（无法归一化为可键入字符），已回落默认 "
+                      + "\(LumenAction(rawValue: actionName)?.defaultCombo.display ?? "—")")
+                didChange = true
+                continue
+            }
+            if migrated.key != combo.key {
+                NSLog("[Lumen][keys] 迁移绑定「\(label)」：key「\(combo.key)」→「\(migrated.key)」"
+                      + "（全角/大写归一化，modifiers 不变）")
+                didChange = true
+            }
+            result[actionName] = migrated
+        }
+        return (result, didChange)
     }
 
     private func save() {
