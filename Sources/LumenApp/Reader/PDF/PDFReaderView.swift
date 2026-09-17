@@ -349,6 +349,47 @@ struct PDFReaderView: View {
             return await controller.extractFullText(allowOCR: allowOCR, progress: progress)
         }
 
+        // 智能目录：只要每页**开头**那一小截。取满了再送过去是浪费——
+        // 章节标题几乎都在页首，而全文喂进去既慢又贵，还会让模型在细节里迷路。
+        bridge.unitSnippetProvider = { [weak controller] in
+            guard let controller, controller.pageCount > 0 else { return [] }
+            var snippets: [(index: Int, text: String)] = []
+            snippets.reserveCapacity(controller.pageCount)
+
+            for index in 0..<controller.pageCount {
+                // 每 24 页让一次主线程。`page.string` 是同步的，一本五百页的书
+                // 一口气取完会把界面钉死好几秒——这是用户手动触发的动作，
+                // 也不该表现为「点了没反应」。
+                if index % 24 == 0 { await Task.yield() }
+
+                let text = controller.usableText(of: index)
+                guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { continue }
+                snippets.append((index: index, text: text))
+            }
+            return snippets
+        }
+
+        bridge.sectionTextProvider = { [weak controller] start, end in
+            guard let controller, controller.pageCount > 0 else { return "" }
+            let lower = max(0, min(start, end))
+            let upper = min(controller.pageCount - 1, max(start, end))
+            guard lower <= upper else { return "" }
+
+            var pieces: [String] = []
+            var budget = 12_000
+
+            for page in lower...upper where budget > 0 {
+                if page % 24 == 0 { await Task.yield() }
+                let text = controller.usableText(of: page)
+                guard !text.isEmpty else { continue }
+                pieces.append(text)
+                // 预算按字符算、超了就停在整页边界上：截半页会把一页中间的
+                // 半句话喂给模型，摘要很容易顺着半句话编下去。
+                budget -= text.count
+            }
+            return pieces.joined(separator: "\n")
+        }
+
         bridge.requestOCR = { [weak controller, weak state] page in
             guard let state else { return }
             Task { @MainActor in

@@ -58,6 +58,15 @@ public enum AppPaths {
         documentDirectory(forPath: path).appendingPathComponent("chats.json")
     }
 
+    /// AI 智能目录缓存。
+    ///
+    /// 和对话记录一样跟着文档走（按路径哈希分目录），而不是全局一个池子：
+    /// 目录是**这本书**的结构，书被删了缓存也该跟着失效；而路径哈希目录本来
+    /// 就是「这本书的私有目录」，放进去天然满足这个语义。
+    public static func smartOutlineFile(forPath path: String) -> URL {
+        documentDirectory(forPath: path).appendingPathComponent("smart-outline.json")
+    }
+
     /// EPUB 解包后的临时目录（缓存在磁盘，可随时清理）。
     public static func epubExtractionDirectory(forPath path: String) -> URL {
         ensureDirectory(

@@ -68,6 +68,16 @@ final class ReaderBridge: ObservableObject {
     var zoomToFit: (() -> Void)?
     /// 取当前视图的上下文文本，供 AI 使用
     var currentContextProvider: (() -> (String, DocumentLocator))?
+    /// 取**每个单元开头的短文本**，供 AI 智能目录推断结构。
+    ///
+    /// 与 `slicesProvider` 分开而不是复用它，是因为两者的取样方式正好相反：
+    /// 切片要「每段尽可能多的正文」好用来总结内容，而识别结构只需要每页开头那一小截
+    /// （标题、编号都在页首）。复用的话，一本 300 页的书要把全文都读出来才能给出
+    /// 首页那点信息，白等好几秒。
+    var unitSnippetProvider: (() async -> [(index: Int, text: String)])?
+    /// 取某个单元区间（含首尾）的正文，供生成单节摘要。
+    /// 区间由调用方决定：一条目录项覆盖到「下一条目录项之前」，桥本身不需要知道目录。
+    var sectionTextProvider: ((_ startUnit: Int, _ endUnit: Int) async -> String)?
     /// 同步取某页已缓存的 OCR 文本（扫描件用）
     var ocrTextProvider: ((Int) -> String?)?
     /// 请求对某一页做 OCR
@@ -112,11 +122,14 @@ final class ReaderBridge: ObservableObject {
         ocrTextProvider = nil
         requestOCR = nil
         extractFullText = nil
+        unitSnippetProvider = nil
+        sectionTextProvider = nil
     }
 }
 
 enum SidebarTab: String, CaseIterable, Identifiable {
     case outline
+    case smartOutline
     case search
     case thumbnails
 
@@ -124,17 +137,31 @@ enum SidebarTab: String, CaseIterable, Identifiable {
 
     var title: String {
         switch self {
-        case .outline:    return "目录"
-        case .search:     return "搜索"
-        case .thumbnails: return "页面"
+        case .outline:      return "目录"
+        // 页签栏在 248pt 的默认侧栏里只有约 56pt/个，「智能目录」四个字放不下。
+        // 缩成两个字 + 星芒图标，指向仍然是唯一的（页内空状态写的是全称）。
+        case .smartOutline: return "智能"
+        case .search:       return "搜索"
+        case .thumbnails:   return "页面"
+        }
+    }
+
+    /// 悬停提示用的全称。
+    var fullTitle: String {
+        switch self {
+        case .outline:      return "文档目录"
+        case .smartOutline: return "AI 智能目录"
+        case .search:       return "全文搜索"
+        case .thumbnails:   return "页面缩略图"
         }
     }
 
     var systemImage: String {
         switch self {
-        case .outline:    return "list.bullet.indent"
-        case .search:     return "magnifyingglass"
-        case .thumbnails: return "square.grid.2x2"
+        case .outline:      return "list.bullet.indent"
+        case .smartOutline: return "sparkles.rectangle.stack"
+        case .search:       return "magnifyingglass"
+        case .thumbnails:   return "square.grid.2x2"
         }
     }
 }

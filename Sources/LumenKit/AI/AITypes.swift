@@ -123,3 +123,28 @@ public protocol AIProvider: AnyObject {
     /// 拉取模型列表（GET /models）。用于设置页的「从服务端获取」。
     func availableModels() async throws -> [String]
 }
+
+public extension AIProvider {
+
+    /// 把流式结果收成一个完整字符串。
+    ///
+    /// 适合「调用方只关心最终结果」的场景（智能目录、结构化抽取）：
+    /// 那些地方不需要打字机效果，逐段拼装反而要额外维护一份缓冲区。
+    ///
+    /// 推理过程（`reasoning`）**不计入返回正文**——思维链是模型的草稿，
+    /// 混进结果里会污染 JSON 解析。
+    func completeText(messages: [AIMessage]) async throws -> String {
+        var result = ""
+        for try await event in stream(messages: messages) {
+            switch event {
+            case .delta(let text):
+                result += text
+            case .reasoning:
+                continue
+            case .finished:
+                continue
+            }
+        }
+        return result
+    }
+}

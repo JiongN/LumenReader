@@ -14,6 +14,13 @@ public final class SettingsStore: ObservableObject {
     private var saveTask: Task<Void, Never>?
     private let fileURL: URL
 
+    /// 抑制落盘。
+    ///
+    /// 给自检通道用：从命令行改设置（面板宽度、主题预览之类）目的是验证，
+    /// 不该把用户的真实配置覆盖掉。注意 setter 的**防抖落盘救不了这一点**——
+    /// 防抖是「延迟写」，不是「不写」，等够 400ms 照样落盘。
+    public var suppressSave = false
+
     public init(fileURL: URL = AppPaths.settingsFile) {
         self.fileURL = fileURL
         self.settings = Self.load(from: fileURL)
@@ -28,6 +35,7 @@ public final class SettingsStore: ObservableObject {
     }
 
     private func scheduleSave() {
+        guard !suppressSave else { return }
         saveTask?.cancel()
         let snapshot = settings
         let url = fileURL
@@ -40,6 +48,7 @@ public final class SettingsStore: ObservableObject {
 
     /// 立即落盘（退出前调用）。
     public func flush() {
+        guard !suppressSave else { return }
         saveTask?.cancel()
         saveTask = nil
         let snapshot = settings

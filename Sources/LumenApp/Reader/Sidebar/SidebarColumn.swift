@@ -10,8 +10,8 @@ struct SidebarColumn: View {
 
     private var availableTabs: [SidebarTab] {
         state.document?.kind == .pdf
-            ? [.outline, .search, .thumbnails]
-            : [.outline, .search]
+            ? [.outline, .smartOutline, .search, .thumbnails]
+            : [.outline, .smartOutline, .search]
     }
 
     var body: some View {
@@ -27,9 +27,10 @@ struct SidebarColumn: View {
             // 页签切换是轻量操作，用 quick 比用面板那套弹簧更跟手。
             Group {
                 switch bridge.sidebarTab {
-                case .outline:    outlineList.transition(.opacity)
-                case .search:     searchPane.transition(.opacity)
-                case .thumbnails: ThumbnailPane().transition(.opacity)
+                case .outline:      outlineList.transition(.opacity)
+                case .smartOutline: SmartOutlinePane().transition(.opacity)
+                case .search:       searchPane.transition(.opacity)
+                case .thumbnails:   ThumbnailPane().transition(.opacity)
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -45,11 +46,16 @@ struct SidebarColumn: View {
                 Button {
                     withAnimation(DS.Motion.quick) { bridge.sidebarTab = tab }
                 } label: {
-                    HStack(spacing: 5) {
+                    HStack(spacing: 3) {
                         Image(systemName: tab.systemImage)
-                            .font(DS.Typo.ui(size: 11, weight: .medium))
+                            .font(DS.Typo.ui(size: 10.5, weight: .medium))
                         Text(tab.title)
-                            .font(DS.Typo.ui(size: 11.5, weight: .medium))
+                            .font(DS.Typo.ui(size: 11, weight: .medium))
+                            // 侧栏可以被拖到 180pt，那时每个页签只剩不到 40pt。
+                            // 缩一点字号比截成「智…」强：截断的标签等于没有标签。
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.8)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 6)
@@ -61,6 +67,7 @@ struct SidebarColumn: View {
                     .foregroundStyle(bridge.sidebarTab == tab ? DS.Palette.textPrimary : DS.Palette.textSecondary)
                 }
                 .buttonStyle(.plain)
+                .help(tab.fullTitle)
             }
         }
         .padding(3)
@@ -68,6 +75,10 @@ struct SidebarColumn: View {
             RoundedRectangle(cornerRadius: DS.Radius.m, style: .continuous)
                 .fill(DS.Palette.surfaceSunken)
         )
+        // 页签栏是这次唯一改动版式的控件（3 个页签变 4 个），而它最容易出的问题是
+        // 「在窄侧栏里把标签挤成省略号」——那种退化肉眼截图看不出来（模型也没有视觉通道），
+        // 但它的宽高比会变。上报实际框，就能拿「宽度 ÷ 页签数」去核每个页签够不够。
+        .layoutProbe("sidebarPicker")
         .padding(DS.Space.s)
     }
 

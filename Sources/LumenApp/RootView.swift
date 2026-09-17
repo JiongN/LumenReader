@@ -45,8 +45,21 @@ struct RootView: View {
                     .transition(.opacity)
             }
         }
+        // 跳页输入条独立成一层，不和命令面板复用同一个 overlay：
+        // 两者可能被同时触发（⌘K 里再按 ⌘G），共用一层时后挂的 transition 会赢，
+        // 结果是一个的进出动画按另一个的令牌跑。
+        .overlay {
+            if state.isPageJumpVisible {
+                PageJumpPanel()
+                    .transition(.opacity)
+            }
+        }
         .overlay { BusyOverlay() }
         .overlay(alignment: .top) { ToastLayer().padding(.top, 76) }
+        // 沉浸模式的悬浮控制条。挂在最外层而不是阅读区里：
+        // 它要在全屏窗口的底部中央出现，而阅读区在沉浸时可能已经被收窄居中，
+        // 锚在阅读区上会跟着一起缩，位置就不在"屏幕底部"了。
+        .overlay(alignment: .bottom) { ImmersiveHUD() }
         // 打开文档后由阅读主题统辖窗口外观；欢迎页跟随系统深浅色
         .windowAppearance(isDark: state.document == nil ? systemIsDark : state.settingsStore.reader.theme.isDark)
         .task {
@@ -80,6 +93,10 @@ struct RootView: View {
             }
         }
         .toolbar { toolbarContent }
+        // 沉浸模式下把工具栏也收掉。用 SwiftUI 的可见性修饰符而不是直接动
+        // `window.toolbar`：在 `.unified` 样式下两者共享同一个 NSToolbar，
+        // 从 AppKit 侧改会和 SwiftUI 的同步逻辑打架（表现为工具栏偶发不回来）。
+        .toolbar(state.isImmersive ? .hidden : .visible, for: .windowToolbar)
         // 单一 alert 通道：告知与确认共用一条，避免两个 `.alert` 修饰符在同一个窗口上
         // 互相抢展示权（后挂的那个会赢，先挂的直接不出现）。
         .alert(
@@ -180,6 +197,16 @@ struct RootView: View {
                 Image(systemName: state.isAIPanelVisible ? "sparkles.rectangle.stack.fill" : "sparkles.rectangle.stack")
             }
             .help(helpText(state.isAIPanelVisible ? "隐藏 AI 面板" : "显示 AI 面板", for: .toggleAIPanel))
+            .disabled(state.document == nil)
+
+            Button {
+                state.setImmersive(!state.isImmersive)
+            } label: {
+                Image(systemName: state.isImmersive
+                      ? "arrow.down.right.and.arrow.up.left"
+                      : "arrow.up.left.and.arrow.down.right")
+            }
+            .help(helpText("沉浸阅读模式", for: .toggleImmersive))
             .disabled(state.document == nil)
 
             Button {

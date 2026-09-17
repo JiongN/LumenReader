@@ -227,6 +227,38 @@ struct EPUBReaderView: View {
             }
         }
 
+        bridge.unitSnippetProvider = {
+            source.chapters.map { chapter in
+                (index: chapter.index, text: source.text(
+                    around: .epub(chapterIndex: chapter.index, anchor: "", charOffset: 0),
+                    radius: 0
+                ))
+            }
+        }
+
+        bridge.sectionTextProvider = { start, end in
+            let chapters = source.chapters
+            guard !chapters.isEmpty else { return "" }
+            let lower = max(0, min(start, end))
+            let upper = min(chapters.count - 1, max(start, end))
+            guard lower <= upper else { return "" }
+
+            var pieces: [String] = []
+            var budget = 12_000
+
+            for chapter in chapters[lower...upper] where budget > 0 {
+                let text = source.text(
+                    around: .epub(chapterIndex: chapter.index, anchor: "", charOffset: 0),
+                    radius: 0
+                )
+                guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { continue }
+                pieces.append(text)
+                budget -= text.count
+                await Task.yield()
+            }
+            return pieces.joined(separator: "\n")
+        }
+
         bridge.extractFullText = { allowOCR, progress in
             // EPUB 不存在扫描件，文字本来就在解包后的 XHTML 里，没有可识别的对象
             _ = allowOCR

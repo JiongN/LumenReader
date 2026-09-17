@@ -178,12 +178,15 @@ public enum LumenAction: String, CaseIterable, Codable, Sendable, Identifiable {
     // 面板与导航
     case toggleSidebar
     case toggleAIPanel
+    case toggleImmersive
     case commandPalette
 
     // 翻页与侧栏
     case nextUnit
     case previousUnit
+    case goToPage
     case showOutline
+    case showSmartOutline
     case showSearch
     case showThumbnails
 
@@ -205,10 +208,13 @@ public enum LumenAction: String, CaseIterable, Codable, Sendable, Identifiable {
         case .copyFile:       return "复制文件"
         case .toggleSidebar:  return "显示 / 隐藏侧栏"
         case .toggleAIPanel:  return "显示 / 隐藏 AI 面板"
+        case .toggleImmersive: return "沉浸阅读模式"
         case .commandPalette: return "命令面板"
         case .nextUnit:       return "下一页 / 下一章"
         case .previousUnit:   return "上一页 / 上一章"
+        case .goToPage:       return "跳转到页码…"
         case .showOutline:    return "侧栏：目录"
+        case .showSmartOutline: return "侧栏：AI 智能目录"
         case .showSearch:     return "侧栏：搜索"
         case .showThumbnails: return "侧栏：页面缩略图"
         case .fontIncrease:   return "放大字号"
@@ -221,9 +227,9 @@ public enum LumenAction: String, CaseIterable, Codable, Sendable, Identifiable {
         switch self {
         case .openDocument, .openMostRecent, .closeDocument, .copyFullText, .copyFile:
             return .document
-        case .toggleSidebar, .toggleAIPanel, .commandPalette:
+        case .toggleSidebar, .toggleAIPanel, .toggleImmersive, .commandPalette:
             return .panel
-        case .nextUnit, .previousUnit, .showOutline, .showSearch, .showThumbnails:
+        case .nextUnit, .previousUnit, .goToPage, .showOutline, .showSmartOutline, .showSearch, .showThumbnails:
             return .reading
         case .fontIncrease, .fontDecrease:
             return .typography
@@ -242,13 +248,21 @@ public enum LumenAction: String, CaseIterable, Codable, Sendable, Identifiable {
 
         case .toggleSidebar:  return KeyCombo(key: "s", modifiers: [.command, .option])
         case .toggleAIPanel:  return KeyCombo(key: "a", modifiers: [.command, .shift])
+        // 沿用 macOS 的「全屏」惯用组合。沉浸模式本身就包含进全屏，
+        // 语义一致，用户不必再记一套新的。
+        case .toggleImmersive: return KeyCombo(key: "f", modifiers: [.control, .command])
         case .commandPalette: return KeyCombo(key: "k", modifiers: [.command])
 
         case .nextUnit:       return KeyCombo(key: KeyCombo.SpecialKey.rightArrow, modifiers: [.command, .option])
         case .previousUnit:   return KeyCombo(key: KeyCombo.SpecialKey.leftArrow, modifiers: [.command, .option])
+        case .goToPage:       return KeyCombo(key: "g", modifiers: [.command])
+        // 四个侧栏页签按**界面里的排列顺序**编号。之前是 目录⌘1 / 搜索⌘2 / 页面⌘3，
+        // 插入智能目录后若沿用旧号，⌘2 指的会是排在第三位的搜索——顺序对不上，
+        // 用户按错了只会觉得快捷键是坏的。这里跟着排列改成 1/2/3/4。
         case .showOutline:    return KeyCombo(key: "1", modifiers: [.command])
-        case .showSearch:     return KeyCombo(key: "2", modifiers: [.command])
-        case .showThumbnails: return KeyCombo(key: "3", modifiers: [.command])
+        case .showSmartOutline: return KeyCombo(key: "2", modifiers: [.command])
+        case .showSearch:     return KeyCombo(key: "3", modifiers: [.command])
+        case .showThumbnails: return KeyCombo(key: "4", modifiers: [.command])
 
         case .fontIncrease:   return KeyCombo(key: "+", modifiers: [.command])
         case .fontDecrease:   return KeyCombo(key: "-", modifiers: [.command])
@@ -267,10 +281,13 @@ public enum LumenAction: String, CaseIterable, Codable, Sendable, Identifiable {
         case .copyFile:       return "copy file 文件 复制"
         case .toggleSidebar:  return "sidebar 侧栏 边栏"
         case .toggleAIPanel:  return "ai panel 面板"
+        case .toggleImmersive: return "immersive focus fullscreen zen 沉浸 专注 全屏 无干扰"
         case .commandPalette: return "palette 命令 面板"
         case .nextUnit:       return "next page chapter 下一页 下一章"
         case .previousUnit:   return "previous page chapter 上一页 上一章"
+        case .goToPage:       return "goto go to page jump 跳转 页码 定位"
         case .showOutline:    return "outline toc 目录"
+        case .showSmartOutline: return "smart outline ai 智能目录 结构 章节"
         case .showSearch:     return "search find 搜索 查找"
         case .showThumbnails: return "thumbnail page grid 缩略图 页面"
         case .fontIncrease:   return "font bigger 字号 放大"

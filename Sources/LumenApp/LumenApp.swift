@@ -135,6 +135,16 @@ struct LumenCommands: Commands {
             Divider()
             item(.toggleSidebar)
             item(.toggleAIPanel)
+            item(.toggleImmersive)
+
+            // 沉浸模式的 Esc 出口。
+            //
+            // 敢用 Esc 的前提是：菜单项被 `.disabled` 时 SwiftUI 会一并释放它的快捷键，
+            // 所以非沉浸状态下 Esc 不会被我这条抢走——命令面板、跳页输入框、划词操作
+            // 都靠 Esc 关闭，抢了它们会集体失灵。
+            Button("退出沉浸模式") { state.setImmersive(false) }
+                .keyboardShortcut(.escape, modifiers: [])
+                .disabled(!state.isImmersive)
 
             Divider()
 
@@ -151,6 +161,42 @@ struct LumenCommands: Commands {
         CommandGroup(after: .textFormatting) {
             item(.fontIncrease)
             item(.fontDecrease)
+        }
+
+        // 阅读：翻页、跳页、侧栏页签
+        //
+        // 这个菜单不是为了「多一个入口」，而是**快捷键生效的前提**：
+        // SwiftUI 的 `.keyboardShortcut` 只有在菜单项上才会全局响应。
+        // 这些动作原先只在命令面板里有，于是 ⌘G、⌥⌘→ 这些绑定了也不会真的响应——
+        // 用户能在设置页改它们，改了却按不出效果，属于骗人。
+        CommandMenu("阅读") {
+            item(.goToPage)
+
+            Divider()
+
+            item(.nextUnit)
+            item(.previousUnit)
+
+            Divider()
+
+            item(.showOutline)
+            item(.showSmartOutline)
+            item(.showSearch)
+            item(.showThumbnails)
+
+            Divider()
+
+            // 「生成」与「查看」分开：前者要花钱、要等十几秒，做成菜单项但不给快捷键——
+            // 一次误触的代价是一次真实的模型调用。查看那一项才值得绑快捷键（⌘2）。
+            Button(state.smartOutline.outline == nil ? "生成 AI 智能目录" : "重新生成 AI 智能目录") {
+                state.generateSmartOutline()
+            }
+            .disabled(state.document == nil
+                || state.bridge.unitSnippetProvider == nil
+                || state.smartOutline.phase.isWorking)
+
+            Button("查看 AI 智能目录") { state.revealSidebar(tab: .smartOutline) }
+                .disabled(state.document == nil || state.smartOutline.outline == nil)
         }
     }
 

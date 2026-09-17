@@ -318,6 +318,36 @@ public struct UISettings: Codable, Sendable, Equatable {
     /// 正文字体重在"长时间阅读不累"，同一个人对这两件事的偏好经常不一样。
     public var uiFontFamilyName: String?
 
+    /// 侧栏宽度（pt）。拖动分隔线调节，双击复位。
+    ///
+    /// 存进配置而不是只放内存：面板宽度属于「调一次就长期沿用」的偏好，
+    /// 每次开新文档都弹回默认值会逼用户反复调同一个东西。
+    public var sidebarWidth: Double = PanelWidth.sidebarDefault
+    /// AI 面板宽度（pt）。同上。
+    public var aiPanelWidth: Double = PanelWidth.aiDefault
+
+    /// 面板宽度的允许范围。
+    ///
+    /// 上下限不是装饰：太窄会把行内的图标和文字裁掉（而且 SwiftUI 不会报错，
+    /// 只是安静地切掉），太宽则阅读区被挤到不可用。手改 settings.json 塞个 5000
+    /// 进来就能把界面搞成一片空白，所以解码时必须钳制。
+    public enum PanelWidth {
+        public static let sidebarDefault: Double = 248
+        public static let aiDefault: Double = 380
+        public static let sidebarRange: ClosedRange<Double> = 180...420
+        public static let aiRange: ClosedRange<Double> = 280...640
+
+        public static func clampSidebar(_ value: Double) -> Double {
+            guard value.isFinite else { return sidebarDefault }
+            return min(max(value, sidebarRange.lowerBound), sidebarRange.upperBound)
+        }
+
+        public static func clampAI(_ value: Double) -> Double {
+            guard value.isFinite else { return aiDefault }
+            return min(max(value, aiRange.lowerBound), aiRange.upperBound)
+        }
+    }
+
     public init() {}
 
     public init(from decoder: Decoder) throws {
@@ -327,6 +357,12 @@ public struct UISettings: Codable, Sendable, Equatable {
         self.respectsSystemReduceMotion =
             (try? container.decode(Bool.self, forKey: .respectsSystemReduceMotion)) ?? true
         self.uiFontFamilyName = try? container.decode(String.self, forKey: .uiFontFamilyName)
+        self.sidebarWidth = PanelWidth.clampSidebar(
+            (try? container.decode(Double.self, forKey: .sidebarWidth)) ?? PanelWidth.sidebarDefault
+        )
+        self.aiPanelWidth = PanelWidth.clampAI(
+            (try? container.decode(Double.self, forKey: .aiPanelWidth)) ?? PanelWidth.aiDefault
+        )
     }
 }
 

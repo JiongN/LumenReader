@@ -87,12 +87,74 @@ enum LaunchOptions {
         return CGSize(width: width, height: height)
     }
 
+    /// 自检用：直接设定左右面板宽度，`--panel-width 400x300`（侧栏 x AI 面板）。
+    ///
+    /// 和 `--window-size` 一样走 `x` 分隔。值会经过与拖动分隔线相同的钳制，
+    /// 所以故意传越界值（如 `9999x10`）就能验证钳制确实生效。
+    static var panelWidth: (sidebar: Double, ai: Double)? {
+        guard let raw = value(for: "--panel-width")?.lowercased() else { return nil }
+        let parts = raw.split(separator: "x")
+        guard parts.count == 2,
+              let sidebar = Double(parts[0]),
+              let ai = Double(parts[1]) else { return nil }
+        return (sidebar, ai)
+    }
+
     /// 直接把侧栏钉在某个页签上：`--sidebar-tab thumbnails`。
     /// 缩略图页是懒加载的，只有真正切过去才会渲染，不这样切就永远审不到。
     static var sidebarTab: String? { value(for: "--sidebar-tab") }
 
+    /// 自检用：打开文档后跳到第 N 个单元（**1-based**，与界面输入框一致）。
+    ///
+    /// 会打印「跳转前 → 请求 → 跳转后」三段，这样才能区分
+    /// 「跳成功」和「本来就在那一页」——只打终值的话这两种情况长得一模一样。
+    static var jumpToUnit: Int? {
+        guard let raw = value(for: "--jump-to") else { return nil }
+        return Int(raw)
+    }
+
     /// 塞一段假选区，用来核对划词浮动条的位置（正常要靠鼠标划词才能触发）。
     static var injectsDemoSelection: Bool { flag("--demo-selection") }
+
+    /// 自检用：启动后直接进入沉浸模式，核对「面板全收 + 正文居中限宽」。
+    static var startsImmersive: Bool { flag("--immersive") }
+
+    /// 打印缩略图的渲染/跳过明细：`--thumb-report 1`。
+    ///
+    /// 用来证明「滚出可视区的页不再被渲染」确实生效——这是缩略图侧栏流畅与否的关键，
+    /// 但它是个纯粹的浪费与否问题，不看日志根本分辨不出来（跳过和渲染的外观一样）。
+    static var thumbnailReport: Bool { flag("--thumb-report") }
+
+    /// 自检 AI 智能目录：`--smart-outline 1`。
+    ///
+    /// 这条链路的关键产物（目录条目、页码落点、缓存文件）全都不在可视区域里，
+    /// 靠截图什么也证明不了；而且它要真的调一次模型才有结果，没法用假数据绕过。
+    /// 所以让进程自己走完全程，把条目清单与「点击条目后到了哪个单元」打出来。
+    static var smartOutline: Bool { flag("--smart-outline") }
+
+    /// 配合 `--smart-outline 1`：对第 N 条（1-based）生成一次摘要，验证第二步链路。
+    static var smartOutlineSummaryIndex: Int? {
+        guard let raw = value(for: "--smart-outline-summary") else { return nil }
+        return Int(raw)
+    }
+
+    /// 自检用：把 AI 服务商**临时**指向本机的桩服务，不落盘。
+    ///
+    /// 没有这个开关，任何 AI 链路（智能目录、整本书总结）的自检都会消耗真实密钥，
+    /// 于是要么不敢跑、要么跑出来的结果不可复现。`--mock-ai 1` 等价于
+    /// `--mock-ai 127.0.0.1:8777`（见 `tools/mock_openai_server.py`）。
+    ///
+    /// 只改内存里的设置：`suppressSave` 一开，防抖落盘整条路径都短路，
+    /// 用户的真实配置与服务商列表不会被这个开关污染。
+    static var mockAI: (host: String, port: Int)? {
+        guard let raw = value(for: "--mock-ai") else { return nil }
+        let lowered = raw.lowercased()
+        if ["1", "true", "yes", "on"].contains(lowered) { return ("127.0.0.1", 8777) }
+
+        let parts = raw.split(separator: ":")
+        guard parts.count == 2, let port = Int(parts[1]), port > 0, port < 65_536 else { return nil }
+        return (String(parts[0]), port)
+    }
 
     /// 是否需要在启动后自动截图并退出
     static var shouldCapture: Bool { capturePath != nil }
@@ -125,6 +187,17 @@ enum LaunchOptions {
     /// 不在 contentView 里——于是「工具栏上的按钮有没有被挤掉」这件事一直没被审到。
     /// 打开这个开关改为从 `NSThemeFrame` 渲染。
     static var captureIncludesChrome: Bool { flag("--capture-chrome") }
+
+    /// 改用系统录屏通道抓图：`--capture-screen 1`。
+    ///
+    /// 与默认的 `cacheDisplay` 是两条本质不同的路：
+    ///   - `cacheDisplay` 是**离屏绘制**，不需要任何系统权限，但画 `NSVisualEffectView`
+    ///     （SwiftUI 的 `.regularMaterial`）时不可靠——材质常常被画成一层不随外观变化的浅色。
+    ///   - 录屏通道（`screencapture -l`）抓的是屏幕上**真实的像素**，材质按当前外观真正混合过。
+    ///
+    /// 也就是说：「材质有没有跟着主题变」这件事，只有走录屏通道才是可信的。
+    /// 代价是需要「屏幕录制」权限，且抓到的是整窗（含标题栏与工具栏），不能只截 contentView。
+    static var captureViaScreen: Bool { flag("--capture-screen") }
 }
 
 // MARK: - 布局探针
@@ -236,8 +309,12 @@ enum WindowCapture {
 
     /// 把主窗口内容渲染成 PNG。
     ///
-    /// 用 `cacheDisplay` 而不是 `CGWindowListCreateImage`：后者从 macOS 15 起需要录屏权限，
-    /// 而前者是进程内绘制，不受限制。
+    /// 两条通道，由 `--capture-screen 1` 选择：
+    ///
+    /// - **离屏绘制**（默认，`cacheDisplay`）：进程内绘制，不需要任何系统权限。
+    ///   缺点是画不准 `NSVisualEffectView`（SwiftUI 的 `.regularMaterial`）。
+    /// - **系统录屏**（`screencapture -l<windowNumber>`）：抓到的是屏幕上真实的像素，
+    ///   材质是真的混合过的。验证主题 / 材质必须用这条。
     @MainActor
     @discardableResult
     static func captureMainWindow(to path: String) -> Bool {
@@ -248,8 +325,7 @@ enum WindowCapture {
             write(data, to: suffixed(path, with: "sheet"))
         }
 
-        guard let window = mainWindow(excluding: sheet),
-              let data = render(window) else {
+        guard let window = mainWindow(excluding: sheet) else {
             logWindowInventory()
             NSLog("[Lumen] 截图失败：找不到可用的主窗口")
             return false
@@ -264,7 +340,60 @@ enum WindowCapture {
             _ = write(otherData, to: suffixed(path, with: "settings"))
         }
 
+        if LaunchOptions.captureViaScreen {
+            if screenCapture(window, to: path) { return true }
+            // 录屏通道失败（多半是没给权限）时退回离屏绘制，而不是交一张空图。
+            // 但要把话说清楚：退回之后的图验证不了材质，别让人误以为已经验过了。
+            NSLog("[Lumen] 录屏通道不可用，已退回离屏绘制；这张图不能用来判断材质与主题")
+        }
+
+        guard let data = render(window) else {
+            logWindowInventory()
+            NSLog("[Lumen] 截图失败：主窗口无法离屏绘制")
+            return false
+        }
         return write(data, to: path)
+    }
+
+    /// 用系统录屏通道抓整个窗口。
+    ///
+    /// 走 `screencapture` 子进程而不是 `CGWindowListCreateImage`：后者从 macOS 14 起
+    /// 被标记为弃用（替代品 ScreenCaptureKit 的接入成本高得多），
+    /// 而这里要的只是「拿到一张真实像素的图」，命令行工具已经够用且不带弃用警告。
+    @MainActor
+    private static func screenCapture(_ window: NSWindow, to path: String) -> Bool {
+        // -x 不播放快门声；-o 去掉窗口阴影——阴影会让图片比窗口大一圈，
+        // 而后续取色是按比例定位的，多出来的那一圈会让每个采样点整体偏移。
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
+        process.arguments = ["-x", "-o", "-l\(window.windowNumber)", path]
+
+        let pipe = Pipe()
+        process.standardError = pipe
+        process.standardOutput = pipe
+
+        do {
+            try process.run()
+            process.waitUntilExit()
+        } catch {
+            NSLog("[Lumen] 录屏通道启动失败：\(error.localizedDescription)")
+            return false
+        }
+
+        let message = String(
+            data: pipe.fileHandleForReading.readDataToEndOfFile(),
+            encoding: .utf8
+        )?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+
+        guard process.terminationStatus == 0,
+              let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
+              data.count > 1024 else {
+            NSLog("[Lumen] 录屏通道失败（状态 \(process.terminationStatus)）\(message)")
+            return false
+        }
+
+        NSLog("[Lumen] 截图已写入 \(path)（录屏通道，真实像素；窗口 \(Int(window.frame.width))x\(Int(window.frame.height))）")
+        return true
     }
 
     /// 除主窗口与 sheet 之外的另一个可见窗口——目前只可能是「设置」。

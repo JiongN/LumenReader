@@ -373,6 +373,24 @@ struct CommandPaletteOverlay: View {
             keywords: "summarize whole 整本"
         ) { deliver(.summarizeAll) })
 
+        // 智能目录的两个动作分开列：一个是「让 AI 重新读一遍」（要花钱、要等），
+        // 一个是「把侧栏切过去看看」。合成一条的话，只想看看的人会不小心触发一次生成。
+        items.append(PaletteCommand(
+            id: "ai.smartOutline.generate",
+            title: state.smartOutline.outline == nil ? "生成 AI 智能目录" : "重新生成 AI 智能目录",
+            icon: "sparkles.rectangle.stack", group: "AI",
+            isEnabled: state.document != nil
+                && bridge.unitSnippetProvider != nil
+                && !state.smartOutline.phase.isWorking,
+            keywords: "smart outline ai 智能目录 结构 章节 生成"
+        ) { state.generateSmartOutline() })
+
+        items.append(PaletteCommand(
+            id: "ai.smartOutline.show", title: "查看 AI 智能目录", icon: "sidebar.left", group: "AI",
+            isEnabled: state.document != nil && state.smartOutline.outline != nil,
+            keywords: "smart outline 智能目录 查看 侧栏"
+        ) { state.revealSidebar(tab: .smartOutline) })
+
         items.append(PaletteCommand(
             id: "ai.rememberSelection", title: "记住选中内容", icon: "bookmark", group: "AI",
             isEnabled: hasSelection, keywords: "memory remember 记忆"
@@ -438,10 +456,13 @@ struct CommandPaletteOverlay: View {
         case .copyFile:       return "doc.on.clipboard"
         case .toggleSidebar:  return "sidebar.leading"
         case .toggleAIPanel:  return "sparkles.rectangle.stack"
+        case .toggleImmersive: return "arrow.up.left.and.arrow.down.right"
         case .commandPalette: return "command"
         case .nextUnit:       return "chevron.down"
         case .previousUnit:   return "chevron.up"
+        case .goToPage:       return "number.square"
         case .showOutline:    return "list.bullet.indent"
+        case .showSmartOutline: return "sparkles.rectangle.stack"
         case .showSearch:     return "magnifyingglass"
         case .showThumbnails: return "square.grid.2x2"
         case .fontIncrease:   return "textformat.size.larger"

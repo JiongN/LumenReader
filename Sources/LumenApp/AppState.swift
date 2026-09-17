@@ -45,6 +45,9 @@ final class AppState: ObservableObject {
     /// AI 对话。放在全局是为了让菜单栏、命令面板也能驱动它（导出摘要、清空对话），
     /// 否则这些动作只能藏在 AI 面板右上角那个 ⋯ 里。
     let chat = AIChatModel()
+    /// AI 智能目录。同样放全局：菜单命令与命令面板都要能触发它，
+    /// 而它们都不是侧栏的子视图，拿不到环境注入。
+    let smartOutline = SmartOutlineModel()
     /// 阅读视图与外壳之间的通道。同样提到全局：命令面板在欢迎页（没有阅读视图）时
     /// 也要能列出命令，它需要一个始终存在的通道对象，而不是随阅读视图生灭的那个。
     let bridge = ReaderBridge()
@@ -77,6 +80,19 @@ final class AppState: ObservableObject {
     @Published var isSidebarVisible: Bool = true
     /// 命令面板
     @Published var isCommandPaletteVisible: Bool = false
+    /// 「跳转到页码」输入条
+    @Published var isPageJumpVisible: Bool = false
+
+    /// 沉浸阅读模式：隐藏所有面板与工具栏、正文居中收窄、窗口进入系统全屏。
+    @Published var isImmersive = false
+
+    /// 进入沉浸之前两块面板的可见性，退出时原样恢复。
+    ///
+    /// 记下来是必须的：如果只是「进入时全关、退出时全开」，
+    /// 那么进来之前本来就关着 AI 面板的用户，一进一出就被打开了，
+    /// 而他从没要求过——这种"帮你恢复到你没设过的状态"最容易招人烦。
+    private var sidebarBeforeImmersive = true
+    private var aiPanelBeforeImmersive = true
 
     /// 阅读区上报的文档元数据镜像。
     /// 菜单栏与命令面板拿不到 `ReaderBridge`，但「导出摘要」这类动作需要作者/篇幅，
@@ -97,6 +113,39 @@ final class AppState: ObservableObject {
         // 用户的 settings.json。要验深色主题就直接改那个文件。
         if let sidebar = LaunchOptions.initialSidebarVisible { isSidebarVisible = sidebar }
         if let aiPanel = LaunchOptions.initialAIPanelVisible { isAIPanelVisible = aiPanel }
+
+        // 自检用：把两侧面板宽度直接写成指定值。走的是和拖动分隔线**同一个设置项**，
+        // 所以「改宽度 → 布局跟随 → 越界被钳制」这条链路是真的被验到了，
+        // 而不是在测一个只为自检而存在的旁路。
+        if let panel = LaunchOptions.panelWidth {
+            // 先关掉落盘：这是自检在改宽度，不能把用户的真实配置覆盖成测试值。
+            // 注意用 self.：init 的参数也叫 settingsStore（可选类型），不加 self. 会指到参数上。
+            self.settingsStore.suppressSave = true
+            self.settingsStore.ui.sidebarWidth = UISettings.PanelWidth.clampSidebar(panel.sidebar)
+            self.settingsStore.ui.aiPanelWidth = UISettings.PanelWidth.clampAI(panel.ai)
+        }
+
+        // 自检用：把 AI 服务商临时指向本机的桩服务。走的是和设置页**同一份**内存配置
+        // （providers + activeProviderID），所以「智能目录真的能拿到配置并发出请求」
+        // 这条链路是被完整验到的，而不是在测一个只为自检存在的旁路。
+        // 127.0.0.1 会被 `isLocalEndpoint` 判为本地端点，因此不需要 API 密钥。
+        if let mock = LaunchOptions.mockAI {
+            self.settingsStore.suppressSave = true
+            let provider = AIProviderConfig(
+                name: "桩服务（自检）",
+                baseURL: "http://\(mock.host):\(mock.port)/v1",
+                models: ["mock-chat"],
+                selectedModel: "mock-chat"
+            )
+            self.settingsStore.settings.ai.providers = [provider]
+            self.settingsStore.settings.ai.activeProviderID = provider.id
+        }
+
+        // 自检用：直接进沉浸模式。走的是真实入口 `setImmersive`，
+        // 而不是手工把三个状态各设一遍——后者测不出「退出时能否恢复原面板可见性」。
+        if LaunchOptions.startsImmersive {
+            setImmersive(true)
+        }
 
         // 动效门必须在首帧之前拿到配置，否则欢迎页的入场动画会先按默认值跑一遍
         MotionGate.observeSystemPreference()
@@ -145,10 +194,89 @@ final class AppState: ObservableObject {
         document = nil
         documentMetadata = DocumentMetadata()
         chat.bind(to: nil)
+        smartOutline.bind(to: nil)
+    }
+
+    /// 跳到第 `index` 个单元（0-based；PDF 是页、EPUB 是章）。
+    ///
+    /// 抽成一个方法而不是写在输入框的提交回调里：跳页有两个入口（点击页码、⌘G 面板），
+    /// 而且它是**无 UI 也能验证**的一段逻辑——自检通道要靠它把「输入 7 是不是真的到了第 7 页」
+    /// 变成一条可断言的日志。逻辑留在 View 里就只能靠手点。
+    @discardableResult
+    func jump(toUnit index: Int) -> Int? {
+        let total = bridge.unitCount
+        guard total > 0 else { return nil }
+
+        // 越界钳到边界：用户输 9999 的意图是「跳到末尾」，报错再让他重输是把一件事拆成两件
+        let clamped = min(max(index, 0), total - 1)
+        let locator: DocumentLocator = document?.kind == .epub
+            ? .epub(chapterIndex: clamped, anchor: "", charOffset: 0)
+            : .pdf(page: clamped, charOffset: 0)
+
+        bridge.goTo?(locator)
+        return clamped
     }
 
     func reopen(_ entry: RecentEntry) {
         open(url: entry.url)
+    }
+
+    // MARK: - 智能目录
+
+    /// 目录条目叫「第几页」还是「第几章」，由桥上报的文档类型决定。
+    var unitName: String {
+        document?.kind == .epub ? "章" : "页"
+    }
+
+    /// 触发一次智能目录生成（有缓存也重新生成一份新的）。
+    ///
+    /// 收成一个方法而不是让菜单栏、命令面板、侧栏按钮各写一遍：
+    /// 三处都要先「把侧栏露出来并切到智能目录页签」，否则用户点了菜单里那一项
+    /// 会看不到任何反应——生成要跑好几秒，而结果落在一个收起来的侧栏里。
+    func generateSmartOutline() {
+        guard document != nil else { return }
+        revealSidebar(tab: .smartOutline)
+        smartOutline.generate(
+            bridge: bridge,
+            metadata: bridge.metadata,
+            config: settingsStore.activeProvider
+        )
+    }
+
+    // MARK: - 沉浸模式
+
+    func setImmersive(_ on: Bool) {
+        guard isImmersive != on else { return }
+
+        if on {
+            sidebarBeforeImmersive = isSidebarVisible
+            aiPanelBeforeImmersive = isAIPanelVisible
+        }
+
+        withAnimation(DS.Motion.panel) {
+            isImmersive = on
+            isSidebarVisible = on ? false : sidebarBeforeImmersive
+            isAIPanelVisible = on ? false : aiPanelBeforeImmersive
+        }
+
+        Self.applyFullScreen(on)
+    }
+
+    /// 切换系统全屏。
+    ///
+    /// 优先用 `keyWindow`：全屏是**窗口级**属性，作用在错误的窗口上会出现
+    /// 「设置窗口变成了全屏，而阅读窗口纹丝不动」这种莫名其妙的场面。
+    /// 找不到 keyWindow 时退回「最大的可见窗口」，避免子窗口/面板抢到全屏。
+    private static func applyFullScreen(_ on: Bool) {
+        let candidate = NSApp.keyWindow
+            ?? NSApp.windows
+                .filter { $0.isVisible && ($0.contentView?.bounds.height ?? 0) > 100 }
+                .max { $0.frame.width * $0.frame.height < $1.frame.width * $1.frame.height }
+
+        guard let window = candidate else { return }
+        // 状态一致就不要重复 toggle：连按两次会让窗口在全屏与不全屏之间来回横跳
+        guard window.styleMask.contains(.fullScreen) != on else { return }
+        window.toggleFullScreen(nil)
     }
 
     func presentAlert(title: String, message: String) {

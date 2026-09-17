@@ -62,12 +62,13 @@ extension LumenAction {
         case .openMostRecent:
             // 明确保持可用：没有最近记录时给一句提示，比一个点不动又不说原因的菜单项好。
             return true
-        case .closeDocument, .copyFile, .nextUnit, .previousUnit,
+        case .closeDocument, .copyFile, .nextUnit, .previousUnit, .goToPage,
              .fontIncrease, .fontDecrease:
             return hasDocument
         case .copyFullText:
             return hasDocument && state.bridge.extractFullText != nil
-        case .toggleSidebar, .toggleAIPanel, .showOutline, .showSearch:
+        case .toggleSidebar, .toggleAIPanel, .toggleImmersive, .showOutline,
+             .showSmartOutline, .showSearch:
             return hasDocument
         case .showThumbnails:
             return state.document?.kind == .pdf
@@ -88,13 +89,20 @@ extension LumenAction {
             withAnimation(DS.Motion.panel) { state.isSidebarVisible.toggle() }
         case .toggleAIPanel:
             withAnimation(DS.Motion.panel) { state.isAIPanelVisible.toggle() }
+        case .toggleImmersive:
+            // 面板可见性与全屏都由 setImmersive 内部统一处理，这里不重复包动画：
+            // 它自己带了 withAnimation，外面再来一层会让两块面板的时序和外框对不齐。
+            state.setImmersive(!state.isImmersive)
         case .commandPalette:
             withAnimation(DS.Motion.palette) { state.isCommandPaletteVisible.toggle() }
 
         case .nextUnit:     state.bridge.goToNextUnit?()
         case .previousUnit: state.bridge.goToPreviousUnit?()
+        case .goToPage:
+            withAnimation(DS.Motion.palette) { state.isPageJumpVisible.toggle() }
 
         case .showOutline:    state.revealSidebar(tab: .outline)
+        case .showSmartOutline: state.revealSidebar(tab: .smartOutline)
         case .showSearch:     state.revealSidebar(tab: .search)
         case .showThumbnails: state.revealSidebar(tab: .thumbnails)
 

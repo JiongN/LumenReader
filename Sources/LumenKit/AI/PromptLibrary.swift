@@ -166,4 +166,62 @@ public enum PromptLibrary {
         """
         return [.system(systemPrompt()), .user(prompt)]
     }
+
+    // MARK: - 智能目录
+
+    /// 智能目录的**第一步**：只生成目录骨架（标题 + 位置），不带摘要。
+    ///
+    /// 为什么拆两步：一本 300 页的书，若要求「目录 + 每节摘要」一次输出，
+    /// 输出长度会直接顶到 max_tokens，而且中途任何一处失败都得整本重来——
+    /// 白花的钱是实打实的。骨架只有几十行，生成快、失败代价小；
+    /// 摘要等用户真的点开某一节时再单独算（见 `entrySummaryMessages`）。
+    public static func smartOutlineMessages(
+        metadata: DocumentMetadata,
+        digest: String,
+        unitName: String
+    ) -> [AIMessage] {
+        let prompt = """
+        \(documentBlock(metadata: metadata, locatorLabel: ""))
+
+        【文档各\(unitName)的开头摘录】
+        \(digest)
+
+        请根据上面的摘录，推断这份文档的目录结构，并**只输出 JSON**。
+
+        格式要求：
+        1. 输出一个 JSON 数组。不要输出任何解释文字，不要用 markdown 代码块包裹。
+        2. 数组里每个元素形如：{"title": "章节标题", "unit": 12, "depth": 0}
+           - title：章节标题，使用原文的语言，20 字以内
+           - unit：该章节起始的\(unitName)序号，从 1 开始，必须落在上面出现过的范围内
+           - depth：层级，顶层为 0，子节为 1，更深的为 2
+
+        内容要求：
+        3. 只列出摘录中**确实出现**的结构性分节；标题要从原文里认，不要自己起名。
+        4. 实在看不出分节时，按内容主题归纳 5–12 个部分，标题如实描述该部分在讲什么。
+        5. 判断不出来源的条目就跳过，宁缺毋滥。
+        6. 条目总数不要超过 40。
+        """
+        return [.system(systemPrompt()), .user(prompt)]
+    }
+
+    /// 智能目录的**第二步**：为某一节生成摘要（用户点开时才调用）。
+    public static func entrySummaryMessages(
+        metadata: DocumentMetadata,
+        entryTitle: String,
+        locatorLabel: String,
+        text: String
+    ) -> [AIMessage] {
+        let prompt = """
+        \(documentBlock(metadata: metadata, locatorLabel: locatorLabel))
+
+        【「\(entryTitle)」一节的正文】
+        \(truncate(text, limit: 9000))
+
+        请用 2–4 句话说明这一节讲了什么。要求：
+        - 直接说内容，不要用「本节介绍了…」这类套话开头。
+        - 抓住作者的核心主张或这一节要解决的问题。
+        - 只输出这段话本身。
+        """
+        return [.system(systemPrompt()), .user(prompt)]
+    }
 }

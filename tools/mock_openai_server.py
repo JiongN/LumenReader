@@ -12,6 +12,11 @@
     tail -1 /tmp/lumen-mock-requests.jsonl | python3 -m json.tool
 
     python3 tools/mock_openai_server.py 8777
+
+桩服务会按提示词**分流**：要求「只输出 JSON」的请求（AI 智能目录的第一步）
+返回一段带围栏、带客套话、且夹着越界条目的 JSON——故意做成不干净的样子，
+因为「解析器够不够宽容」正是这条链路最容易出问题的地方；
+其余请求返回一段中文说明文。
 """
 import json
 import os
@@ -28,6 +33,41 @@ REPLY = """这段文字讨论的是**注意力机制**替代循环结构的核�
 - 作者用「路径长度」作为论据：路径越短，梯度传播越稳定。
 
 需要注意，原文并没有给出长序列下的实测对比，这一部分属于作者的推断。"""
+
+# 智能目录第一步的桩响应。刻意做脏：
+#   - 前面带一句客套话、外面裹 markdown 围栏（模型十次有八次这样）
+#   - 夹一条 unit=9999 的越界条目（必须被丢掉）
+#   - 夹一条与首条完全重复的条目（必须去重）
+#   - 键名混用 unit / page（两种都要认）
+# 如果解析器只处理「纯 JSON」，这份响应就会解析失败——那正是我们要暴露的。
+OUTLINE_REPLY = """好的，以下是这份文档的目录：
+
+```json
+[
+  {"title": "第一章 引言", "unit": 1, "depth": 0},
+  {"title": "研究背景", "unit": 2, "depth": 1},
+  {"title": "第二章 方法", "page": 4, "depth": 0},
+  {"title": "数据来源", "unit": 6, "depth": 1},
+  {"title": "第三章 结果与讨论", "unit": 8, "depth": 0},
+  {"title": "不存在的条目", "unit": 9999, "depth": 0},
+  {"title": "第一章 引言", "unit": 1, "depth": 0}
+]
+```
+
+以上为根据摘录推断出的结构。"""
+
+
+def pick_reply(payload: dict) -> str:
+    """按最后一条用户消息里的指令分流。"""
+    messages = payload.get("messages") or []
+    for message in reversed(messages):
+        if message.get("role") != "user":
+            continue
+        content = message.get("content") or ""
+        if "只输出 JSON" in content or "只输出JSON" in content:
+            return OUTLINE_REPLY
+        break
+    return REPLY
 
 
 def dump_request(payload: dict) -> None:
@@ -55,10 +95,14 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         length = int(self.headers.get("Content-Length", 0))
         raw = self.rfile.read(length)
+        payload = {}
         try:
-            dump_request(json.loads(raw.decode("utf-8")))
+            payload = json.loads(raw.decode("utf-8"))
+            dump_request(payload)
         except Exception:  # noqa: BLE001
             pass
+
+        reply = pick_reply(payload)
 
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream; charset=utf-8")
@@ -68,15 +112,15 @@ class Handler(BaseHTTPRequestHandler):
 
         # 先吐一段推理内容，验证 reasoning_content 的折叠展示
         for piece in ["先看问题指向的是动机而不是实现。", "原文强调路径长度，这点要保留。"]:
-            payload = {"choices": [{"delta": {"reasoning_content": piece}, "finish_reason": None}]}
-            self._chunk(f"data: {json.dumps(payload, ensure_ascii=False)}\n\n".encode())
+            payload_chunk = {"choices": [{"delta": {"reasoning_content": piece}, "finish_reason": None}]}
+            self._chunk(f"data: {json.dumps(payload_chunk, ensure_ascii=False)}\n\n".encode())
             time.sleep(0.06)
 
         # 再按字符吐正文，模拟逐字流式
         step = 4
-        for i in range(0, len(REPLY), step):
-            payload = {"choices": [{"delta": {"content": REPLY[i:i + step]}, "finish_reason": None}]}
-            self._chunk(f"data: {json.dumps(payload, ensure_ascii=False)}\n\n".encode())
+        for i in range(0, len(reply), step):
+            payload_chunk = {"choices": [{"delta": {"content": reply[i:i + step]}, "finish_reason": None}]}
+            self._chunk(f"data: {json.dumps(payload_chunk, ensure_ascii=False)}\n\n".encode())
             time.sleep(0.02)
 
         self._chunk(b"data: [DONE]\n\n")
