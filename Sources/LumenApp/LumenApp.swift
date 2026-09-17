@@ -57,8 +57,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             Task { await FontCatalog.logReport() }
         }
 
+        if LaunchOptions.themeReport {
+            let ids = ReadingTheme.all.map { "\($0.id.rawValue)/\($0.id.displayName)" }
+            NSLog("[Lumen][theme] 可选主题 \(ReadingTheme.all.count) 个：\(ids.joined(separator: "、"))")
+            NSLog("[Lumen][theme] 是否含纯黑 oled：\(ReadingTheme.all.contains { $0.id == .oled })")
+            NSLog("[Lumen][theme] theme(for: .oled) → \(ReadingTheme.theme(for: .oled).id.rawValue)")
+            NSLog("[Lumen][theme] ReadingThemeID.oled.migrated → \(ReadingThemeID.oled.migrated.rawValue)")
+        }
+
         // 快捷键自检：打印当前表并实跑一遍改绑规则（用临时文件，不碰用户配置）
         KeyBindingsAudit.run()
+
+        // 钥匙串自检：只读查询，打印访问成本与缓存状态（不写不删用户钥匙串）
+        KeychainAudit.run()
 
         // 字体目录后台预热：用户点开字体选择器时就不必看到"正在读取系统字体…"
         FontCatalog.prewarm()
