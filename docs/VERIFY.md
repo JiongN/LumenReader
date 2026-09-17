@@ -18,10 +18,24 @@
 | **规则实跑** | 表驱动的逻辑（快捷键改绑）对不对 | 把规则喂进实现，断言输出 |
 | **真实像素** | 主题 / 材质 / 颜色对不对 | 录屏抓图 + 按比例取色 |
 | **桩服务** | AI 链路（提示词、流式、解析）对不对 | 本机桩服务，可重复、不烧钱 |
+| **成本计量** | 终值一样但代价差几个数量级的实现，走的是哪条 | 数耗时与系统调用次数（见下） |
 
 一条铁律：**只打终值的日志等于没验**。
 「跳转成功」和「本来就在那一页」的终值输出完全相同，所以跳页自检打三段——
 跳之前在哪、请求的是第几个、跳之后在哪。
+
+第二条铁律：**终值相同、代价不同的两条路径，必须用耗时或调用次数区分。**
+两个最典型的例子：
+- 判断「有没有配密钥」可以走属性查询，也可以去解密文。**两者返回的都是同一个 `Bool`**，
+  日志一模一样；但后者要走钥匙串授权（`--keychain-report` 里对比「首次 / 再次」耗时与
+  「钥匙串调用+N」就是在量这个差）。
+- 缩略图渲染可以「复用缓存」也可以「重新绘制」，得靠 `--thumb-report` 打出的跳过明细区分。
+
+顺手记一条探针技巧：一次性探针不必进仓库，放 `/tmp/<名字>/main.swift`，
+`xcrun swiftc main.swift -o probe && ./probe` 即可；需要稳定签名身份时才补一句
+`codesign -f -s - -i <某个标识符>`。要判断某个钥匙串查询**会不会弹窗**，
+给 `LAContext` 设 `interactionNotAllowed = true`——请求会直接失败并返回 `-128 / -25308`，
+从而在不打扰用户的前提下拿到结论。
 
 ---
 
@@ -75,6 +89,7 @@
 | 开关 | 用途 |
 | --- | --- |
 | `--keys-report 1` | 打印快捷键表 + 撞车检查 + 实跑一遍改绑规则 |
+| `--keychain-report 1` | 打印钥匙串访问成本与缓存状态（**只读**，不写不删用户钥匙串） |
 | `--font-report 1` | 打印字体目录统计与断言 |
 | `--palette 1` | 启动后打开命令面板 |
 | `--settings 1` / `--settings-tab interface` | 打开设置窗口 / 落在指定页签 |
@@ -125,12 +140,25 @@ dist/Lumen.app/Contents/MacOS/Lumen --open /tmp/lumen-test/large.pdf \
   --window-size 920x620 --layout-report 1 --capture /tmp/shot.png --capture-delay 5
 ```
 
-读日志里各 view 的 `x/y/w/h/maxX/maxY`，做**包含关系**判断。
-典型断言：`statusChip.maxX < aiPanel.x`（状态条不压在 AI 面板上）、
-`readerSurface` 在沉浸模式下两侧留白相等。
+日志里每个 view 的 `x/y/w/h/maxX/maxY` 直接交给断言器，不要靠肉眼看：
+
+```bash
+python3 tools/layout_assert.py /tmp/lumen-smoke        # 目录或日志文件都行
+```
+
+它会逐条验：探针有没有越出窗口内容区、`maxX` 与 `x+w` 是否自洽、
+三块面板有没有横向重叠、面板是否铺满宽度、状态条有没有跑到面板底下，
+以及**收起的面板是探针消失还是缩成 0 宽继续占位**
+（后者在截图里看不出区别，却会让快捷键落在看不见的控件上）。
+预期从日志里的启动参数（`--sidebar 0` / `--ai 1`）推导，不依赖文件名。
 
 需要新控件被审到时，在视图上加 `.layoutProbe("名字")`——它只在 `--layout-report 1`
 时才挂 `GeometryReader`，正常启动零开销。
+
+> ⚠️ **布局 dump 是「首次上报后 2 秒」统一打印**，所以 `--capture-delay` 必须留够余量，
+> 否则进程会在 dump 之前就退出，日志里一条布局都没有——看起来像"探针没生效"，
+> 实际是抢跑。EPUB 走 WebKit，阅读容器出现得比 PDF 晚，实测 `--capture-delay 8` 才稳。
+> 判据很简单：日志里没有 `[Lumen][layout] 窗口内容区 …` 就是没 dump 成，不是布局有问题。
 
 ### 验证复制类功能
 
@@ -230,3 +258,11 @@ python3 tools/make_test_epub.py /tmp/lumen-test    # typography.epub（自带对
   但「看起来丝不丝滑」需要人看。
 - **真实服务商的兼容性**。桩服务只覆盖 OpenAI 兼容协议的**标准形态**，
   各家服务商对 `reasoning_content`、`max_tokens` 等字段的细微差异不在覆盖范围内。
+- **系统授权框「弹没弹」**。`screencapture` 抓的是自己那个窗口，
+  系统弹窗不在其中，截图里看不见。所以跟系统授权有关的结论只能靠间接信号：
+  用 `LAContext.interactionNotAllowed = true` 的探针把「会弹窗」转成「返回 -128」，
+  或看 `--keychain-report` 的耗时与钥匙串调用次数。
+- **「重编译后首次用到密钥」那一次授权**。这是 ad-hoc 签名的地板，不是缺陷：
+  login 钥匙串的 ACL 认 CDHash，而 `./build.sh` 每次产出新 CDHash。
+  试过并已排除的三条路见 `docs/ISSUES-2026-09-17.md` 第 8 节
+  （数据保护钥匙串缺 entitlement、补 entitlement 被 SIGKILL、本机无签名身份）。
