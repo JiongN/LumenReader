@@ -216,17 +216,24 @@ struct RootView: View {
             .help("复制与导出")
             .disabled(state.document == nil)
 
-            Button {
-                withAnimation(DS.Motion.panel) { state.isAIPanelVisible.toggle() }
-            } label: {
-                // 统一的环点 AI 字形（AIIcon v3：细线圆环 + 缺口处一枚实心点）；
-                // 面板展开时全亮，收起时降透明度表示「未激活」，
-                // 代替原来的 fill / outline 两枚不同形 symbol。
-                AIIcon(size: 15)
-                    .opacity(state.isAIPanelVisible ? 1 : 0.5)
+            // 面板展开时**不摆这枚**：收起按钮就在 AI 面板的右上角，
+            // 同一个动作在界面上留两个入口是重复，而且两个都在窗口右侧、
+            // 相距不到 30pt，看着像一对没对齐的孪生按钮。
+            //
+            // 只在**收起状态**下留一枚小入口：不然点掉收起之后就再也唤不回来。
+            // 快捷键 ⌥] 一直有效，但不能指望用户记得住——「点掉就找不到」是
+            // 这类可收起面板最常见的翻车方式。
+            if !state.isAIPanelVisible {
+                Button {
+                    withAnimation(DS.Motion.panel) { state.isAIPanelVisible = true }
+                } label: {
+                    // 环点 AI 字形（AIIcon v3：细线圆环 + 缺口处一枚实心点），
+                    // 与面板侧栏页签上的 AI 字形同形。
+                    AIIcon(size: 15)
+                }
+                .help(helpText("显示 AI 面板", for: .toggleAIPanel))
+                .disabled(state.document == nil)
             }
-            .help(helpText(state.isAIPanelVisible ? "隐藏 AI 面板" : "显示 AI 面板", for: .toggleAIPanel))
-            .disabled(state.document == nil)
 
             Button {
                 state.setImmersive(!state.isImmersive)

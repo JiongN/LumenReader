@@ -66,6 +66,16 @@ struct AIPanelView: View {
     /// 300pt 面板下给输入框仍留得下 126pt，占位符不会被裁成残句。
     private static let modelSlotMinWidth: CGFloat = 108
 
+    /// header 行里「模板 / Agent」两枚 chip 的宽度区间（pt）。
+    ///
+    /// 这两枚原来挂 `.fixedSize()`（不让菜单标题被截断），代价是 header 行在
+    /// 300pt 下限下**整体溢出面板右边界**：实测收起按钮被顶到 maxX=1340.2，
+    /// 而面板右边界是 1340.0——按钮有一半探到面板外面，看着像「悬在行尾外面」。
+    /// 改成可压缩后必须同时给下限：只压缩不设下限，可截断的文本会被压到 0 宽
+    /// （模型 chip 那次就是同一个坑），chip 会整个消失。
+    private static let headerChipMinWidth: CGFloat = 56
+    private static let headerChipMaxWidth: CGFloat = 116
+
     private var header: some View {
         HStack(spacing: DS.Space.s) {
             // v3 图标迭代：头部不再放 AI 图标。面板里是 chips + 对话，
@@ -86,8 +96,13 @@ struct AIPanelView: View {
 
             Spacer(minLength: 0)
 
+            // 行尾这两枚按「谁都不许被挤走」排序：⋯ 其次、收起最高。
+            // 收起按钮是这个面板唯一的鼠标出口（工具栏那枚重复入口已删），
+            // 它一旦被左侧挤出可视区，就等于「点掉就再也收不回来」。
             moreMenu
+                .layoutPriority(1)
             collapseButton
+                .layoutPriority(2)
         }
         .padding(.horizontal, Self.contentInset)
         .frame(height: DS.Size.toolbarHeight)
@@ -126,14 +141,19 @@ struct AIPanelView: View {
         .menuIndicator(.hidden)
         .frame(width: 22)
         .help("更多")
+        .layoutProbe("aiMoreMenu")
     }
 
-    /// 面板内的收起入口。
+    /// 面板右上角的收起入口——**这是收起面板唯一的鼠标出口**。
     ///
-    /// 此前收起 AI 面板只有两个鼠标入口：工具栏那枚 sparkles 按钮、以及菜单项
+    /// 此前收起 AI 面板只有两个鼠标入口：工具栏那枚 AI 按钮、以及菜单项
     /// 「显示 → 显示/隐藏 AI 面板」。用户在面板里读完一段回答、想把阅读区让出来时，
     /// 眼睛和手都在面板上，却得跑去工具栏找——这就是「右侧边栏无法收起」的可用性根因。
-    /// 给它一个面板内的近在手边的按钮。
+    ///
+    /// 工具栏那枚已删（同一个动作的第二个入口），所以这一枚必须**钉死在右上角**：
+    /// 它在 header 行里拿最高 layoutPriority，且行内可压缩的 chip 都给了下限宽度，
+    /// 300pt 下限下也不会被顶出面板右边界。收起后的唤回走工具栏那枚「仅收起时出现」
+    /// 的小入口 + 快捷键，不会「点掉就再也找不到」。
     private var collapseButton: some View {
         Button {
             withAnimation(DS.Motion.panel) { state.isAIPanelVisible = false }
@@ -143,8 +163,10 @@ struct AIPanelView: View {
                 .foregroundStyle(DS.Palette.textSecondary)
         }
         .buttonStyle(.plain)
+        .frame(width: 22, height: DS.Size.toolbarHeight, alignment: .center)
         .help("收起 AI 面板 (\(state.keyBindings.combo(for: .toggleAIPanel)?.display ?? "—"))")
         .accessibilityLabel("收起 AI 面板")
+        .layoutProbe("aiCollapse")
     }
 
     // MARK: - 服务商与提示词
@@ -271,7 +293,10 @@ struct AIPanelView: View {
         }
         .menuStyle(.borderlessButton)
         .menuIndicator(.hidden)
-        .fixedSize()
+        // 不挂 .fixedSize()：那样这一行在 300pt 下限下会整体溢出面板右边界，
+        // 把行尾的收起按钮顶出去（实测 maxX=1340.2 > 面板 1340.0）。
+        // 改成「可压缩 + 有下限」，超长模板名截断、完整名字交给 .help。
+        .frame(minWidth: Self.headerChipMinWidth, maxWidth: Self.headerChipMaxWidth)
         .help("切换提示词模板")
     }
 
@@ -325,7 +350,8 @@ struct AIPanelView: View {
         }
         .menuStyle(.borderlessButton)
         .menuIndicator(.hidden)
-        .fixedSize()
+        // 同 templateMenu：可压缩 + 有下限，换掉会让 header 行溢出的 .fixedSize()。
+        .frame(minWidth: Self.headerChipMinWidth, maxWidth: Self.headerChipMaxWidth)
         .help("切换 Agent：角色、技能与联网检索")
     }
 
