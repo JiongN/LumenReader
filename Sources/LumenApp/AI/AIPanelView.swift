@@ -57,6 +57,15 @@ struct AIPanelView: View {
     /// 引用编号加四个动作按钮。14 是「看着不挤」与「300pt 时 footer 仍放得下」的交点。
     private static let contentInset: CGFloat = 14
 
+    /// composer 行里模型 chip 的**最小槽位宽**（pt）。
+    ///
+    /// 这不是审美常量，是**可见性下限**。chip 里的文本挂了 `.frame(maxWidth:)` 可截断，
+    /// 它的最小宽度因此是 0；而同一行的输入框是 `.layoutPriority(1)`，HStack 于是把
+    /// chip 一路压到 0 宽——实测面板里根本看不到模型切换按钮（头部已搬走、底部又没画出来）。
+    /// 108 ≈ chip 自然上限（8 前内边距 + 5 圆点 + 4 间距 + 80 文本 + 8 后内边距 = 105）取整；
+    /// 300pt 面板下给输入框仍留得下 126pt，占位符不会被裁成残句。
+    private static let modelSlotMinWidth: CGFloat = 108
+
     private var header: some View {
         HStack(spacing: DS.Space.s) {
             Image(systemName: "sparkles")
@@ -172,13 +181,17 @@ struct AIPanelView: View {
             chip(
                 dotColor: configured ? DS.Palette.success : DS.Palette.warning,
                 text: modelLabel,
-                maxTextWidth: 132
+                // 80 而不是 132：让它连上槽位上限（`modelSlotMinWidth` = 108），
+                // chip 才不会反过来去挤输入框。完整模型名交给下面的 `.help`。
+                maxTextWidth: 80
             )
         }
         .menuStyle(.borderlessButton)
         .menuIndicator(.hidden)
-        // 不给 layoutPriority：让下面的输入框优先拿到宽度，chip 自行截断。
+        // 不给 layoutPriority（输入框优先拿宽度），但**必须给最小宽度**——
+        // 只靠 layoutPriority，可截断的文本会被压到 0 宽，chip 就整个消失了。
         .layoutPriority(0)
+        .frame(minWidth: Self.modelSlotMinWidth, alignment: .leading)
         .help(configured
               ? "切换 AI 服务商 / 模型\n当前模型：\(modelLabel)"
               : "尚未配置 AI 服务商，点击开始配置")
@@ -557,6 +570,8 @@ struct AIPanelView: View {
             HStack(alignment: .bottom, spacing: DS.Space.s) {
                 // 左槽现在是模型 chip（本批从头部搬来）；联网开关搬去了头部。
                 providerMenu
+                    // 几何可外部核对：这一条断言是「模型切换按钮真的画出来了」。
+                    .layoutProbe("aiModelChip")
 
                 TextField("就当前内容提问…", text: $chat.draft, axis: .vertical)
                     .textFieldStyle(.plain)
