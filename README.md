@@ -11,7 +11,7 @@ macOS 原生阅读器：**PDF + EPUB + 自接 AI**。纯 Swift / SwiftUI，无 X
 ┌──────────────┬───────────────────────────┬──────────────┐
 │   侧栏       │        阅读区             │   AI 面板    │
 │ 目录/智能目录 │   PDF（PDFKit）/ EPUB     │  对话/摘要   │
-│ 搜索/缩略图  │   （WKWebView）           │              │
+│ 搜索/批注/页面│   （WKWebView）           │  Agent 切换  │
 │ ← 可拖拽 →   │                           │ ← 可拖拽 →   │
 └──────────────┴───────────────────────────┴──────────────┘
 ```
@@ -20,19 +20,41 @@ macOS 原生阅读器：**PDF + EPUB + 自接 AI**。纯 Swift / SwiftUI，无 X
 
 ![AI 智能目录](docs/images/smart-outline.png)
 
-**沉浸模式**（`⌃⌘F`）—— 收起两侧面板与工具栏，正文限宽居中，底部留一条自动隐现的控制条。
+**沉浸模式**（`⌃⌘F`）—— 收起两侧面板与工具栏，正文限宽居中，底部一条自动隐现的控制条。
 
 ![沉浸模式](docs/images/immersive.png)
+
+### 批注与高亮
+
+划词浮动条上有「高亮」「批注」两个按钮，AI 每条回复旁也有「复制」「添加到批注」。
+PDF 的批注是**原生 PDFKit annotation 并写回原文件**——用系统「预览」或 Acrobat
+打开同一个文件都能看见、能继续编辑。侧栏「批注」页签汇总全书批注，可逐条跳转、删除。
+
+EPUB 的批注存在应用数据目录（EPUB 是压缩包，写回会破坏结构与签名），界面里写明了这一点。
+
+### Agent
+
+提示词旁边可以选 Agent：**角色设定 + 技能集 + 是否联网检索**。内置四个预设
+（苏格拉底导师 / 教育学研究者 / 批判审稿人 / 文献综述助手），也可以自己建。
+
+勾了「联网检索」的 Agent 会先查 **Crossref · OpenAlex · arXiv** 三个公开学术库，
+把命中的文献连同 DOI / 编号一起交给模型，并要求它只能引用检索到的、注明出处。
+知网、万方、Web of Science 接不了（无公开接口 / 需机构订阅），界面上如实说明原因。
 
 ---
 
 ## 30 秒上手
 
 ```bash
-./build.sh              # 编译 + 组装 dist/Lumen.app + ad-hoc 签名
+./build.sh              # 编译 + 组装 dist/Lumen.app + 签名
 ./build.sh release      # Release 构建
 ./build.sh debug run    # 编译并启动
 ```
+
+签名优先用自签证书「Lumen Dev」，没有证书时退回 ad-hoc。这一条有实际影响：
+ad-hoc 的身份就是 CDHash，每次重编译都会变，login 钥匙串的 ACL 会把新构建当成
+「陌生程序」而在用到 API Key 时弹一次授权框。自签证书的身份是稳定的，弹窗因此从
+「每次重编译」降到「切换签名身份那一次」。证书建法见 `docs/ISSUES-2026-09-17.md` 第 9 节。
 
 首次跑之前需要知道的一件事：**`swift build` 必须带 `--disable-sandbox`**。
 CommandLineTools 自带的 SwiftPM 在沙箱里编译 `Package.swift` 会报 `sandbox_apply` 失败，
@@ -58,6 +80,7 @@ dist/Lumen.app/Contents/MacOS/Lumen --open /path/to/book.pdf
 | `tools/` | 自检工具：桩服务、测试素材生成、截图取色 |
 | `docs/ARCHITECTURE.md` | 模块地图、数据流、关键设计决策及理由 |
 | `docs/VERIFY.md` | **自检通道手册**。这台机器上「怎么证明改动是对的」全在这里 |
+| `docs/ISSUES-2026-09-17.md` | 两批共 17 项问题的排查 / 根因 / 修复 / 验证记录 |
 | `docs/PROGRESS.md` | 批次进度、已完成 / 待办清单 |
 | `docs/design/` | 两轮设计稿（`DESIGN.md` 第一轮、`DESIGN-v2.md` 第二轮） |
 
@@ -99,6 +122,20 @@ dist/Lumen.app/Contents/MacOS/Lumen --open /path/to/book.pdf
 
 6. **`.alert` 里放不了输入框**：SwiftUI macOS 的 alert actions 会忽略 `TextField`。
    需要输入就走自建卡片（见 `PageJumpPanel.swift`）。
+
+7. **不要把库返回的字符串直接和常量比**。PDFKit 里
+   `PDFAnnotationSubtype.highlight.rawValue == "/Highlight"`（**带**斜杠），
+   而 `annotation.type` 返回 `"Highlight"`（**不带**）。直接比较恒为假，
+   症状是「批注明明写进磁盘了，清单里一条都没有」——两边各自都正常，只有比较那行是错的。
+   现在统一走 `lumenTypeName`（去斜杠）。同类陷阱还有：`Text` 便签会自动带一个
+   `Popup` 影子批注，不排除它计数会虚高一倍。
+
+8. **断言必须能被证伪**。一条断言如果在实现明显写错时依然通过，它就是恒真的。
+   踩过两次：冒烟里「布局报告存在」的 grep 模式写错，解析出 0 行、14 个用例全部"通过"；
+   `--search-report` 把查询词写死成英文 `"the"`，而测试素材全是中文，0 命中却报
+   「搜索有命中 ❌」——**看起来像搜索坏了，其实是测试词不在书里**。
+   现在的规矩：断言指向**外部可核对的产物**（重新从磁盘打开文件数批注、独立进程读文件），
+   并把解析出的条数一并打出来；写完人为让它失败一次。
 
 ---
 

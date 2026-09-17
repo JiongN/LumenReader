@@ -14,7 +14,7 @@
 │                                                                   │
 │   RootView ── 窗口外壳：工具栏 / 命令面板 / 跳页 / 沉浸 HUD        │
 │     └─ ReaderContainerView ── 三栏布局 + 可拖拽分隔线              │
-│          ├─ SidebarColumn      目录 · 智能目录 · 搜索 · 缩略图     │
+│          ├─ SidebarColumn      目录 · 智能 · 搜索 · 批注 · 页面     │
 │          ├─ PDFReaderView / EPUBReaderView                        │
 │          └─ AIPanelView                                           │
 │                                                                   │
@@ -24,9 +24,10 @@
 ┌───────────────────────────┴───────────────────────────────────────┐
 │  LumenKit（引擎层，无 SwiftUI）                                    │
 │                                                                   │
-│   Document/    PDF·EPUB 的解析模型、定位符、元数据、全文抽取        │
+│   Document/    PDF·EPUB 的解析模型、定位符、元数据、全文抽取、批注  │
 │   Store/       设置 · 阅读进度 · 最近打开 · 快捷键 · 记忆 · 路径    │
 │   AI/          AIProvider 协议 · OpenAI 兼容客户端 · 提示词 · 目录  │
+│                · Agent 配置 · 联网文献检索                         │
 │   OCR/         纯 Vision 框架的逐页识别                            │
 └───────────────────────────────────────────────────────────────────┘
 ```
@@ -64,6 +65,13 @@ ReaderBridge
     goTo / goToNextUnit / goToPreviousUnit / performSearch / clearSearch
     zoomIn / zoomOut / zoomToFit                               仅 PDF
     requestOCR
+
+    addHighlight           (String) -> Void      高亮当前选区
+    addPageNote            (Int, String, String) 页内锚点批注（页号 / 锚文本 / 正文）
+    annotationsProvider    () async -> [AnnotationItem]
+    deleteAnnotation       (String) -> Void
+    revealSearchHit        (Int) -> Void          定位到第 N 处搜索命中
+    annotationRevision     Int                    批注增删后自增，侧栏据此刷新
 ```
 
 **为什么全用闭包而不是协议**：闭包可以按格式各自捕获自己的控制器（`[weak controller]`），
@@ -146,6 +154,64 @@ SelectionActionBar / AIPanelView
 **越界条目为什么扔掉而不是钳制**：钳制会把多个假条目全挤到最后一页，在目录里堆出
 一串指向同一位置的重复项，比缺几条难看得多。
 
+### 3.4 批注（PDF 与 EPUB 走两条完全不同的路）
+
+```
+PDF：写回**原文件**
+  SelectionActionBar / AIPanelView「添加到批注」
+    └─ PDFController.addHighlight(fromCurrentSelection:) / addNote(pageIndex:anchorText:body:)
+         ├─ 选区拆行 → 每行一个 PDFAnnotation(.highlight)   ← 贴住文字靠的是每行的 bounds
+         ├─ 锚文本定位：selection(of:on:)                   ← 见下面为什么不用 findString
+         └─ saveToFile()
+              ├─ detachSearchHighlights()   先把搜索临时高亮摘掉
+              ├─ doc.dataRepresentation() → data.write(.atomic)
+              └─ reattachSearchHighlights() 再放回去
+
+EPUB：写进应用数据目录
+  bridge.addHighlight
+    └─ EPUBController 注入 JS window.__lumen.highlight(quote)
+         └─ 用 <mark class="lumen-hl"> 包裹**引文**（按引文匹配，不按字符偏移 → 抗重排）
+              └─ AnnotationStore 落盘到 AppPaths.annotationsFile
+```
+
+**EPUB 为什么不写回原文件**：EPUB 是 zip 包，写回会破坏其结构与签名，
+别家阅读器可能直接打不开。所以存进应用数据目录，并在界面上如实说明——
+「看起来存在书里、其实存在别处」是不能接受的设计。侧栏的批注列表两种格式共用同一套交互。
+
+**PDF 为什么不用 `findString` 定位锚文本**：它是**全书**范围的，要先扫完全书再按页号筛；
+更关键的是它只认「文档里就是空格」的位置——实测 `findString("知识\n教师")` 命中 1 处，
+而 `findString("知识 教师")` 命中 **0** 处。AI 复述的引文十有八九跨了换行，
+于是「添加到批注」会静默退回页面便签。改成页内查找（`page.string` 里定 range →
+`page.selection(for: NSRange)`）后，实测查锚耗时 **2637µs → 648µs**（2 页文件上 4×）。
+
+**没锚上就不锚**：`selection(of:on:)` 返回 nil 时退回页面右上角的便签图标。
+锚不准的批注比没有批注更糟——它会把一段不相干的话标成高亮，用户看到时已经分辨不出是谁标错了。
+
+### 3.5 一次带 Agent 的 AI 请求
+
+```
+AIPanelView 的 agentMenu 选定 AgentConfig（角色设定 + 技能集 + 是否联网）
+  └─ AIChatModel.submit(..., agent:)
+       ├─ agent.usesWebSearch 时先 WebLiteratureSearch.search(query:)
+       │    └─ withTaskGroup 并发 Crossref / OpenAlex / arXiv（各自的解析器）
+       │         └─ 任一个失败都不影响其余；失败原因进 Outcome.failures
+       └─ PromptLibrary.messages(..., agent:, webContext:)
+            ├─ system = 默认系统提示 + agent.promptSection   ← 追加，不是替换
+            └─ user   = 材料（抬头 → 原文 → 联网结果）→ 要求 → 模板额外要求
+```
+
+**Agent 与提示词模板的语义刻意不同**：模板给 `systemPrompt` 时是**整段替换**
+（换一种读法），而 Agent 是**追加**——默认提示里的防幻觉、要引用、禁客套话
+是阅读场景的地基，换一个角色不该把它们拆掉。角色改变的是「谁在读」，不是「能不能编」。
+
+**联网结果必须排在任务要求之前**：它是「可用的材料」，要先于「拿这些材料做什么」出现；
+反过来放，模型容易先形成结论再回头挑材料。这条顺序从终值上看不出来（同一条消息、
+同样都含这些字），所以 `--agent-report` 专门为此立了一条断言。
+
+**为什么要能容忍单源失败**：三个源是独立的外部服务，任何一个都可能超时或被限流。
+一个源挂掉只让覆盖面变小，不该让整个功能不可用——但失败必须如实报出来，
+不能让「查不到文献」变成查不出原因的黑盒。
+
 ---
 
 ## 4. 存储布局
@@ -162,6 +228,7 @@ docs/<路径哈希>/
   state.json         阅读进度与位置
   chats.json         这本书的 AI 对话
   smart-outline.json 这本书的智能目录（含已生成的摘要）
+  annotations.json   **EPUB** 的批注（PDF 的批注写在 PDF 文件自己里面，不走这里）
 ```
 
 `~/Library/Caches/com.jn.lumen/` 放 EPUB 解包结果——**可随时安全删除**，丢了会重新解包。
@@ -186,6 +253,13 @@ docs/<路径哈希>/
 | 付费动作不给快捷键 | 「生成智能目录」是菜单项但没有快捷键。一次误触的代价是一次真实的模型调用 |
 | 全文抽取的两个字符门槛故意不同 | `usableText` 用 24 字符门槛（AI 上下文宁可这页什么都不给，也好过把页码当正文）；「复制全文」默认只要非空就采用（少一格正文比多一个页码严重得多） |
 | 菜单项是快捷键生效的前提 | SwiftUI 的 `.keyboardShortcut` 只在菜单项上才全局响应。只在命令面板里有、没有菜单项的动作，用户改了绑定也按不出效果——那属于骗人 |
+| 侧栏页签顺序即快捷键编号，新页签**插在中间并顺延**后面的 | 不把「批注」塞到 ⌘5 去保 `⌘4 = 页面` 的旧映射：编号跟着界面顺序走，用户按一次就能建立映射；乱序编号要求他先记住哪一号对应哪一个。这次是 ⌘4 从「页面」变成「批注」——属于**对用户的可见变更**，已在交付说明里标明 |
+| PDF 批注写回原文件，EPUB 批注存应用数据目录 | PDFKit 能原子写回且别的阅读器都认；EPUB 是 zip，写回会破坏结构与签名。差异在界面上如实写明，不假装一致 |
+| 搜索高亮用**临时** annotation，写盘前先摘除 | 搜索痕迹固化进用户的书是不可逆的污染。数不等于零就是 bug，自检专门盯这一条 |
+| 批注类型判断统一走 `lumenTypeName`（去斜杠） | `PDFAnnotationSubtype.highlight.rawValue == "/Highlight"` 带斜杠，而 `annotation.type` 返回 `"Highlight"` 不带——直接比较恒为假。同一个坑还带来第二个错误：`Text` 便签会自动带一个 `Popup` 影子批注，不排除它计数会虚高一倍 |
+| 联网检索源要能**被实测淘汰** | Semantic Scholar 在实现完成后被判出局：不带 key 时走共享配额池，本机连测两次都 429，默认配置下它只贡献一个错误。换成 OpenAlex 后命中 8→12 条、失败源 1→0、耗时 4478→3273ms。**重试修不了结构性限流**——那种情况要换源，不是加重试 |
+| 配置里预设的 id 写成固定 UUID 字面量 | 用 `UUID()` 会让每次求值得到新 id，「配置里没有 agents 时退回预设」这条路径每轮 id 都不同，用户选中的 Agent 静默丢失 |
+| 面板宽度只保留拖拽一个入口 | 设置页里再放一份就是同一个值两个入口，改了一个另一个不跟着变——「看起来能用其实不同步」的经典来源 |
 
 ---
 

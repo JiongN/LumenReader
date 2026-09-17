@@ -61,7 +61,7 @@
 | `--sidebar 0` / `--ai 0` | 钉住初始面板可见性（三态：不传参 = 按默认） |
 | `--window-size 920x620` | 设定窗口内容区尺寸。布局缺陷几乎都藏在最小尺寸下 |
 | `--panel-width 400x300` | 直接设左右面板宽度（侧栏 x AI 面板）。走的是和拖拽**同一个设置项** |
-| `--sidebar-tab thumbnails` | 直接把侧栏钉在某个页签（`outline` / `smartOutline` / `search` / `thumbnails`） |
+| `--sidebar-tab thumbnails` | 直接把侧栏钉在某个页签（`outline` / `smartOutline` / `search` / `annotations` / `thumbnails`） |
 | `--immersive 1` | 启动即进沉浸模式，走真实入口 `setImmersive` |
 | `--demo-selection 1` | 塞一段假选区（正常要鼠标划词才能触发，没有辅助功能权限） |
 
@@ -73,6 +73,9 @@
 | `--auto-confirm 1` | 自动点掉确认框（配合 `--run-action`，否则验不到确认之后那半条链路） |
 | `--jump-to 42` | 跳到第 N 个单元（1-based），打「跳转前 / 请求 / 跳转后」三段 |
 | `--thumb-report 1` | 打印缩略图的渲染与跳过明细（证明滚出可视区的页不再渲染） |
+| `--annotate-report 1` | 批注自检：在 `/tmp` 副本上跑「高亮 → 页面批注 → 写盘 → 重开核对 → 删除」 |
+| `--search-report 1` | 搜索高亮自检：高亮出现、逐条定位、**且不会写进用户的书** |
+| `--agent-report 1` | Agent 自检：预设稳定性、系统提示拼装顺序、真实联网检索 |
 | `--ask "问题"` | 启动后自动发起一次提问（端到端跑 AI 链路） |
 
 ### AI 与桩服务
@@ -203,6 +206,42 @@ tail -1 /tmp/lumen-mock-requests.jsonl | python3 -m json.tool
 md5 -q ~/Library/Application\ Support/com.jn.lumen/settings.json   # 跑前跑后应当相同
 ```
 
+### 验证批注 / 搜索高亮 / Agent
+
+三条通道都让**进程自己走完全程**，并且断言全部指向**外部可核对的产物**。
+全程在 `/tmp` 的副本上做，绝不碰用户的文件。
+
+```bash
+# 批注：高亮 → 页面批注 → 写盘 → 重开核对 → 删除（10 项）
+dist/Lumen.app/Contents/MacOS/Lumen --open /tmp/lumen-test/text.pdf \
+  --annotate-report 1 --capture /tmp/x.png --capture-delay 3
+
+# 搜索高亮：出现 → 逐条定位 → 不叠加 → 保存后重开仍是 0 条（6 项）
+dist/Lumen.app/Contents/MacOS/Lumen --open /tmp/lumen-test/text.pdf \
+  --search-report 1 --capture /tmp/x.png --capture-delay 4
+
+# Agent：预设 id 稳定、系统提示拼装、真实联网检索（14 项，要联网）
+dist/Lumen.app/Contents/MacOS/Lumen --agent-report 1 --capture /tmp/x.png --capture-delay 5
+```
+
+**为什么这些断言不能停在「函数返回 true」**——三条通道各有一个真实教训：
+
+| 曾经的写法 | 为什么是恒真/误判 | 现在的写法 |
+| --- | --- | --- |
+| `addHighlight(...) == true` | 只证明代码走到了那一行 | 重新从磁盘 `PDFDocument(url:)` 打开，数批注 |
+| 在页高 `midY` 处取一条横带当选区 | 段落只占页面上部，中点落在空白里，取到的是**空选区**（不是 nil，不报错），于是失败被归到「高亮坏了」 | 按**真实字形位置**（`characterBounds`）算横带；并把「选区非空」单独列成一条断言 |
+| 搜索词写死成 `"the"` | 测试素材全是中文 → 0 命中 → 报「搜索有命中 ❌」，看起来像搜索坏了 | 取**全书出现最多的字符**当查询词 |
+| `searchHighlightCount == hits.count` | 一处命中跨行会被拆成多条高亮（这是**正确**行为）→ 等号会把它判成失败 | 用 `>=`，并把「命中 / 高亮」两个数都打出来 |
+| `messages.last` 里 `web 段 in 任务段` | 这条断言本身是对的，**抓出了真 bug**：代码把检索结果追加在任务要求之后，而注释写的是之前 | 保留，并补一条「原文排在检索结果之前」 |
+
+> 判据：一条断言如果在实现明显写错时依然会通过，它就是恒真的，必须重写
+> （或写完之后人为让它失败一次）。
+
+**查看批注自检的产物**：`/tmp/lumen-annotate-audit.pdf` 保留在磁盘上，
+可以直接用「预览」打开核对高亮的位置与颜色。
+
+---
+
 ### 验证缓存与失效判定
 
 智能目录的缓存有效性靠「生成时的单元数 == 当前单元数」判定。直接把缓存改脏再启动：
@@ -266,3 +305,17 @@ python3 tools/make_test_epub.py /tmp/lumen-test    # typography.epub（自带对
   login 钥匙串的 ACL 认 CDHash，而 `./build.sh` 每次产出新 CDHash。
   试过并已排除的三条路见 `docs/ISSUES-2026-09-17.md` 第 8 节
   （数据保护钥匙串缺 entitlement、补 entitlement 被 SIGKILL、本机无签名身份）。
+  **自签证书「Lumen Dev」把这一条从「每次重编译」降成「切换身份那一次」**，
+  但仍不能断言「永不弹窗」——那要求签发一个受系统信任的开发者身份，本机做不到。
+- **批注在真实拖拽下的行为**。自检里的选区是程序构造的（按字形位置算横带），
+  它走通了「选区 → 高亮 → 写盘」的同一条代码路径，但
+  **「用户按下鼠标拖过两行时选区长什么样」没有被验证过**，理由同拖拽手势。
+- **EPUB 批注「写回原文件」**。EPUB 是压缩包，写回会破坏其结构与签名，
+  所以它存进应用数据目录（`AppPaths.annotationsFile`）。自检只验了
+  PDF 那条「写回原文件」的路径；EPUB 那条只验了高亮能画上、能重绘。
+- **联网检索的质量**。自检能证明「三个源各返回了结果、每条都带可核查的出处、
+  失败会如实报出来」，但**「这些文献是否真的回答了读者的问题」验不了**——
+  那需要读文献，属于人的判断。
+- **检索源的长期可用性**。`--agent-report` 每次跑的是**当下的**网络状态。
+  Semantic Scholar 就是这样被判出局的：连测两次都 429。
+  一个源今天通不代表下个月通，所以这条通道要定期重跑。
