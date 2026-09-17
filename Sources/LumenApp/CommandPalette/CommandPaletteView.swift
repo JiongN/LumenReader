@@ -131,7 +131,9 @@ struct CommandPaletteOverlay: View {
                 .font(DS.Typo.ui(size: 13, weight: .medium))
                 .foregroundStyle(DS.Palette.textTertiary)
 
-            TextField("输入命令，例如「主题」「导出」「批注」", text: $query)
+            // 举例必须挑真实存在的命令。这里原来写的是「批注」——
+            // 而全应用从来没有批注功能，等于用一个不存在的功能给用户指路。
+            TextField("输入命令，例如「主题」「导出」「跳转」", text: $query)
                 .textFieldStyle(.plain)
                 .font(DS.Typo.ui(size: 14))
                 .focused($isFieldFocused)
@@ -317,16 +319,19 @@ struct CommandPaletteOverlay: View {
         }
 
         // 主题（不是「动作」，没有快捷键，所以留在这里）
-        for theme in ReadingThemeID.allCases {
+        //
+        // 遍历 `ReadingTheme.all` 而不是 `ReadingThemeID.allCases`：已废弃的纯黑主题
+        // 仍留在枚举里（否则旧配置解不出来），但它不该出现在用户能选到的任何地方。
+        for theme in ReadingTheme.all {
             items.append(PaletteCommand(
-                id: "theme.\(theme.rawValue)",
-                title: "主题：\(theme.displayName)",
-                hint: reader.themeID == theme ? "当前" : "",
+                id: "theme.\(theme.id.rawValue)",
+                title: "主题：\(theme.id.displayName)",
+                hint: reader.themeID == theme.id ? "当前" : "",
                 icon: theme.isDark ? "moon.stars" : "sun.max",
                 group: "外观",
-                keywords: "theme 主题 \(theme.rawValue)"
+                keywords: "theme 主题 \(theme.id.rawValue)"
             ) {
-                state.settingsStore.reader.themeID = theme
+                state.settingsStore.reader.themeID = theme.id
             })
         }
 

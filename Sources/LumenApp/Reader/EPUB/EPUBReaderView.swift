@@ -50,11 +50,12 @@ struct EPUBReaderView: View {
             }
         }
         .task(id: document.id) { await prepare() }
+        // **只留一条。** `ReaderSettings` 里就包含 `themeID`，所以换主题必然也表现为
+        // `reader` 变化；原来另有一条 `.onChange(of: theme.id)` 也调 `applyTheme`，
+        // 于是切一次主题要跑两遍 `evaluateJavaScript` 注入 CSS 变量——
+        // 这正是「主题切换发滞」的一半来源。
         .onChange(of: reader) { _, newValue in
-            controller.applyTheme(theme, reader: newValue)
-        }
-        .onChange(of: theme.id) { _, _ in
-            controller.applyTheme(theme, reader: reader)
+            controller.applyTheme(newValue.theme, reader: newValue)
         }
         .onDisappear {
             store?.flush()

@@ -50,15 +50,21 @@ public struct ReadingTheme: Sendable, Equatable {
         textHex: 0xCCD3DD, secondaryTextHex: 0x848C99, accentHex: 0x7AA2FF, isDark: true
     )
 
-    public static let oled = ReadingTheme(
-        id: .oled, backgroundHex: 0x000000, surfaceHex: 0x0B0B0C,
-        textHex: 0xC9CFD8, secondaryTextHex: 0x7C838E, accentHex: 0x86AAFF, isDark: true
-    )
-
-    public static let all: [ReadingTheme] = [.paper, .warm, .sage, .dusk, .midnight, .oled]
+    /// 可选主题列表。
+    ///
+    /// **不含纯黑（`.oled`）**。去掉它不是审美偏好，是取舍结果：
+    /// 纯黑只在 OLED 屏上省电，LCD 上并不省；而它把对比度推到极限，
+    /// 白字贴在 #000000 上会让中文的细笔画发虚、光晕明显，长时间阅读的眼压反而更高。
+    /// 「深夜」已经足够暗（#16181D），且保留了层次。
+    /// `ReadingThemeID.oled` 这个 case 仍然保留，只为让旧配置能解码，
+    /// 见该 case 上的注释与 `ReadingThemeID.migrated`。
+    public static let all: [ReadingTheme] = [.paper, .warm, .sage, .dusk, .midnight]
 
     public static func theme(for id: ReadingThemeID) -> ReadingTheme {
-        all.first { $0.id == id } ?? .paper
+        // 走 `.migrated`：废弃主题在这里也能拿到正确落点，
+        // 而不是掉进 `?? .paper` 变成浅色——对选了深色的用户来说，
+        // 「主题被重置成纸白」比「主题变成另一个深色」难受得多。
+        all.first { $0.id == id.migrated } ?? .paper
     }
 
     // MARK: - CSS 生成

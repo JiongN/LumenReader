@@ -8,7 +8,14 @@ public enum ReadingThemeID: String, Codable, CaseIterable, Sendable, Identifiabl
     case sage       // 灰绿
     case dusk       // 暮蓝
     case midnight   // 深夜
-    case oled       // 纯黑（OLED 省电）
+    /// 已废弃：纯黑（OLED）。
+    ///
+    /// 保留这个 case **只为让旧配置能解码**。直接删掉的话，`themeID: "oled"` 会解码失败，
+    /// 容错解码把它兜成 `.paper` —— 一个深色用户下次打开会发现自己被换成了纸白，
+    /// 这是最糟的降级方向。迁移在下面 `migrated` 里做：解到它就落到 `.midnight`
+    /// （六个主题里与纯黑观感最接近的那个）。
+    /// 它已经不在 `ReadingTheme.all` 里，所以界面上选不到。
+    case oled
 
     public var id: String { rawValue }
 
@@ -19,7 +26,7 @@ public enum ReadingThemeID: String, Codable, CaseIterable, Sendable, Identifiabl
         case .sage:     return "灰绿"
         case .dusk:     return "暮蓝"
         case .midnight: return "深夜"
-        case .oled:     return "纯黑"
+        case .oled:     return "深夜"
         }
     }
 
@@ -28,6 +35,18 @@ public enum ReadingThemeID: String, Codable, CaseIterable, Sendable, Identifiabl
         switch self {
         case .paper, .warm, .sage: return false
         case .dusk, .midnight, .oled: return true
+        }
+    }
+
+    /// 废弃主题的落点。
+    ///
+    /// 做成属性而不是散在各处判断：`ReadingTheme.theme(for:)` 与设置解码都要用它，
+    /// 分头写同样一条 `== .oled ? .midnight : self` 迟早会漏掉一处，
+    /// 而漏掉的那一处表现是「某些入口选下去变纸白」——最难查的一类不一致。
+    public var migrated: ReadingThemeID {
+        switch self {
+        case .oled:  return .midnight
+        default:     return self
         }
     }
 }
@@ -134,7 +153,8 @@ public struct ReaderSettings: Codable, Sendable, Equatable {
     /// 就整份解码失败，用户所有偏好会被静默重置，而且不会有任何提示。
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        self.themeID = (try? container.decode(ReadingThemeID.self, forKey: .themeID)) ?? .paper
+        // `.migrated` 负责把已废弃的纯黑主题落到深夜，见 `ReadingThemeID.migrated`
+        self.themeID = ((try? container.decode(ReadingThemeID.self, forKey: .themeID)) ?? .paper).migrated
         self.fontFamily = (try? container.decode(ReadingFontFamily.self, forKey: .fontFamily)) ?? .system
         // 没有显式挑字体是合法状态，所以这里允许解出 nil
         self.readingFontFamilyName = try? container.decode(String.self, forKey: .readingFontFamilyName)
@@ -250,6 +270,102 @@ public struct AIProviderConfig: Codable, Sendable, Equatable, Identifiable {
     }
 }
 
+/// 可切换的提示词模板。
+///
+/// 为什么做成「模板」而不是给用户一个空白的 system prompt 输入框：
+/// 能改系统提示的用户是少数，多数人只是想要「换个角度读」——
+/// 「通俗解释一遍」「帮我挑论证漏洞」。模板把这两类需求都接住了：
+/// 内置模板开箱可用，自定义模板留给愿意自己写的人。
+///
+/// `systemPrompt` 与 `instruction` 分开，是因为它们进模型的位置不同：
+/// 前者替换系统提示（决定模型的身份与总原则），后者追加在用户消息末尾
+/// （决定这一次要什么）。合成一个字段的话，「只想改要求、不想动系统提示」
+/// 就做不到。
+public struct PromptTemplate: Codable, Sendable, Equatable, Identifiable {
+
+    public var id: UUID
+    public var name: String
+    /// 替换默认系统提示。空串表示沿用 `PromptLibrary.systemPrompt`。
+    public var systemPrompt: String
+    /// 追加在用户消息末尾的「要求」段。空串表示用该任务自带的默认要求。
+    public var instruction: String
+    /// 内置模板不可删除（可以改，`resetTemplates` 能还原）。
+    public var isBuiltIn: Bool
+
+    public init(
+        id: UUID = UUID(),
+        name: String,
+        systemPrompt: String = "",
+        instruction: String = "",
+        isBuiltIn: Bool = false
+    ) {
+        self.id = id
+        self.name = name
+        self.systemPrompt = systemPrompt
+        self.instruction = instruction
+        self.isBuiltIn = isBuiltIn
+    }
+
+    /// 容错解码。理由同其余设置结构：旧配置缺字段不能让整份设置解码失败。
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.id = (try? container.decode(UUID.self, forKey: .id)) ?? UUID()
+        self.name = (try? container.decode(String.self, forKey: .name)) ?? "未命名模板"
+        self.systemPrompt = (try? container.decode(String.self, forKey: .systemPrompt)) ?? ""
+        self.instruction = (try? container.decode(String.self, forKey: .instruction)) ?? ""
+        self.isBuiltIn = (try? container.decode(Bool.self, forKey: .isBuiltIn)) ?? false
+    }
+
+    /// 内置模板。
+    ///
+    /// 每个都针对一类真实的读法，而不是「简洁 / 详细」这种没法定夺的形容词：
+    /// 读者要能一眼判断「这个模板是不是我要的那种读法」。
+    ///
+    /// **id 是写死的，不是 `UUID()`。** 这很重要：`presets` 是个计算属性，
+    /// 每次取都会新建一批对象，若 id 随机，那么「配置里没有 templates 时用预设」
+    /// 这条路径每次启动都会得到一组全新的 id——用户上一轮选中的模板在下一轮就找不到了。
+    /// 写死之后，内置模板的身份是稳定的，也能被测试与自检直接引用。
+    public static var presets: [PromptTemplate] {
+        [
+            PromptTemplate(
+                id: UUID(uuidString: "1B0E7A10-0001-4000-8000-4C554D454E01")!,
+                name: "严谨学术解读",
+                instruction: "请严格依据原文作答，凡属你的推断都要显式标注「推断」。",
+                isBuiltIn: true
+            ),
+            PromptTemplate(
+                id: UUID(uuidString: "1B0E7A10-0002-4000-8000-4C554D454E02")!,
+                name: "通俗解释",
+                instruction: """
+                请用日常语言解释，假设读者没有该领域的背景。\
+                专业术语第一次出现时必须用一句大白话说明。不要为了通俗而牺牲准确性。
+                """,
+                isBuiltIn: true
+            ),
+            PromptTemplate(
+                id: UUID(uuidString: "1B0E7A10-0003-4000-8000-4C554D454E03")!,
+                name: "批判性审读",
+                instruction: """
+                请以审稿人视角检视这段内容：它依赖了哪些未言明的前提？\
+                论证在哪一步跳了？有没有反例或竞争性解释？\
+                先指出最值得质疑的一点，再列其余问题。
+                """,
+                isBuiltIn: true
+            ),
+            PromptTemplate(
+                id: UUID(uuidString: "1B0E7A10-0004-4000-8000-4C554D454E04")!,
+                name: "概念与术语抽取",
+                instruction: """
+                请抽取这段内容里的核心概念与术语。每个概念给出：原文用词、\
+                作者在此处的界定（若原文未界定就写明「原文未界定」，不要自己补）、\
+                以及它与其他概念的关系。
+                """,
+                isBuiltIn: true
+            )
+        ]
+    }
+}
+
 public struct AISettings: Codable, Sendable, Equatable {
     public var providers: [AIProviderConfig] = []
     public var activeProviderID: UUID?
@@ -261,6 +377,15 @@ public struct AISettings: Codable, Sendable, Equatable {
     /// 翻译目标语言
     public var translateTarget: String = "简体中文"
 
+    /// 可选的提示词模板。首次启动填入内置预设。
+    public var templates: [PromptTemplate] = PromptTemplate.presets
+    /// 当前选中的模板。`nil` = 不套模板，走 `PromptLibrary` 的默认行为。
+    ///
+    /// 用 nil 而不是「默认选中第一个预设」：默认行为经过调校（系统提示里逐条堵住了
+    /// 幻觉、客套话、过度概括），套上任何模板都是在它之上做加法。
+    /// 让「不加东西」成为默认，用户的现状就不会被这次改动悄悄改变。
+    public var activeTemplateID: UUID?
+
     public init() {}
 
     public init(from decoder: Decoder) throws {
@@ -271,6 +396,11 @@ public struct AISettings: Codable, Sendable, Equatable {
         self.persistentMemory = (try? container.decode(String.self, forKey: .persistentMemory)) ?? ""
         self.streaming = (try? container.decode(Bool.self, forKey: .streaming)) ?? true
         self.translateTarget = (try? container.decode(String.self, forKey: .translateTarget)) ?? "简体中文"
+        // 旧配置里没有这两个键。templates 缺失时补上预设（否则老用户看不到任何模板，
+        // 会以为功能坏了），activeTemplateID 缺失时保持 nil（即默认行为）。
+        self.templates = (try? container.decode([PromptTemplate].self, forKey: .templates))
+            ?? PromptTemplate.presets
+        self.activeTemplateID = try? container.decode(UUID.self, forKey: .activeTemplateID)
     }
 }
 
