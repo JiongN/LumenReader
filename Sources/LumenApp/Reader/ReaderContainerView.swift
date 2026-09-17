@@ -237,14 +237,20 @@ struct ReaderContainerView: View {
         let size = (try? FileManager.default.attributesOfItem(atPath: cacheFile.path))?[.size] as? Int
         NSLog("[Lumen][outline] 缓存文件 \(cacheFile.path) 大小=\(size.map(String.init) ?? "无")")
 
-        // 点击条目的闭环：跳到最后一条，核对确实落到了它指向的位置。
-        // 用最后一条是因为它在书的后半段——如果实现里有什么「只在前几页打转」的问题，
-        // 拿第一条验会被掩盖。
-        if let last = outline.entries.last {
-            NSLog("[Lumen][outline] 跳转前：\(bridge.positionLabel)")
-            let landed = state.jump(toUnit: last.unitIndex)
+        // 点击条目的闭环：跳到一条**离当前位置最远**的条目，核对确实落到了它指向的位置。
+        //
+        // 为什么不固定跳第一条或最后一条：那样很容易撞上「本来就在那儿」——
+        // 三段日志会退化成两个相同的值，等于没验。挑离当前位置最远的那条，
+        // 除非整本书只有一个单元，否则跳转前后必然不同。
+        let current = bridge.currentUnitIndex
+        if let target = outline.entries.max(by: {
+            abs($0.unitIndex - current) < abs($1.unitIndex - current)
+        }) {
+            NSLog("[Lumen][outline] 跳转前：\(bridge.positionLabel)（当前单元 \(current)）")
+            let landed = state.jump(toUnit: target.unitIndex)
             try? await Task.sleep(nanoseconds: 1_200_000_000)
-            NSLog("[Lumen][outline] 点「\(last.title)」→ 解析为 0-based \(landed.map(String.init) ?? "nil")"
+            NSLog("[Lumen][outline] 点「\(target.title)」（目标单元 \(target.unitIndex + 1)）"
+                + "→ 解析为 0-based \(landed.map(String.init) ?? "nil")"
                 + "，跳转后：\(bridge.positionLabel)")
         }
 
