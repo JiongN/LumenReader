@@ -98,7 +98,13 @@ struct RootView: View {
             guard let path = LaunchOptions.openPath else { return }
             // 等首帧布局完成再挂载文档，否则自动截图可能拍到尚未成形的画面
             try? await Task.sleep(nanoseconds: 350_000_000)
-            state.open(url: URL(fileURLWithPath: path))
+            // 自检不记「最近打开」：测试书会把用户真实的阅读记录顶下去，
+            // 而跑自检的人并不是在读这本书。正常从命令行开一本书照旧记录。
+            let records = !LaunchOptions.isAuditRun
+            if !records {
+                NSLog("[Lumen] 自检模式：本次打开的文档不写入「最近打开」")
+            }
+            state.open(url: URL(fileURLWithPath: path), recordInRecents: records)
 
             if let prompt = LaunchOptions.askPrompt {
                 // 再等一会儿，让阅读视图与聊天模型完成绑定

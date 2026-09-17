@@ -93,14 +93,30 @@ enum WebSearchAudit {
                   "缺出处的 \(outcome.hits.count - withIdentifier.count) 条")
         }
 
-        // ④ 失败必须**如实上报**而不是被吞掉：一个源挂了只该让覆盖面变小，
-        //    但用户得能在日志里看到是哪个源、为什么。这条断言只在确实有失败时计——
-        //    全通时它无事可验，硬跑只会拿一个恒真结果充数。
-        if !failedNames.isEmpty {
+        // ④ 失败必须**如实上报**而不是被吞掉。
+        //
+        //    判定基准是**②这次聚合检索自己的产物**：哪个源在这次聚合里缺席
+        //    （一条都没贡献），它就必须出现在 failures 里——缺席只有两种可能
+        //    （请求失败 / 命中为零），无论哪种都不该静默消失。
+        //
+        //    不能拿 ① 逐源探测的失败名单去要求 ②：两次是**独立的网络调用**，
+        //    429 这类瞬时限流在几秒后恢复是常态。实测：OpenAlex 在 ① 里三次
+        //    重试全吃 429（5.8s），几秒后的 ② 里一次成功、贡献满 4 条——
+        //    若拿 ① 的名单判 ②，会把「源恢复了」误报成「失败被吞」，
+        //    自检在 OpenAlex 限流的日子永远红一条（2026-09-17 连跑两次复现）。
+        //
+        //    可证伪性：若 `search()` 把某个源的失败吞掉（failures 为空而该源
+        //    一条都没贡献），这条断言立刻红。查询词固定为跨库都有存量的词组，
+        //    所以「命中为零」在实际运行里几乎只可能是失败。
+        let aggregateSources = Set(outcome.hits.map(\.source))
+        let absent = Set(Self.sources.map(\.name)).subtracting(aggregateSources)
+        if !absent.isEmpty {
             let reported = outcome.failures.joined(separator: "；")
-            let reportedAll = failedNames.allSatisfy { reported.contains($0) }
-            check("失败的源都写进了 failures", reportedAll,
-                  "失败的源 \(failedNames.joined(separator: "、"))，failures 里记录了 \(outcome.failures.count) 条")
+            let reportedAll = absent.allSatisfy { reported.contains($0) }
+            check("聚合里缺席的源都写进了 failures", reportedAll,
+                  "缺席的源 \(absent.sorted().joined(separator: "、"))，failures 记录了 \(outcome.failures.count) 条")
+        } else {
+            NSLog("[Lumen][websearch] 三个源在这次聚合里都出了结果——这一次没有可验证的失败上报，如实记录而不是硬造一条恒真断言")
         }
 
         NSLog("[Lumen][websearch] 自检：通过 \(passed) 项，失败 \(failures.count) 项"

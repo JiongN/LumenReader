@@ -24,7 +24,10 @@ PROBE = re.compile(
     r"w=\s*([-\d.]+)\s+h=\s*([-\d.]+)\s+maxX=\s*([-\d.]+)\s+maxY=\s*([-\d.]+)"
 )
 WINDOW = re.compile(r"窗口内容区\s+(\d+)x(\d+)，共上报\s+(\d+)\s+项")
-ARGV = re.compile(r"启动参数：(.*)$")
+# 必须带 MULTILINE：这行日志在文件中间，`$` 默认只认全文末尾，
+# 少了这个标志 `ARGV.search` 恒为 None——④ 的可见性断言会**静默地一次都不跑**，
+# 而输出照样一片绿。这比误报更危险：它让人以为某条规则一直在守着。
+ARGV = re.compile(r"启动参数：(.*)$", re.MULTILINE)
 
 TOL = 1.0  # 浮点与单像素取整的容差
 
@@ -81,8 +84,26 @@ def check(path):
         if gap < -TOL:
             fails.append(f"{left} 与 {right} 横向重叠 {abs(gap):.1f}px")
 
-    # ③ 面板必须铺满宽度：最左贴 0，最右贴窗口宽
-    if ordered:
+    # ③ 面板必须铺满宽度：最左贴 0，最右贴窗口宽。
+    #
+    #    沉浸模式是唯一的例外，且是**刻意**的：两侧面板与图标栏都收起，
+    #    正文限宽 880pt 居中，左右各留一圈留白。此时只有 readerSurface 一个面板，
+    #    按「铺满」判会稳定地误报两条——那两条红跟任何缺陷都无关，
+    #    只会让人习惯性忽略这个脚本的输出。所以改成验它真正的意图：居中且限宽。
+    argv = (ARGV.search(text).group(1) if ARGV.search(text) else "")
+    is_immersive = (last_flag(argv, "--immersive") or "0").strip() in ("1", "true", "yes", "on")
+
+    if ordered and is_immersive:
+        reader = probes["readerSurface"] if "readerSurface" in probes else probes[ordered[0]]
+        left_gap = reader["x"]
+        right_gap = win_w - reader["maxX"]
+        if abs(left_gap - right_gap) > TOL:
+            fails.append(
+                f"沉浸模式下正文未居中：左留白 {left_gap:.1f}px vs 右留白 {right_gap:.1f}px"
+            )
+        if reader["w"] > 880 + TOL:
+            fails.append(f"沉浸模式下正文宽度 {reader['w']:.1f}px 超过限宽 880px")
+    elif ordered:
         if probes[ordered[0]]["x"] > TOL:
             fails.append(f"最左面板 {ordered[0]} 左侧留白 {probes[ordered[0]]['x']:.1f}px")
         rightmost = probes[ordered[-1]]["maxX"]
@@ -92,7 +113,6 @@ def check(path):
     # ④ 面板可见性：预期从日志里的启动参数推导。
     #    「收起」必须是探针消失，而不是宽度缩成 0 继续占位——
     #    后者在截图里看不出区别，却会让键盘焦点与快捷键落在看不见的控件上。
-    argv = (ARGV.search(text).group(1) if ARGV.search(text) else "")
     expect = {"--sidebar": ("sidebar", "--sidebar"), "--ai": ("aiPanel", "--ai")}
     for flag, (probe, _) in expect.items():
         raw = last_flag(argv, flag)

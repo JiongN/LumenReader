@@ -218,6 +218,20 @@ enum LaunchOptions {
         return (String(parts[0]), port)
     }
 
+    /// 这次启动是不是**自检**（而不是用户想打开一本书）。
+    ///
+    /// 判据是「命令行里带自检开关」，不是「带 `--open`」——`--open` 既可以喂给
+    /// 自检，也可以只是想从命令行开一本书，两者要分开。
+    ///
+    /// 存在的理由：自检会把 /tmp 里的测试书写进「最近打开」，把用户真实的阅读
+    /// 记录顶下去——跑几次自检之后欢迎页就只剩测试书了。真实用户数据被
+    /// 诊断流程改掉，是最难被察觉的一类副作用。
+    static var isAuditRun: Bool {
+        CommandLine.arguments.contains { argument in
+            argument.hasSuffix("-report") || argument == "--capture" || argument == "--mock-ai"
+        }
+    }
+
     /// 是否需要在启动后自动截图并退出
     static var shouldCapture: Bool { capturePath != nil }
 

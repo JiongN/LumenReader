@@ -533,18 +533,9 @@ public struct UISettings: Codable, Sendable, Equatable {
             clamp(value, range: aiRange, fallback: aiDefault, maxWidth: maxWidth)
         }
 
-        /// 侧栏在给定窗口条件下的可用上限：`窗口宽 − 已被占掉的部分 − 阅读区保底`。
-        public static func sidebarMaxWidth(containerWidth: Double, reserved: Double) -> Double {
-            max(min(sidebarRange.upperBound, containerWidth - reserved - minimumReaderWidth),
-                sidebarRange.lowerBound)
-        }
-
-        /// AI 面板的可用上限，同理。
-        public static func aiMaxWidth(containerWidth: Double, reserved: Double) -> Double {
-            max(min(aiRange.upperBound, containerWidth - reserved - minimumReaderWidth),
-                aiRange.lowerBound)
-        }
-
+        // 注：上限**随窗口宽度收窄**的算式不在这里，在 LumenApp 的
+        // `PanelWidthPolicy.resolve`——它要减掉图标栏、分隔线，还要决定
+        // 两侧谁让位，这些都属于版面策略而不是配置项的合法区间。
         private static func clamp(
             _ value: Double,
             range: ClosedRange<Double>,
