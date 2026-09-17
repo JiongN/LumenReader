@@ -76,7 +76,12 @@ public final class RecentDocuments: ObservableObject {
 
     private func load() {
         guard let data = try? Data(contentsOf: fileURL) else { return }
-        entries = (try? JSONDecoder().decode([RecentEntry].self, from: data)) ?? []
+        let decoder = JSONDecoder()
+        // 必须与 persist 的编码策略成对（iso8601 字符串）。
+        // 此前漏了这一行：解码默认按时间戳读 Double，遇到 "2026-09-17T…"
+        // 直接整体失败 → entries 静默归零，「最近打开」每次启动都是空的。
+        decoder.dateDecodingStrategy = .iso8601
+        entries = (try? decoder.decode([RecentEntry].self, from: data)) ?? []
     }
 
     private func persist() {
