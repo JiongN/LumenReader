@@ -20,14 +20,13 @@ struct ReaderContainerView: View {
     @EnvironmentObject private var state: AppState
     /// 宽度直接观察 `SettingsStore` 而不是经由 `AppState` 间接读：
     ///
-    /// 拖动分隔线写的是 `settingsStore.ui.sidebarWidth`，`@Published` 触发的是
-    /// **SettingsStore** 的 `objectWillChange`。这个视图此前只观察了 `AppState`，
+    /// 拖动 AI 面板分隔线写的是 `settingsStore.ui.aiPanelWidth`，`@Published` 触发的是
+    /// **SettingsStore** 的 `objectWillChange`。若只观察 `AppState`，
     /// 「设置变了」这个消息根本传不到这里——拖动手势每帧都在写值、模型每帧都在变，
-    /// 布局却纹丝不动，看起来就是「分隔线拖不动」。修复只差一行声明：
-    /// 声明观察之后，SwiftUI 才会在设置变化时让这一层失效、用新宽度重建布局。
+    /// 布局却纹丝不动，看起来就是「分隔线拖不动」。
     @EnvironmentObject private var settings: SettingsStore
 
-    /// 拖动分隔线期间的**即时**宽度。nil = 没在拖，用设置里的已提交值。
+    /// 拖动 AI 面板分隔线期间的**即时**宽度。nil = 没在拖，用设置里的已提交值。
     ///
     /// 存在容器里而不是每帧写回 `SettingsStore`：宽度是 `@Published` 结构体
     /// `AppSettings` 的一个字段，每帧写一次会让所有观察 `SettingsStore` 的视图
@@ -35,8 +34,7 @@ struct ReaderContainerView: View {
     /// 表现就是拖动手感抖动。松手时由 `PanelResizeHandle` 提交一次。
     ///
     /// 它**不是**第二份真相源：仅在一个手势期间有效，手势结束立刻置回 nil，
-    /// 之后一律读设置。所以「设置页改了宽度」「双击复位」这些外部改动照旧实时生效。
-    @State private var liveSidebarWidth: Double?
+    /// 之后一律读设置。所以「双击复位」这类外部改动照旧实时生效。
     @State private var liveAIPanelWidth: Double?
     /// 容器（窗口内容区）的可用宽度。面板上限要按它动态收窄。
     @State private var containerWidth: CGFloat = 0
@@ -63,28 +61,15 @@ struct ReaderContainerView: View {
 
             if state.isSidebarVisible && !state.isImmersive {
                 SidebarColumn()
-                    // 宽度取自设置（可拖拽、可持久化），拖动期间用本地即时值
+                    // 宽度**固定**（DS.Size.sidebarIdeal = 248pt），不再从设置读取，
+                    // 也不再挂拖拽分隔线。侧栏装的是目录 / 搜索结果 / 批注这类结构化列表，
+                    // 宽度该由版式决定；用户想腾出阅读区空间，收起整块面板即可。
                     .frame(width: sidebarWidth)
                     .layoutProbe("sidebar")
                     .background(.regularMaterial)
                     // 淡入 + 10pt 位移，而不是 `.move(edge: .leading)`：
                     // 整宽滑入会让阅读区看起来被「推」了一下，三栏同时在场时尤其晃眼。
                     .transition(.opacity.combined(with: .offset(x: -10)))
-
-                PanelResizeHandle(
-                    committedWidth: sidebarWidth,
-                    liveWidth: $liveSidebarWidth,
-                    range: sidebarRange,
-                    defaultWidth: UISettings.PanelWidth.sidebarDefault,
-                    panelIsLeading: true,
-                    onCommit: { value in
-                        settings.commitSidebarWidth(value, maxWidth: sidebarCap)
-                        // 对侧在这一刻被挤窄了多少也一并落库。只存被拖的那一侧的话，
-                        // 松手后按「两个偏好」重新分配，对侧会立刻弹回原宽度——
-                        // 表现为「拖完弹回去」。存下的就是用户此刻看到的版式。
-                        settings.commitAIPanelWidth(aiPanelWidth, maxWidth: aiPanelCap)
-                    }
-                )
             }
 
             // 沉浸模式：两侧各加一个 Spacer 把正文挤到中间并限宽。
@@ -127,7 +112,6 @@ struct ReaderContainerView: View {
                     panelIsLeading: false,
                     onCommit: { value in
                         settings.commitAIPanelWidth(value, maxWidth: aiPanelCap)
-                        settings.commitSidebarWidth(sidebarWidth, maxWidth: sidebarCap)
                     }
                 )
 
@@ -176,38 +160,29 @@ struct ReaderContainerView: View {
     private var sidebarIsVisible: Bool { state.isSidebarVisible && !state.isImmersive }
     private var aiPanelIsVisible: Bool { state.isAIPanelVisible && !state.isImmersive }
 
-    /// 用户这一刻「想要」的宽度：拖动中用即时值，否则用落库值。
-    private var sidebarDemand: Double { liveSidebarWidth ?? settings.ui.sidebarWidth }
+    /// AI 面板用户这一刻「想要」的宽度：拖动中用即时值，否则用落库值。
     private var aiPanelDemand: Double { liveAIPanelWidth ?? settings.ui.aiPanelWidth }
 
     /// 三栏此刻的显示宽度。
     ///
+    /// **侧栏是常量，AI 面板按需分配**：侧栏宽度固定 248pt（不再读设置、
+    /// 也没有拖拽入口），AI 面板拿「剩下但不超过它自己要的、且不低于下限 300pt」，
+    /// 阅读区低于保底 320pt 时由 AI 面板顶住下限、阅读区让位。
+    ///
     /// 落库值只是「用户想要多少」，本轮布局能给多少要按当前容器宽度重算：
     /// 窗口被拉小之后不会有任何一次拖拽提交，若不重算，旧宽度会原样参与布局——
-    /// 920pt 窗口下阅读区只剩 266pt，再窄一点图标栏会被推到 x = −97。
-    ///
-    /// 重算**不写回设置**：落库值仍然只由拖拽 / 双击 / 设置页改动。
-    /// 于是窗口拉回原尺寸时偏好自动回来；覆写式的钳制会让它永远丢掉。
-    /// 谁的宽度「说多少就是多少」：拖动中是**被拖的那一侧**（分隔线要跟得住鼠标），
-    /// 不拖动时是侧栏（见 `PanelWidthPolicy.resolve` 的默认值——它保证
-    /// 「写入 X → 渲染 X」对侧栏成立，且是拖完不弹回的不动点）。
-    private var pinnedSide: PanelWidthPolicy.PinnedSide {
-        if liveSidebarWidth != nil { return .sidebar }
-        if liveAIPanelWidth != nil { return .aiPanel }
-        return .sidebar
-    }
-
+    /// 窄窗口下阅读区被挤没、图标栏被推到屏幕外。重算**不写回设置**：
+    /// 落库值仍然只由拖拽 / 双击改动，窗口拉回原尺寸偏好自动回来。
     private var panelLayout: PanelLayout {
         PanelWidthPolicy.resolve(
             containerWidth: containerWidth,
             showsRail: !state.isImmersive,
-            sidebarPreferred: sidebarIsVisible ? sidebarDemand : nil,
-            aiPanelPreferred: aiPanelIsVisible ? aiPanelDemand : nil,
-            pinned: pinnedSide
+            sidebarVisible: sidebarIsVisible,
+            aiPanelPreferred: aiPanelIsVisible ? aiPanelDemand : nil
         )
     }
 
-    /// 侧栏**当前应当显示**的宽度。
+    /// 侧栏**当前应当显示**的宽度。固定值——侧栏不再接受任何宽度输入。
     private var sidebarWidth: Double {
         panelLayout.sidebar ?? UISettings.PanelWidth.sidebarDefault
     }
@@ -216,29 +191,15 @@ struct ReaderContainerView: View {
         panelLayout.aiPanel ?? UISettings.PanelWidth.aiDefault
     }
 
-    /// 侧栏本次拖拽允许的范围。上限按窗口宽度动态收窄（`PanelWidthPolicy`）：
-    /// 窗口只有 920pt 时把侧栏拉到 420 会把阅读区挤没。
-    private var sidebarRange: ClosedRange<Double> {
-        UISettings.PanelWidth.sidebarRange.lowerBound...sidebarCap
-    }
-
     private var aiPanelRange: ClosedRange<Double> {
         UISettings.PanelWidth.aiRange.lowerBound...aiPanelCap
-    }
-
-    private var sidebarCap: Double {
-        PanelWidthPolicy.sidebarCap(
-            containerWidth: containerWidth,
-            showsRail: !state.isImmersive,
-            aiPanelPreferred: aiPanelIsVisible ? aiPanelDemand : nil
-        )
     }
 
     private var aiPanelCap: Double {
         PanelWidthPolicy.aiCap(
             containerWidth: containerWidth,
             showsRail: !state.isImmersive,
-            sidebarPreferred: sidebarIsVisible ? sidebarDemand : nil
+            sidebarVisible: sidebarIsVisible
         )
     }
 

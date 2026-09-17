@@ -5,8 +5,7 @@ import LumenKit
 /// 三栏在某一时刻的**显示宽度**。
 ///
 /// 与「用户存了多少」是两件事：设置里存的是偏好，这里给的是**这一轮布局**
-/// 实际要给多少。窗口被拉小之后，两侧偏好加起来可能已经超过窗口能给的，
-/// 差额必须有人让——让的是面板，不是阅读区，更不是图标栏。
+/// 实际要给多少。侧栏宽度是固定的（248pt），只有 AI 面板参与「窗口变窄时谁让」。
 struct PanelLayout {
     /// nil = 这一栏当前不参与布局
     var sidebar: Double?
@@ -34,10 +33,17 @@ struct PanelLayout {
 /// 拖拽上限、显示宽度、自检断言必须走**同一条算式**，否则自检验的是一段死代码——
 /// 「改了算式只改一处」正是这类断言最容易悄悄失效的方式。
 ///
-/// ## 为什么每次布局都要重算
+/// ## 本批的语义变更：侧栏固定，只有 AI 面板可调
+///
+/// 从前两侧面板各有一个拖拽分隔线，`resolve` 要在「两个偏好」之间分配预算。
+/// 现在**侧栏宽度是常量**（`UISettings.PanelWidth.sidebarDefault` = 248pt，
+/// 与 `DS.Size.sidebarIdeal` 同源），界面上只剩 AI 面板那条分隔线。于是算式退化成：
+/// 侧栏先足额拿走 248pt，剩下的给 AI 面板，但 AI 面板不低于自己的下限、阅读区不低于保底。
+///
+/// ## 为什么每次布局都要重算（而不是只在拖拽提交那一刻钳一次）
 ///
 /// 钳制只发生在拖拽提交那一刻是不够的：窗口被拉小时**没有任何一次提交**，
-/// 落库的旧宽度会原样参与布局。实测 920pt 窗口下阅读区只剩 266pt，
+/// 落库的旧宽度会原样参与布局。实测 920pt 窗口下不改会挤到阅读区低于保底，
 /// 再窄一点图标栏被推到 x = −97——切页签的入口直接跑到屏幕外。
 ///
 /// ## 为什么重算不等于覆写
@@ -47,58 +53,54 @@ struct PanelLayout {
 /// 若把钳制值直接写回设置，用户把窗口拉回去之后宽度就永远丢了。
 enum PanelWidthPolicy {
 
-    /// 谁的宽度「说多少就是多少」，差额由对侧吸收。
-    ///
-    /// 拖动时是被拖的那一侧——分隔线必须跟着鼠标走，否则手感像在拖一根皮筋。
-    /// 不拖动时固定是侧栏（见 `resolve` 的默认值）。
-    enum PinnedSide {
-        case sidebar
-        case aiPanel
-    }
-
     /// 阅读区至少要留这么宽。
     ///
-    /// 面板上限不能只按 `sidebarRange.upperBound` 定死：窗口只有 920pt 时，
-    /// 420 + 640 两侧全开会直接把正文挤没，而用户看到的是「书不见了」。
     /// 这一条是**上限随窗口收窄**的依据，不是保证——窗口实在太窄时下限优先，
     /// 此时只能让正文被压一点（总好过面板点不到）。
     static var minimumReaderWidth: Double { UISettings.PanelWidth.minimumReaderWidth }
 
-    /// 分隔线占的布局宽度。上限算式里要把它减掉，否则算出来的宽度会让
-    /// 三栏总宽超出窗口 1pt，表现为「阅读区右侧被切掉一条」。
-    static let handleWidth: Double = 1
+    /// 分隔线占的**布局**宽度。
+    ///
+    /// 本批改成 0：分隔线改用 overlay 绘制（与 `LeftRail` 右侧那条分隔线同样的做法），
+    /// 不再在 `HStack` 里占 1pt。这不是审美问题——它决定下面这条等式成不成立：
+    ///
+    ///     图标栏(52) + 侧栏(248) + AI 面板下限(300) + 阅读区保底(320) = 920 = 最小窗口宽
+    ///
+    /// 若分隔线再吃 1pt，最小窗口下阅读区就只能拿到 319pt，「920pt 最挤时阅读区 ≥ 320」
+    /// 这条承诺永远差 1pt 兑现不了。把分隔线的绘制搬进 overlay 之后，
+    /// 这条等式在最小窗口下**刚好**成立。
+    static let handleWidth: Double = 0
+
+    /// 侧栏固定宽度。与 `DS.Size.sidebarIdeal` 同值（都是 248），
+    /// 但这里刻意走配置层而不是界面层的令牌——`LumenKit` 拿不到 `DS`。
+    static var fixedSidebarWidth: Double { UISettings.PanelWidth.sidebarDefault }
 
     /// 量出三栏此刻各该多宽。
     ///
+    /// 分配顺序：侧栏（若可见）先足额拿走 248pt；AI 面板拿「剩下的、但不超过它自己要的、
+    /// 且不低于下限」；阅读区拿最后剩下的。装不下时：
+    ///
+    /// 1. AI 面板顶到自己的下限，阅读区让位（**降级**，`isReaderBelowGuarantee` 置位）；
+    /// 2. 若连两侧之和都超过预算（容器窄到 920 以下），最后一道闸等比压缩两侧，
+    ///    宁可面板比下限还窄，也不让图标栏被顶出屏幕（`isSqueezedBelowMinimum` 置位）。
+    ///
     /// - Parameters:
-    ///   - pinned: 宽度足额的一方。拖动时传被拖的那一侧；不拖动时默认侧栏。
-    ///
-    /// **不拖动时为什么钉住侧栏而不是两侧等比压缩**：等比看着更公平，但会让
-    /// 「写入 X → 渲染 X」这条关系在窄窗口下失效——写 266 只渲染出 225，
-    /// 于是拖到底再松手、宽度反而比拖动中更窄，且每次松手都要重新分配一次。
-    /// 钉住一侧则天然是**不动点**：侧栏拿走它的（上限之内）全部，
-    /// AI 面板拿「剩下的、但不超过它自己要的」，把结果再喂回这个算式
-    /// 得到的是同一组值——这正是「拖完不弹回」的数学保证。
-    ///
-    /// 让侧栏优先而不是 AI 面板：侧栏装的是目录 / 搜索结果 / 批注这类
-    /// **结构化列表**，窄到 200pt 以下就开始横向裁字，且没法靠重排补救；
-    /// AI 面板装的是会自己换行的正文与气泡，窄 100pt 只是行长变短。
-    /// AI 面板还有退路（整个收起），图标栏没有。
+    ///   - sidebarVisible: 侧栏内容面板当前是否在版面上（沉浸 / 收起时为 false）。
+    ///   - aiPanelPreferred: 用户这一刻想要的 AI 面板宽度；nil = 面板不参与布局。
     static func resolve(
         containerWidth: CGFloat,
         showsRail: Bool,
-        sidebarPreferred: Double?,
-        aiPanelPreferred: Double?,
-        pinned: PinnedSide = .sidebar
+        sidebarVisible: Bool,
+        aiPanelPreferred: Double?
     ) -> PanelLayout {
-        let sidebarRange = UISettings.PanelWidth.sidebarRange
         let aiRange = UISettings.PanelWidth.aiRange
+        let sidebarWidth = fixedSidebarWidth
 
         // 容器宽度还没量到（首帧、视图尚未出现）时不做任何压缩：
         // 此时 containerWidth 是 0，按它算会把两侧压成 0pt，界面先闪一下空面板。
         guard containerWidth > 1 else {
             return PanelLayout(
-                sidebar: sidebarPreferred.map { clamped($0, to: sidebarRange) },
+                sidebar: sidebarVisible ? sidebarWidth : nil,
                 aiPanel: aiPanelPreferred.map { clamped($0, to: aiRange) },
                 reader: 0,
                 isReaderBelowGuarantee: false,
@@ -107,80 +109,37 @@ enum PanelWidthPolicy {
         }
 
         let railWidth: Double = showsRail ? Double(LeftRail.width) : 0
-        let handleCount = (sidebarPreferred == nil ? 0 : 1) + (aiPanelPreferred == nil ? 0 : 1)
+        // 分隔线只算 AI 面板那一条（侧栏没有分隔线了）；handleWidth 现为 0，这一项恒为 0，
+        // 保留算式是为了将来若又需要给分隔线留位时只改一处。
+        let handleCount = aiPanelPreferred == nil ? 0 : 1
         // 扣掉图标栏与分隔线之后，面板与阅读区总共能分到的量
         let budget = max(0, Double(containerWidth) - railWidth - handleWidth * Double(handleCount))
         // 面板能拿走、且阅读区仍保底 320pt 的上限
         let available = budget - minimumReaderWidth
 
-        var sidebar: Double? = nil
+        var sidebar: Double? = sidebarVisible ? sidebarWidth : nil
         var aiPanel: Double? = nil
         var belowGuarantee = false
 
-        switch (sidebarPreferred, aiPanelPreferred) {
-        case (let wantedSidebar?, let wantedAI?):
-            let wantSidebar = clamped(wantedSidebar, to: sidebarRange)
+        if let wantedAI = aiPanelPreferred {
             let wantAI = clamped(wantedAI, to: aiRange)
-            switch pinned {
-            case .sidebar:
-                let width = Self.width(
-                    for: wantSidebar,
-                    range: sidebarRange,
-                    reservedForOther: aiRange.lowerBound,
-                    available: available
-                )
-                sidebar = width
-                aiPanel = Self.remainder(
-                    for: wantAI,
-                    range: aiRange,
-                    takenByOther: width,
-                    available: available
-                )
-            case .aiPanel:
-                let width = Self.width(
-                    for: wantAI,
-                    range: aiRange,
-                    reservedForOther: sidebarRange.lowerBound,
-                    available: available
-                )
-                aiPanel = width
-                sidebar = Self.remainder(
-                    for: wantSidebar,
-                    range: sidebarRange,
-                    takenByOther: width,
-                    available: available
-                )
-            }
-            belowGuarantee = (sidebar ?? 0) + (aiPanel ?? 0) > available + 0.001
-
-        case (let wantedSidebar?, nil):
-            let width = clamped(wantedSidebar, to: sidebarRange)
-            if available >= sidebarRange.lowerBound {
-                sidebar = min(width, available)
+            let remaining = available - (sidebar ?? 0)
+            if remaining >= aiRange.lowerBound {
+                aiPanel = min(wantAI, remaining)
             } else {
-                // 装不下下限：下限优先，阅读区让位（降级）
-                sidebar = sidebarRange.lowerBound
-                belowGuarantee = true
-            }
-
-        case (nil, let wantedAI?):
-            let width = clamped(wantedAI, to: aiRange)
-            if available >= aiRange.lowerBound {
-                aiPanel = min(width, available)
-            } else {
+                // 装不下 AI 面板的下限：下限优先，阅读区让位（降级）。
+                // 这不是「按窗口等比缩 AI」——AI 面板窄到 300 以下时 footer 会换行，
+                // 所以下限是硬的，让的只能是阅读区保底。
                 aiPanel = aiRange.lowerBound
                 belowGuarantee = true
             }
-
-        case (nil, nil):
-            break
         }
 
         // 最后一道闸：图标栏的 x 必须 ≥ 0。
         //
         // 上面的降级允许阅读区被压到保底以下，但不允许**面板把图标栏顶出屏幕**。
-        // 窗口窄到 534pt 以下时（正常交互到不了，脚本改窗口尺寸可以），
-        // 两个下限加起来就已经超出容器了。此时宁可让面板比下限还窄：
+        // 窗口窄到 920pt 以下时（正常交互到不了，脚本改窗口尺寸可以），
+        // 侧栏 248 + AI 下限 300 加起来就已经超出容器了。此时宁可让面板比下限还窄：
         // 面板窄是难用，图标栏跑到屏幕外是「切页签的入口消失了」，后者严重得多。
         var squeezed = false
         let used = (sidebar ?? 0) + (aiPanel ?? 0)
@@ -201,63 +160,23 @@ enum PanelWidthPolicy {
         )
     }
 
-    /// 侧栏此刻最多能拖到多宽。
+    /// AI 面板此刻最多能拖到多宽。
     ///
-    /// 把侧栏的需求顶到静态上限、再按「拖动中」那条分支走一遍——上限与显示宽度
-    /// 必须是同一条算式，否则会出现「拖到 300 松手、画面停在 266」这种
+    /// 把 AI 面板的需求顶到静态上限、再按正常分支走一遍——上限与显示宽度
+    /// 必须是同一条算式，否则会出现「拖到 500 松手、画面停在 480」这种
     /// 拖了没反馈的毛病。
-    static func sidebarCap(
-        containerWidth: CGFloat,
-        showsRail: Bool,
-        aiPanelPreferred: Double?
-    ) -> Double {
-        let upper = UISettings.PanelWidth.sidebarRange.upperBound
-        return resolve(
-            containerWidth: containerWidth,
-            showsRail: showsRail,
-            sidebarPreferred: upper,
-            aiPanelPreferred: aiPanelPreferred,
-            pinned: .sidebar
-        ).sidebar ?? upper
-    }
-
-    /// AI 面板此刻最多能拖到多宽，同理。
     static func aiCap(
         containerWidth: CGFloat,
         showsRail: Bool,
-        sidebarPreferred: Double?
+        sidebarVisible: Bool
     ) -> Double {
         let upper = UISettings.PanelWidth.aiRange.upperBound
         return resolve(
             containerWidth: containerWidth,
             showsRail: showsRail,
-            sidebarPreferred: sidebarPreferred,
-            aiPanelPreferred: upper,
-            pinned: .aiPanel
+            sidebarVisible: sidebarVisible,
+            aiPanelPreferred: upper
         ).aiPanel ?? upper
-    }
-
-    // MARK: - 分配
-
-    /// 被钉住的一侧能拿多宽：要多少给多少，但给对侧留够下限，且不超过静态上限。
-    private static func width(
-        for wanted: Double,
-        range: ClosedRange<Double>,
-        reservedForOther: Double,
-        available: Double
-    ) -> Double {
-        let ceiling = min(range.upperBound, max(range.lowerBound, available - reservedForOther))
-        return min(max(wanted, range.lowerBound), ceiling)
-    }
-
-    /// 对侧能拿多宽：剩下的全给它，但不超过它自己要的（也就不会超过它的静态上限）。
-    private static func remainder(
-        for wanted: Double,
-        range: ClosedRange<Double>,
-        takenByOther: Double,
-        available: Double
-    ) -> Double {
-        min(max(wanted, range.lowerBound), max(range.lowerBound, available - takenByOther))
     }
 
     private static func clamped(_ value: Double, to range: ClosedRange<Double>) -> Double {
@@ -268,12 +187,16 @@ enum PanelWidthPolicy {
 
 /// 面板之间那条「可以拖」的分隔线。
 ///
+/// 现在只剩 AI 面板左边这一条——侧栏宽度固定为 248pt，界面上不再给它入口。
+///
 /// 三个关键决定，都不是随意选的：
 ///
-/// 1. **视觉 1pt，命中区 10pt。** 视觉上必须和原来的静态分隔线一样细，
-///    否则三栏会变得很吵；但 1pt 的线用鼠标是抓不住的，用户会自动得出
-///    「这条线不能拖」的结论。所以命中区用一层完全透明的 overlay 撑到 10pt，
-///    视觉宽度不受影响。
+/// 1. **布局 0pt，视觉 1pt，命中区 10pt。**
+///    布局宽度必须是 0：它决定「图标栏 + 侧栏 + AI 下限 + 阅读区保底 = 920」
+///    这条等式在最小窗口下成不成立（见 `PanelWidthPolicy.handleWidth`）。
+///    视觉上仍然画一条 1pt 的线（走 overlay，不占布局），否则阅读区与 AI 面板
+///    之间会失去分界；而 1pt 的线用鼠标抓不住，所以命中区用另一层完全透明的
+///    overlay 撑到 10pt。三层互不干扰。
 ///
 /// 2. **拖动期间只写本地状态，不加动画。** 两点一起说：
 ///    - 不加动画：套上 `withAnimation` 的话面板会「追」着鼠标走，手感发飘，
@@ -320,13 +243,14 @@ struct PanelResizeHandle: View {
 
     var body: some View {
         Color.clear
-            // 只占 1pt 布局空间，顶替原来那条静态 Divider，三栏总宽度不变
-            .frame(width: 1)
+            // **0pt 布局**：分隔线的绘制搬进 overlay（与 LeftRail 右侧那条线同做法），
+            // 把这一像素还给阅读区——最小窗口下它是「阅读区保底 320」能否兑现的关键。
+            .frame(width: PanelWidthPolicy.handleWidth)
             .frame(maxHeight: .infinity)
             .overlay {
                 Rectangle()
                     .fill(lineColor)
-                    // 高亮时可以比 1pt 粗——overlay 不参与布局，不会推挤三栏
+                    // 视觉比 1pt 粗只在拖动 / 悬停时——overlay 不参与布局，不会推挤三栏
                     .frame(width: isDragging ? 2.5 : (isHovering ? 1.5 : 1))
             }
             .overlay {

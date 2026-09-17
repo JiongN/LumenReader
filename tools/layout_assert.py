@@ -31,6 +31,10 @@ ARGV = re.compile(r"启动参数：(.*)$", re.MULTILINE)
 
 TOL = 1.0  # 浮点与单像素取整的容差
 
+# 侧栏宽度是常量（与 `UISettings.PanelWidth.sidebarDefault` / `DS.Size.sidebarIdeal` 同值）。
+# 它不再从设置读取，因此渲染宽度应当恒等于它。
+SIDEBAR_FIXED_WIDTH = 248
+
 
 def last_flag(args, flag):
     """从启动参数里取开关值，取最后一次出现。没传则返回 None。"""
@@ -110,9 +114,26 @@ def check(path):
         if abs(rightmost - win_w) > TOL:
             fails.append(f"最右面板右边缘 {rightmost:.1f} 未贴到窗口宽 {win_w}")
 
+    # ③.5 侧栏宽度是常量 248pt。
+    #
+    #     侧栏自本批起固定（不再从设置读、也没有拖拽入口），宽度该由版式决定。
+    #     这条盯的是「有人把侧栏又接回了 settings.ui.sidebarWidth」——那种改法
+    #     不会崩溃、截图也看不出，只有把宽度当数据验才抓得住。
+    if "sidebar" in probes:
+        sidebar_w = probes["sidebar"]["w"]
+        if abs(sidebar_w - SIDEBAR_FIXED_WIDTH) > TOL:
+            fails.append(
+                f"侧栏宽度 {sidebar_w:.1f}px 不等于常量 {SIDEBAR_FIXED_WIDTH}px"
+                f"（侧栏又接回了设置？）"
+            )
+
     # ④ 面板可见性：预期从日志里的启动参数推导。
     #    「收起」必须是探针消失，而不是宽度缩成 0 继续占位——
     #    后者在截图里看不出区别，却会让键盘焦点与快捷键落在看不见的控件上。
+    #
+    #    这条曾长期验的是死数据：探针字典在视图消失时不注销，已收起的 AI 面板
+    #    仍上报最后一帧，于是「要求收起却仍在上报」永远不会命中。探针侧已修
+    #    （`LayoutProbe.onDisappear` → `LayoutAuditLog.remove`），这里才开始真的生效。
     expect = {"--sidebar": ("sidebar", "--sidebar"), "--ai": ("aiPanel", "--ai")}
     for flag, (probe, _) in expect.items():
         raw = last_flag(argv, flag)

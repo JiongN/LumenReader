@@ -87,10 +87,14 @@ enum LaunchOptions {
         return CGSize(width: width, height: height)
     }
 
-    /// 自检用：直接设定左右面板宽度，`--panel-width 400x300`（侧栏 x AI 面板）。
+    /// 自检用：直接设定 AI 面板宽度，`--panel-width 400x300`。
     ///
-    /// 和 `--window-size` 一样走 `x` 分隔。值会经过与拖动分隔线相同的钳制，
-    /// 所以故意传越界值（如 `9999x10`）就能验证钳制确实生效。
+    /// 和 `--window-size` 一样走 `x` 分隔，但**只有第二个数（AI 面板）生效**：
+    /// 侧栏宽度自本批起固定为 248pt、不再从设置读取，第一个数（侧栏）仍被解析
+    /// 只为不破坏既有脚本，**不产生任何效果**。
+    ///
+    /// 值会经过与拖动分隔线相同的钳制，所以故意传越界值（如 `9999x10`）
+    /// 就能验证 AI 面板真的被钳到下限 300。
     static var panelWidth: (sidebar: Double, ai: Double)? {
         guard let raw = value(for: "--panel-width")?.lowercased() else { return nil }
         let parts = raw.split(separator: "x")
@@ -114,7 +118,20 @@ enum LaunchOptions {
     }
 
     /// 塞一段假选区，用来核对划词浮动条的位置（正常要靠鼠标划词才能触发）。
+    ///
+    /// 注入的选区**标记为拖动来源**（`selectionFromDrag = true`）。理由：划词条现在有一道
+    /// 「只在拖动划选时出现」的门（§4），不标来源的话这条自检会注入一个默认来源为「单击」
+    /// 的选区，浮条被门挡掉、`layoutProbe("selectionBar")` 不再上报，
+    /// 于是 `layout_assert.py` 与既有断言全红——那是自检脚手架没跟上，不是缺陷。
     static var injectsDemoSelection: Bool { flag("--demo-selection") }
+
+    /// 塞一段**「单击来源」**的假选区：`--demo-click 1`。
+    ///
+    /// 与 `--demo-selection` 成对，用来**证伪**「划词条只在拖动时出现」这道门：
+    /// 两者注入的选区内容完全一样，唯一的差别是来源标记（`selectionFromDrag`）。
+    /// 断言「`--demo-click 1` 时 `selectionBar` 探针缺席、`--demo-selection 1` 时在场」——
+    /// 只要有人把这道门删掉，`--demo-click` 立刻会红，断言抓的就是这个。
+    static var injectsDemoClick: Bool { flag("--demo-click") }
 
     /// 自检用：启动后直接进入沉浸模式，核对「面板全收 + 正文居中限宽」。
     static var startsImmersive: Bool { flag("--immersive") }
@@ -146,6 +163,13 @@ enum LaunchOptions {
 
     /// 批注自检：在 /tmp 的副本上跑一遍「高亮 → 页面批注 → 写盘 → 重开核对 → 删除」。
     static var annotateReport: Bool { flag("--annotate-report") }
+
+    /// OCR 右键菜单自检：`--ocr-menu-report 1`。
+    ///
+    /// 存在的理由：右键菜单**没法自动化验证**（本机没有辅助功能权限，合成不出真实右键，
+    /// 截图也拍不到原生菜单），所以把「该出现哪些项、该叫什么文案、该不该禁用」抽成
+    /// 纯函数 `PDFContextMenuPlanner.items`，在这里做表驱动断言。改错任一处立刻红。
+    static var ocrMenuReport: Bool { flag("--ocr-menu-report") }
 
     /// 面板宽度响应式自检：`--resize-report 1`。
     ///
@@ -280,9 +304,15 @@ enum LaunchOptions {
 
 /// 把视图在窗口内容区里的 frame 打出来，用于断言浮层的落位。
 ///
-/// 只在 `--layout-report 1` 时才有额外包装；正常启动时 `body(content)` 原样返回，
-/// 不留任何 GeometryReader 开销。所有上报都攒着，等布局稳定后统一 dump——
-/// 逐帧打印会被动画过程中的中间值淹没，看不出最终落点。
+/// 只在 `--layout-report 1` / `--resize-report 1` 时才有额外包装；正常启动时
+/// `body(content)` 原样返回，不留任何 GeometryReader 开销。所有上报都攒着，
+/// 等布局稳定后统一 dump——逐帧打印会被动画过程中的中间值淹没，看不出最终落点。
+///
+/// **视图消失时必须注销自己**（`onDisappear` → `LayoutAuditLog.remove`）。
+/// 这曾经是一个真缺陷：探针把一个 `name → frame` 的字典存起来、dump 时全量打印，
+/// 视图消失时不注销，于是已收起的 AI 面板仍上报最后一帧——`maxX` 甚至越出窗口
+/// 内容区（实测 1431 > 1421）。连带后果是 `tools/layout_assert.py` 那条
+/// 「收起的面板必须是探针消失」的规则验的是**死数据**，恒真、从不报错。
 struct LayoutProbe: ViewModifier {
     let name: String
 
@@ -294,6 +324,9 @@ struct LayoutProbe: ViewModifier {
                     Color.clear
                         .onAppear { LayoutAuditLog.shared.record(name, frame) }
                         .onChange(of: frame) { _, new in LayoutAuditLog.shared.record(name, new) }
+                        // 视图从版面上摘下（面板收起 / 切换格式）时注销，
+                        // 否则 dump 里会留着它的最后一帧——那是「幽灵探针」。
+                        .onDisappear { LayoutAuditLog.shared.remove(name) }
                 }
             )
         } else {
@@ -318,6 +351,8 @@ final class LayoutAuditLog {
     private var dumpScheduled = false
 
     /// 读回某个探针最近记录的 frame。`--resize-report` 用它断言「宽度写入后布局真的变了」。
+    /// 视图已消失时返回 nil——调用方必须把 nil 当成「这一栏不在版面上」，
+    /// 而不是「读到 0 宽还在占位」。
     func frame(named name: String) -> CGRect? { frames[name] }
 
     /// 从第一次上报起算，2s 后统一打印。演示选区要等文档装好才注入，
@@ -334,6 +369,12 @@ final class LayoutAuditLog {
             // 打印反而会把它的断言输出淹没。
             if LaunchOptions.layoutReport { self.dump() }
         }
+    }
+
+    /// 视图消失时注销探针。与 `record` 成对——少了这一步，dump 里就会出现
+    /// 已经不在版面上的视图的最后一帧，断言随之退化成验死数据。
+    func remove(_ name: String) {
+        frames.removeValue(forKey: name)
     }
 
     private func dump() {

@@ -119,15 +119,20 @@ final class AppState: ObservableObject {
         if let sidebar = LaunchOptions.initialSidebarVisible { isSidebarVisible = sidebar }
         if let aiPanel = LaunchOptions.initialAIPanelVisible { isAIPanelVisible = aiPanel }
 
-        // 自检用：把两侧面板宽度直接写成指定值。走的是和拖动分隔线**同一个设置项**，
+        // 自检用：把 AI 面板宽度直接写成指定值。走的是和拖动分隔线**同一个设置项**，
         // 所以「改宽度 → 布局跟随 → 越界被钳制」这条链路是真的被验到了，
         // 而不是在测一个只为自检而存在的旁路。
+        //
+        // 本批语义变更：侧栏宽度固定（248pt），不再从设置读，所以 `--panel-width`
+        // 只设 AI 面板。为了不破坏既有的 `--panel-width 400x300` 写法，第一个数
+        // （侧栏）仍被解析但**不生效**，第二个数才是 AI 面板宽度。
         if let panel = LaunchOptions.panelWidth {
             // 先关掉落盘：这是自检在改宽度，不能把用户的真实配置覆盖成测试值。
             // 注意用 self.：init 的参数也叫 settingsStore（可选类型），不加 self. 会指到参数上。
             self.settingsStore.suppressSave = true
-            self.settingsStore.ui.sidebarWidth = UISettings.PanelWidth.clampSidebar(panel.sidebar)
-            self.settingsStore.ui.aiPanelWidth = UISettings.PanelWidth.clampAI(panel.ai)
+            self.settingsStore.commitAIPanelWidth(panel.ai)
+            NSLog("[Lumen] 自检：--panel-width 只设 AI 面板 = \(Int(panel.ai))pt"
+                  + "（侧栏分量 \(Int(panel.sidebar))pt 已废弃，侧栏固定 \(Int(UISettings.PanelWidth.sidebarDefault))pt）")
         }
 
         // 自检用：把 AI 服务商临时指向本机的桩服务。走的是和设置页**同一份**内存配置

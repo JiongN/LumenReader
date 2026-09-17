@@ -468,14 +468,19 @@ public struct UISettings: Codable, Sendable, Equatable {
     /// 正文字体重在"长时间阅读不累"，同一个人对这两件事的偏好经常不一样。
     public var uiFontFamilyName: String?
 
-    /// 侧栏宽度（pt）。拖动分隔线调节，双击复位。
+    /// 侧栏宽度（pt）。**兼容字段，只写不读。**
     ///
-    /// 存进配置而不是只放内存：面板宽度属于「调一次就长期沿用」的偏好，
-    /// 每次开新文档都弹回默认值会逼用户反复调同一个东西。
+    /// 侧栏宽度自本批起固定为 `DS.Size.sidebarIdeal`（248pt）：侧栏装的是目录 /
+    /// 搜索结果 / 批注这类结构化列表，宽度由版式而非用户决定，界面上也不再给它
+    /// 拖拽入口（只留 AI 面板那条分隔线）。这个字段**保留只为三件事**：
     ///
-    /// 钳制放在**属性这一层**而不是各写入点：拖拽手势、双击复位、自检通道、
-    /// 将来的任何新入口，写进来的值都过同一道闸。此前钳制散在调用方，
-    /// 漏掉一处（比如直接 `store.ui.sidebarWidth = 2000`）就会把阅读区挤没。
+    /// 1. **旧 `settings.json` 仍能解码**——直接删字段会让旧配置命中「整份解码失败
+    ///    就退回默认值」的兜底，把用户其它偏好一起清掉，那是硬约束第 2 条；
+    /// 2. 旧版本写下的值仍然读得出来（便于将来真要恢复时迁移）；
+    /// 3. `--panel-width` 的旧两段式写法仍被接受（第一个数解析但不生效）。
+    ///
+    /// 布局层（`PanelWidthPolicy`）**已经不再读它**。写入仍然经过钳制，
+    /// 这样用户手改 `settings.json` 塞个 5000 进来也不会在别处以意想不到的方式被读到。
     /// didSet 里重赋值会再触发一次 didSet，第二次值已合法、不再写，不会成环。
     public var sidebarWidth: Double = PanelWidth.sidebarDefault {
         didSet {
@@ -497,14 +502,18 @@ public struct UISettings: Codable, Sendable, Equatable {
     /// 只是安静地切掉），太宽则阅读区被挤到不可用。手改 settings.json 塞个 5000
     /// 进来就能把界面搞成一片空白，所以解码时必须钳制。
     ///
-    /// 侧栏下限 200 而不是更早的 180：页签选择器搬进 `LeftRail` 之后，
-    /// 内容面板不再需要为「五个页签平分」留位置，而 180 已经窄到
-    /// 搜索结果行的三行摘要会被裁掉两行。
+    /// **侧栏现在固定 248pt**（`sidebarDefault` / `DS.Size.sidebarIdeal`），
+    /// `sidebarRange` 只服务于「兼容字段的钳制」——界面上已经没有拖侧栏的入口了，
+    /// 所以它不再参与任何一次布局换算。
+    ///
+    /// AI 面板下限本批从 280 提到 **300**：footer 行（引用编号 + 四个动作按钮）
+    /// 在 300pt 时刚好放平，280pt 会把「添加到批注」压成两行。这是用户明确的诉求
+    /// （「限定其最小宽度」），拖拽、自检、`--panel-width` 三条写入路径共用这道闸。
     public enum PanelWidth {
         public static let sidebarDefault: Double = 248
         public static let aiDefault: Double = 380
         public static let sidebarRange: ClosedRange<Double> = 200...420
-        public static let aiRange: ClosedRange<Double> = 280...640
+        public static let aiRange: ClosedRange<Double> = 300...640
 
         /// 阅读区至少要留这么宽（pt）。面板**上限**会按窗口宽度动态收窄到这个边界为止。
         ///

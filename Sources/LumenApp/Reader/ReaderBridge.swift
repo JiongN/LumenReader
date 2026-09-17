@@ -14,6 +14,16 @@ final class ReaderBridge: ObservableObject {
 
     /// 当前选区，AI 功能的输入
     @Published var selection: ReaderSelection?
+    /// 当前选区是不是「**拖动划选**」得来的。
+    ///
+    /// 存在的理由：在正文里**单击**也会产生一个 1 字符的选区（PDFKit / WebKit 都如此），
+    /// 于是用户随手点一下，划词浮动条就弹出来——挡住正文、又没法一眼关掉。
+    /// 用户要的是「拖动划选才弹」。所以选区额外带一个来源标记：
+    /// PDF 侧按鼠标按下点与松开点的距离判定（< 4pt 算单击），
+    /// EPUB 侧在注入的 JS 里判同一个距离。划词条只在 `isUsable && selectionFromDrag` 时出现。
+    ///
+    /// 默认 false：任何没显式标注来源的选区（含程序注入的）都当作单击处理，宁可少弹。
+    @Published var selectionFromDrag: Bool = false
     /// 位置标签，例如「第 12 / 340 页」
     @Published var positionLabel: String = ""
     /// 0…1 进度
@@ -124,6 +134,7 @@ final class ReaderBridge: ObservableObject {
     /// 载入新文档时重置全部状态，避免上一本的残留串台。
     func reset() {
         selection = nil
+        selectionFromDrag = false
         positionLabel = ""
         progress = 0
         outline = []
