@@ -106,4 +106,31 @@ public final class SettingsStore: ObservableObject {
             settings.ai.activeProviderID = settings.ai.providers.first?.id
         }
     }
+
+    // MARK: - 面板宽度
+
+    /// 提交侧栏宽度。**所有入口都走这里**（拖拽松手、双击复位、自检通道），
+    /// 于是「钳制」只有一份实现。
+    ///
+    /// 分开写迟早会漏一处：拖拽自己钳一次、设置页再钳一次，漏掉的那个入口
+    /// 就能把宽度写成 5000，把阅读区整个挤没——而它平时根本用不到，
+    /// 只有窗口被拖小之后才会现形。
+    ///
+    /// - Parameter maxWidth: 按当前窗口宽度算出的动态上限；`nil` 表示只按静态范围钳。
+    /// - Note: 写入后仍会经过 `UISettings.sidebarWidth` 的 `didSet`（第二道闸），
+    ///   两道闸的取值范围一致，不会互相拉扯。
+    public func commitSidebarWidth(_ value: Double, maxWidth: Double? = nil) {
+        let clamped = maxWidth.map { UISettings.PanelWidth.clampSidebar(value, maxWidth: $0) }
+            ?? UISettings.PanelWidth.clampSidebar(value)
+        guard clamped != ui.sidebarWidth else { return }
+        ui.sidebarWidth = clamped
+    }
+
+    /// 提交 AI 面板宽度，同上。
+    public func commitAIPanelWidth(_ value: Double, maxWidth: Double? = nil) {
+        let clamped = maxWidth.map { UISettings.PanelWidth.clampAI(value, maxWidth: $0) }
+            ?? UISettings.PanelWidth.clampAI(value)
+        guard clamped != ui.aiPanelWidth else { return }
+        ui.aiPanelWidth = clamped
+    }
 }

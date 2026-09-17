@@ -484,20 +484,64 @@ public struct UISettings: Codable, Sendable, Equatable {
     /// 上下限不是装饰：太窄会把行内的图标和文字裁掉（而且 SwiftUI 不会报错，
     /// 只是安静地切掉），太宽则阅读区被挤到不可用。手改 settings.json 塞个 5000
     /// 进来就能把界面搞成一片空白，所以解码时必须钳制。
+    ///
+    /// 侧栏下限 200 而不是更早的 180：页签选择器搬进 `LeftRail` 之后，
+    /// 内容面板不再需要为「五个页签平分」留位置，而 180 已经窄到
+    /// 搜索结果行的三行摘要会被裁掉两行。
     public enum PanelWidth {
         public static let sidebarDefault: Double = 248
         public static let aiDefault: Double = 380
-        public static let sidebarRange: ClosedRange<Double> = 180...420
+        public static let sidebarRange: ClosedRange<Double> = 200...420
         public static let aiRange: ClosedRange<Double> = 280...640
 
+        /// 阅读区至少要留这么宽（pt）。面板**上限**会按窗口宽度动态收窄到这个边界为止。
+        ///
+        /// 只按 `upperBound` 定死是不够的：920pt 的最小窗口下两侧面板全开到上限
+        /// 会把正文整个挤没。上限是「最多能给多少」，得看窗口还剩多少。
+        public static let minimumReaderWidth: Double = 320
+
         public static func clampSidebar(_ value: Double) -> Double {
-            guard value.isFinite else { return sidebarDefault }
-            return min(max(value, sidebarRange.lowerBound), sidebarRange.upperBound)
+            clampSidebar(value, maxWidth: sidebarRange.upperBound)
         }
 
         public static func clampAI(_ value: Double) -> Double {
-            guard value.isFinite else { return aiDefault }
-            return min(max(value, aiRange.lowerBound), aiRange.upperBound)
+            clampAI(value, maxWidth: aiRange.upperBound)
+        }
+
+        /// 带**动态上限**的钳制。拖动分隔线时由 `PanelWidthPolicy` 按当前窗口宽度算上限。
+        ///
+        /// 上限先与 `upperBound` 取小、再与下限取大，是为了让窗口极窄时算式仍然
+        /// 给出一个落在范围内的值（`min`/`max` 的顺序写反的话会得到 200...150 这种
+        /// 倒挂区间，之后的钳制行为就不可预测了）。
+        public static func clampSidebar(_ value: Double, maxWidth: Double) -> Double {
+            clamp(value, range: sidebarRange, fallback: sidebarDefault, maxWidth: maxWidth)
+        }
+
+        public static func clampAI(_ value: Double, maxWidth: Double) -> Double {
+            clamp(value, range: aiRange, fallback: aiDefault, maxWidth: maxWidth)
+        }
+
+        /// 侧栏在给定窗口条件下的可用上限：`窗口宽 − 已被占掉的部分 − 阅读区保底`。
+        public static func sidebarMaxWidth(containerWidth: Double, reserved: Double) -> Double {
+            max(min(sidebarRange.upperBound, containerWidth - reserved - minimumReaderWidth),
+                sidebarRange.lowerBound)
+        }
+
+        /// AI 面板的可用上限，同理。
+        public static func aiMaxWidth(containerWidth: Double, reserved: Double) -> Double {
+            max(min(aiRange.upperBound, containerWidth - reserved - minimumReaderWidth),
+                aiRange.lowerBound)
+        }
+
+        private static func clamp(
+            _ value: Double,
+            range: ClosedRange<Double>,
+            fallback: Double,
+            maxWidth: Double
+        ) -> Double {
+            guard value.isFinite else { return fallback }
+            let upper = max(min(range.upperBound, maxWidth), range.lowerBound)
+            return min(max(value, range.lowerBound), upper)
         }
     }
 

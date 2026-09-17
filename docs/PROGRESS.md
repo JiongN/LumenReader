@@ -5,6 +5,32 @@
 
 ---
 
+## 本批次（第四批）：侧栏图标栏 · 拖拽手感 · AI 实时切换
+
+分两个提交落地，各自独立编译通过。
+
+### 对既有绑定的**可见变更**（交付时已标明）
+
+1. **侧栏页签从「内容面板顶部的横向选择器」变成「窗口最左侧的纵向图标栏」**。
+   激活项是强调色圆角矩形 + 反白图标；内容面板收起后图标栏仍在。
+   ⌘1–⌘5 与「阅读」菜单里的五项**编号与顺序不变**（目录 / 智能 / 搜索 / 批注 / 页面）。
+2. **侧栏宽度下限 180pt → 200pt**（内容面板不再需要为五个页签平分位置，
+   而 180 已经窄到搜索结果的三行摘要被裁掉两行）。已存过 180 的用户会被钳到 200。
+3. 面板**上限**改为随窗口宽度收窄（阅读区保底 320pt）。窗口够宽时行为与之前一致。
+
+### 已落地
+
+| 项 | 改在哪 | 验证方式 | 关键结论 |
+| --- | --- | --- | --- |
+| 常驻纵向图标栏 `LeftRail` | `Sources/LumenApp/Reader/Sidebar/LeftRail.swift` | `--layout-report 1` + `tools/layout_assert.py` | `sidebarRail` x=0 w=52；`--sidebar 0` 时内容面板探针消失、图标栏仍在；沉浸模式下图标栏随侧栏一起隐藏（只上报 `readerSurface`，880 居中 x=280） |
+| 页签入口不随面板收起消失 | `ReaderContainerView.selectSidebarTab` 与 `AppState.revealSidebar` 同源 | 代码同源 + 布局自检 | ⌘1–⌘5 / 菜单 / 图标栏三条入口共用一条「展开 + 切换」实现 |
+| 拖拽不再逐帧写设置 | `PanelResizeHandle` + 容器 `liveWidth` | 代码路径 + `--resize-report 1` | 拖动期间只改一条 `.frame(width:)`；松手走 `SettingsStore.commitSidebarWidth`（与设置页、自检同一函数） |
+| 上下限钳制（含按窗口收窄） | `UISettings.PanelWidth` + `PanelWidthPolicy` | `--resize-report 1`（窄窗口 1000pt） | 6/6；上限 347（静态上限 420）说明动态钳制真的在生效 |
+| 断言可证伪 | 同上 | 人为删掉 `commitSidebarWidth` 的钳制后重跑 | 红 3 项（越界钳制 / 逐帧不越界 / 终值）——不是恒真断言 |
+| 自检不污染配置 | `suppressSave` | 跑前跑后 `md5 settings.json` | 一致 |
+
+---
+
 ## 已完成
 
 ### 基础闭环

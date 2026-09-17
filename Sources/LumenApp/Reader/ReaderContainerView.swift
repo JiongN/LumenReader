@@ -26,16 +26,45 @@ struct ReaderContainerView: View {
     /// 布局却纹丝不动，看起来就是「分隔线拖不动」。修复只差一行声明：
     /// 声明观察之后，SwiftUI 才会在设置变化时让这一层失效、用新宽度重建布局。
     @EnvironmentObject private var settings: SettingsStore
+
+    /// 拖动分隔线期间的**即时**宽度。nil = 没在拖，用设置里的已提交值。
+    ///
+    /// 存在容器里而不是每帧写回 `SettingsStore`：宽度是 `@Published` 结构体
+    /// `AppSettings` 的一个字段，每帧写一次会让所有观察 `SettingsStore` 的视图
+    /// 整棵失效——阅读区（PDFKit / WKWebView）与两块 `.regularMaterial` 都在其中，
+    /// 表现就是拖动手感抖动。松手时由 `PanelResizeHandle` 提交一次。
+    ///
+    /// 它**不是**第二份真相源：仅在一个手势期间有效，手势结束立刻置回 nil，
+    /// 之后一律读设置。所以「设置页改了宽度」「双击复位」这些外部改动照旧实时生效。
+    @State private var liveSidebarWidth: Double?
+    @State private var liveAIPanelWidth: Double?
+    /// 容器（窗口内容区）的可用宽度。面板上限要按它动态收窄。
+    @State private var containerWidth: CGFloat = 0
+
     /// 通道与对话模型都挂在 AppState 上（菜单栏、命令面板也要用），这里只是取用
     private var bridge: ReaderBridge { state.bridge }
     private var chat: AIChatModel { state.chat }
 
     var body: some View {
         HStack(spacing: 0) {
-            if state.isSidebarVisible {
+            // 图标栏常驻（沉浸模式除外）：内容面板可以收起，切页签的入口不能跟着消失。
+            if !state.isImmersive {
+                LeftRail(
+                    tabs: SidebarTab.available(for: document.kind),
+                    activeTab: bridge.sidebarTab,
+                    isExpanded: state.isSidebarVisible,
+                    onSelect: selectSidebarTab
+                )
+                .frame(width: LeftRail.width)
+                .layoutProbe("sidebarRail")
+                .background(.regularMaterial)
+                .transition(.opacity.combined(with: .offset(x: -10)))
+            }
+
+            if state.isSidebarVisible && !state.isImmersive {
                 SidebarColumn()
-                    // 宽度取自设置（可拖拽、可持久化），不再用固定常量
-                    .frame(width: state.settingsStore.ui.sidebarWidth)
+                    // 宽度取自设置（可拖拽、可持久化），拖动期间用本地即时值
+                    .frame(width: sidebarWidth)
                     .layoutProbe("sidebar")
                     .background(.regularMaterial)
                     // 淡入 + 10pt 位移，而不是 `.move(edge: .leading)`：
@@ -43,10 +72,14 @@ struct ReaderContainerView: View {
                     .transition(.opacity.combined(with: .offset(x: -10)))
 
                 PanelResizeHandle(
-                    width: sidebarWidth,
-                    range: UISettings.PanelWidth.sidebarRange,
+                    committedWidth: settings.ui.sidebarWidth,
+                    liveWidth: $liveSidebarWidth,
+                    range: sidebarRange,
                     defaultWidth: UISettings.PanelWidth.sidebarDefault,
-                    panelIsLeading: true
+                    panelIsLeading: true,
+                    onCommit: { value in
+                        settings.commitSidebarWidth(value, maxWidth: sidebarCap)
+                    }
                 )
             }
 
@@ -81,19 +114,33 @@ struct ReaderContainerView: View {
                 if state.isImmersive { Spacer(minLength: 0) }
             }
 
-            if state.isAIPanelVisible {
+            if state.isAIPanelVisible && !state.isImmersive {
                 PanelResizeHandle(
-                    width: aiPanelWidth,
-                    range: UISettings.PanelWidth.aiRange,
+                    committedWidth: settings.ui.aiPanelWidth,
+                    liveWidth: $liveAIPanelWidth,
+                    range: aiPanelRange,
                     defaultWidth: UISettings.PanelWidth.aiDefault,
-                    panelIsLeading: false
+                    panelIsLeading: false,
+                    onCommit: { value in
+                        settings.commitAIPanelWidth(value, maxWidth: aiPanelCap)
+                    }
                 )
 
                 AIPanelView()
-                    .frame(width: settings.ui.aiPanelWidth)
+                    .frame(width: aiPanelWidth)
                     .layoutProbe("aiPanel")
                     .background(.regularMaterial)
                     .transition(.opacity.combined(with: .offset(x: 10)))
+            }
+        }
+        // 量窗口内容区宽度。用 background 而不是把 HStack 包进 GeometryReader：
+        // GeometryReader 会参与布局并把「谁决定宽度」这件事搅进来，
+        // 而这里只是想读一个数，不该反过来影响布局。
+        .background {
+            GeometryReader { proxy in
+                Color.clear
+                    .onAppear { containerWidth = proxy.size.width }
+                    .onChange(of: proxy.size.width) { _, width in containerWidth = width }
             }
         }
         // environmentObject 必须放在所有 overlay 之后：overlay 会把内容包在修饰过的视图
@@ -120,23 +167,47 @@ struct ReaderContainerView: View {
 
     // MARK: - 面板宽度
 
-    /// 面板宽度的双向绑定。
-    ///
-    /// 直通 `settingsStore.ui` 而不是先存一份本地 `@State`：宽度的唯一真相源就该是配置
-    /// （它要持久化）。本地再留一份的话，设置页改了宽度、或者双击复位，两边就会不同步，
-    /// 表现为"拖完没反应，重启才生效"这类难查的毛病。
-    private var sidebarWidth: Binding<Double> {
-        Binding(
-            get: { state.settingsStore.ui.sidebarWidth },
-            set: { state.settingsStore.ui.sidebarWidth = $0 }
+    /// 侧栏**当前应当显示**的宽度：拖动中用即时值，否则用设置里的已提交值。
+    private var sidebarWidth: Double { liveSidebarWidth ?? settings.ui.sidebarWidth }
+
+    private var aiPanelWidth: Double { liveAIPanelWidth ?? settings.ui.aiPanelWidth }
+
+    /// 侧栏本次拖拽允许的范围。上限按窗口宽度动态收窄（`PanelWidthPolicy`）：
+    /// 窗口只有 920pt 时把侧栏拉到 420 会把阅读区挤没。
+    private var sidebarRange: ClosedRange<Double> {
+        UISettings.PanelWidth.sidebarRange.lowerBound...sidebarCap
+    }
+
+    private var aiPanelRange: ClosedRange<Double> {
+        UISettings.PanelWidth.aiRange.lowerBound...aiPanelCap
+    }
+
+    private var sidebarCap: Double {
+        PanelWidthPolicy.sidebarCap(
+            containerWidth: containerWidth,
+            aiPanelWidth: aiPanelWidth,
+            isAIPanelVisible: state.isAIPanelVisible && !state.isImmersive
         )
     }
 
-    private var aiPanelWidth: Binding<Double> {
-        Binding(
-            get: { state.settingsStore.ui.aiPanelWidth },
-            set: { state.settingsStore.ui.aiPanelWidth = $0 }
+    private var aiPanelCap: Double {
+        PanelWidthPolicy.aiCap(
+            containerWidth: containerWidth,
+            sidebarWidth: sidebarWidth,
+            isSidebarVisible: state.isSidebarVisible && !state.isImmersive
         )
+    }
+
+    /// 点图标栏：点已激活的那一格 = 收起内容面板；点别的 = 展开并切过去。
+    ///
+    /// 两个方向共用 `revealSidebar`（⌘1–⌘5 与菜单项也走它），
+    /// 所以「切到某页签时若面板收起要一并展开」这条规则只有一份实现。
+    private func selectSidebarTab(_ tab: SidebarTab) {
+        if state.isSidebarVisible && bridge.sidebarTab == tab {
+            withAnimation(DS.Motion.panel) { state.isSidebarVisible = false }
+        } else {
+            withAnimation(DS.Motion.quick) { state.revealSidebar(tab: tab) }
+        }
     }
 
     @ViewBuilder

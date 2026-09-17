@@ -76,7 +76,7 @@
 | `--annotate-report 1` | 批注自检（15 项）：高亮 → 锚定批注 → 写盘 → 重开核对 → 编辑 → 定位 → 新建 → id 去重 → 删除 |
 | `--search-report 1` | 搜索高亮自检：高亮出现、逐条定位、**且不会写进用户的书** |
 | `--agent-report 1` | Agent 自检：预设稳定性、系统提示拼装顺序、真实联网检索 |
-| `--resize-report 1` | 面板宽度响应式：布局稳定**之后**写一次宽度，断言布局探针的 frame 真的跟随 + 越界被钳制 |
+| `--resize-report 1` | 面板宽度自检（6 项）：布局跟随写入、上下限都被钳制、连续逐帧写入不越界且终值正确 |
 | `--ask "问题"` | 启动后自动发起一次提问（端到端跑 AI 链路） |
 
 ### AI 与桩服务
@@ -157,7 +157,9 @@ python3 tools/layout_assert.py /tmp/lumen-smoke        # 目录或日志文件�
 预期从日志里的启动参数（`--sidebar 0` / `--ai 1`）推导，不依赖文件名。
 
 需要新控件被审到时，在视图上加 `.layoutProbe("名字")`——它只在 `--layout-report 1`
-时才挂 `GeometryReader`，正常启动零开销。
+时才挂 `GeometryReader`，正常启动零开销。侧栏那一列现在是**两个**探针：
+`sidebarRail`（常驻图标栏，52pt）与 `sidebar`（可收起的内容面板）。
+断言器把 `sidebarRail` 也算作面板，所以 `--sidebar 0` 时「最左贴 0」由图标栏承担。
 
 > ⚠️ **布局 dump 是「首次上报后 2 秒」统一打印**，所以 `--capture-delay` 必须留够余量，
 > 否则进程会在 dump 之前就退出，日志里一条布局都没有——看起来像"探针没生效"，
@@ -223,7 +225,21 @@ dist/Lumen.app/Contents/MacOS/Lumen --open /tmp/lumen-test/text.pdf \
 
 # Agent：预设 id 稳定、系统提示拼装、真实联网检索（14 项，要联网）
 dist/Lumen.app/Contents/MacOS/Lumen --agent-report 1 --capture /tmp/x.png --capture-delay 5
+
+# 面板宽度：6 项，含上下限钳制与「逐帧写入」模拟
+dist/Lumen.app/Contents/MacOS/Lumen --open /tmp/lumen-test/large.pdf \
+  --window-size 1000x700 --resize-report 1 --capture /tmp/x.png --capture-delay 8
+# 日志：[Lumen][resize] 自检：通过 6 项，失败 0 项 ✅
 ```
+
+> ⚠️ `--resize-report` 的两条新断言（下限钳制、逐帧写入不越界）**要在窄窗口下跑**
+> 才有意义：1340pt 时按窗口算出的上限（420）恰好等于静态上限，此时若有人把
+> 动态钳制删掉，断言照样全绿——那就退化成恒真断言了。用 `--window-size 1000x700`
+> 时上限是 347，与静态上限不同，删掉动态钳制会立刻红 3 项（已实测）。
+> 反向的边界也写死了：窗口窄到「可用区间 < 40pt」时「布局跟随」会被**跳过**，
+> 而不是写一个和当前值相同的值去骗一个「通过」。
+
+```bash
 
 **为什么这些断言不能停在「函数返回 true」**——三条通道各有一个真实教训：
 

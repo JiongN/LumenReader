@@ -1,6 +1,11 @@
 import SwiftUI
 import LumenKit
 
+/// 侧栏的**内容面板**。
+///
+/// 页签选择器已经搬到左侧那条常驻图标栏（`LeftRail`）里了，这里只留内容。
+/// 拆分的原因很实际：选择器原本长在面板顶部，面板一收起，切页签的入口就跟着消失了；
+/// 图标栏常驻之后，「收起内容面板」不再等于「失去导航」。
 struct SidebarColumn: View {
 
     @EnvironmentObject private var bridge: ReaderBridge
@@ -8,22 +13,13 @@ struct SidebarColumn: View {
 
     @State private var query: String = ""
 
-    private var availableTabs: [SidebarTab] {
-        state.document?.kind == .pdf
-            ? [.outline, .smartOutline, .search, .annotations, .thumbnails]
-            : [.outline, .smartOutline, .search, .annotations]
-    }
-
     var body: some View {
         VStack(spacing: 0) {
-            picker
-            Divider().overlay(DS.Palette.separator)
-
-            // 三个页签之间交叉淡入。
+            // 页签之间交叉淡入。
             //
             // 目录是稀疏的树、搜索是密集的结果列表、缩略图是满屏图片网格，
             // 三者的「视觉密度」差得很远；硬切时侧栏整块会闪一下，像是重新加载了。
-            // 动画由 `picker` 里那句 `withAnimation(DS.Motion.quick)` 提供——
+            // 动画由发起切换的那一侧提供（`LeftRail` 的点击、`revealSidebar`）—
             // 页签切换是轻量操作，用 quick 比用面板那套弹簧更跟手。
             Group {
                 switch bridge.sidebarTab {
@@ -37,50 +33,6 @@ struct SidebarColumn: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .background(.regularMaterial)
-    }
-
-    // MARK: - 页签
-
-    private var picker: some View {
-        HStack(spacing: 2) {
-            ForEach(availableTabs) { tab in
-                Button {
-                    withAnimation(DS.Motion.quick) { bridge.sidebarTab = tab }
-                } label: {
-                    HStack(spacing: 3) {
-                        Image(systemName: tab.systemImage)
-                            .font(DS.Typo.ui(size: 10.5, weight: .medium))
-                        Text(tab.title)
-                            .font(DS.Typo.ui(size: 11, weight: .medium))
-                            // 侧栏可以被拖到 180pt，那时每个页签只剩不到 40pt。
-                            // 缩一点字号比截成「智…」强：截断的标签等于没有标签。
-                            .lineLimit(1)
-                            .minimumScaleFactor(0.8)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 6)
-                    .contentShape(Rectangle())
-                    .background(
-                        RoundedRectangle(cornerRadius: DS.Radius.s, style: .continuous)
-                            .fill(bridge.sidebarTab == tab ? DS.Palette.surfaceRaised : .clear)
-                    )
-                    .foregroundStyle(bridge.sidebarTab == tab ? DS.Palette.textPrimary : DS.Palette.textSecondary)
-                }
-                .buttonStyle(.plain)
-                .help(tab.fullTitle)
-            }
-        }
-        .padding(3)
-        .background(
-            RoundedRectangle(cornerRadius: DS.Radius.m, style: .continuous)
-                .fill(DS.Palette.surfaceSunken)
-        )
-        // 页签栏是这次唯一改动版式的控件（3 个页签变 4 个），而它最容易出的问题是
-        // 「在窄侧栏里把标签挤成省略号」——那种退化肉眼截图看不出来（模型也没有视觉通道），
-        // 但它的宽高比会变。上报实际框，就能拿「宽度 ÷ 页签数」去核每个页签够不够。
-        .layoutProbe("sidebarPicker")
-        .padding(DS.Space.s)
     }
 
     // MARK: - 目录

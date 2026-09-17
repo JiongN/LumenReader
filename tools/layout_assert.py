@@ -69,7 +69,12 @@ def check(path):
             fails.append(f"{key} maxY 与 y+h 不自洽：{f['maxY']} vs {f['y'] + f['h']}")
 
     # ② 三块面板横向不得重叠
-    panels = [k for k in ("sidebar", "readerSurface", "aiPanel") if k in probes]
+    #   sidebarRail 是侧栏最左侧那条常驻图标栏（页签选择器搬进它之后新增的），
+    #   它占用最左边 52pt，所以「最左贴 0」这条判断必须以它为准——
+    #   不把它算进来，`--sidebar 0`（内容面板收起）会被误判成「正文左侧留白 52px」。
+    panels = [
+        k for k in ("sidebarRail", "sidebar", "readerSurface", "aiPanel") if k in probes
+    ]
     ordered = sorted(panels, key=lambda k: probes[k]["x"])
     for left, right in zip(ordered, ordered[1:]):
         gap = probes[right]["x"] - probes[left]["maxX"]
