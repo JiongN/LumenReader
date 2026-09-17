@@ -158,7 +158,7 @@ public final class OpenAICompatibleProvider: AIProvider {
                 } catch let error as AIError {
                     continuation.finish(throwing: error)
                 } catch {
-                    continuation.finish(throwing: Self.translateTransportError(error, base: config.baseURL))
+                    continuation.finish(throwing: Self.translateTransportError(error, config: config))
                 }
             }
 
@@ -177,7 +177,14 @@ public final class OpenAICompatibleProvider: AIProvider {
     }
 
     /// 把 URLSession 的传输层错误翻译成能定位问题的中文。
-    private static func translateTransportError(_ error: Error, base: String) -> Error {
+    ///
+    /// 「连不上某某地址」这条如果只报地址，用户是定位不到的：他不知道应用当前
+    /// 用的是哪个服务商。而读到这条提示的人，多半已经忘了自己在设置里选的是哪一项
+    /// （尤其那些列表里躺着好几个服务商的用户）。所以这里把**服务商名**一并带上，
+    /// 并对本机地址额外点一句——「127.0.0.1 连不上」最常见的成因就是
+    /// 那个本地服务（Ollama / LM Studio / 自检桩服务）根本没启动。
+    private static func translateTransportError(_ error: Error, config: AIProviderConfig) -> Error {
+        let base = config.baseURL
         let nsError = error as NSError
         guard nsError.domain == NSURLErrorDomain else { return error }
 
@@ -187,8 +194,16 @@ public final class OpenAICompatibleProvider: AIProvider {
                 NSLocalizedDescriptionKey: "网络不可用。请检查网络连接后重试。"
             ])
         case NSURLErrorCannotFindHost, NSURLErrorCannotConnectToHost:
+            var message = "连不上 \(targetDescription(from: base))"
+                + "（当前服务商：\(config.name)）。"
+                + "请核对地址与端口是否写全，以及服务是否已启动。"
+            if config.isLocalEndpoint {
+                message += "\n\n这是一个本机地址。它需要本机有服务在监听——"
+                    + "若是 Ollama / LM Studio，先把它启动；"
+                    + "若你并不想用本机服务，到「设置 → AI」换一个服务商。"
+            }
             return NSError(domain: "Lumen", code: nsError.code, userInfo: [
-                NSLocalizedDescriptionKey: "连不上 \(targetDescription(from: base))。请核对地址与端口是否写全，以及服务是否已启动。"
+                NSLocalizedDescriptionKey: message
             ])
         case NSURLErrorTimedOut:
             return NSError(domain: "Lumen", code: nsError.code, userInfo: [

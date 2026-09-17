@@ -128,7 +128,8 @@ final class AIChatModel: ObservableObject {
         citations: [DocumentLocator]? = nil,
         config: AIProviderConfig?,
         memory: String,
-        translateTarget: String
+        translateTarget: String,
+        template: PromptTemplate? = nil
     ) {
         guard !isStreaming else { return }
         guard let config else {
@@ -164,7 +165,8 @@ final class AIChatModel: ObservableObject {
             context: context,
             memory: memory,
             history: history,
-            translateTarget: translateTarget
+            translateTarget: translateTarget,
+            template: template
         )
 
         streamTask = Task { [weak self] in
@@ -193,7 +195,8 @@ final class AIChatModel: ObservableObject {
         citations: [DocumentLocator]? = nil,
         config: AIProviderConfig?,
         memory: String,
-        translateTarget: String
+        translateTarget: String,
+        template: PromptTemplate? = nil
     ) {
         let trimmed = question.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
@@ -208,7 +211,8 @@ final class AIChatModel: ObservableObject {
             citations: citations,
             config: config,
             memory: memory,
-            translateTarget: translateTarget
+            translateTarget: translateTarget,
+            template: template
         )
     }
 

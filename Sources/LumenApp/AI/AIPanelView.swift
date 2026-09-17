@@ -15,6 +15,8 @@ struct AIPanelView: View {
 
     /// 是否跟随最新内容自动滚到底部
     @State private var followTail = true
+    /// 提示词模板编辑器
+    @State private var isTemplateEditorVisible = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -30,6 +32,10 @@ struct AIPanelView: View {
             consume(request)
             state.pendingAIRequest = nil
         }
+        .sheet(isPresented: $isTemplateEditorVisible) {
+            PromptTemplateEditor()
+                .environmentObject(state)
+        }
     }
 
     private var divider: some View {
@@ -44,11 +50,11 @@ struct AIPanelView: View {
                 .font(DS.Typo.ui(size: 12.5, weight: .semibold))
                 .foregroundStyle(DS.Palette.accent)
 
-            Text("AI 阅读")
-                .font(DS.Typo.headline)
-                .foregroundStyle(DS.Palette.textPrimary)
-
-            providerChip
+            // 这里原来还有一行「AI 阅读」文字标题，现在让位给两个切换器。
+            // 面板默认宽 380pt、用户还能调到 280pt，标题 + 两个 chip 会把整行挤爆；
+            // 而 sparkles 图标本身已经说明了这是 AI 面板，标题是纯冗余。
+            providerMenu
+            templateMenu
 
             Spacer(minLength: 0)
 
@@ -83,34 +89,161 @@ struct AIPanelView: View {
         .frame(height: DS.Size.toolbarHeight)
     }
 
-    private var providerChip: some View {
+    // MARK: - 服务商与提示词
+
+    /// 服务商切换。
+    ///
+    /// 从「点击跳设置页」改成菜单直选，解决的是一个很实际的摩擦：
+    /// 读论文时常要在快模型和强模型之间来回切——随手问一句用便宜的，
+    /// 细读论证用贵的。之前每切一次都要离开阅读、进设置、找到那一项、再切回来，
+    /// 代价高到用户干脆不切，一直按最贵的那个跑。
+    private var providerMenu: some View {
         let config = state.settingsStore.activeProvider
         let configured = config?.isConfigured ?? false
+        let providers = state.settingsStore.ai.providers
 
-        return Button {
-            openSettings()
-            NSApp.activate(ignoringOtherApps: true)
-        } label: {
-            HStack(spacing: 4) {
-                Circle()
-                    .fill(configured ? DS.Palette.success : DS.Palette.warning)
-                    .frame(width: 5, height: 5)
-                Text(config.map { $0.selectedModel.isEmpty ? $0.name : $0.selectedModel } ?? "未配置")
-                    .font(DS.Typo.ui(size: 10.5, weight: .medium))
-                    .lineLimit(1)
+        return Menu {
+            if providers.isEmpty {
+                Button("尚未添加服务商") { openSettingsAndActivate() }
+            } else {
+                ForEach(providers) { provider in
+                    providerMenuEntry(provider)
+                }
             }
-            .foregroundStyle(DS.Palette.textSecondary)
-            .padding(.horizontal, DS.Space.s)
-            .padding(.vertical, 3)
-            .background(
-                Capsule().fill(DS.Palette.surfaceRaised)
-            )
-            .overlay(
-                Capsule().strokeBorder(DS.Palette.separator, lineWidth: 0.5)
+
+            Divider()
+
+            Button("AI 与阅读设置…") { openSettingsAndActivate() }
+        } label: {
+            chip(
+                dotColor: configured ? DS.Palette.success : DS.Palette.warning,
+                text: config.map { $0.selectedModel.isEmpty ? $0.name : $0.selectedModel } ?? "未配置"
             )
         }
-        .buttonStyle(.plain)
-        .help(configured ? "点击修改 AI 设置" : "尚未配置 AI 服务商，点击开始配置")
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .help(configured ? "切换 AI 服务商 / 模型" : "尚未配置 AI 服务商，点击开始配置")
+    }
+
+    /// 服务商在菜单里的一项。模型多于一个时给二级菜单——
+    /// 换服务商十有八九就是为了换模型，这一步不该再让人跑一趟设置页。
+    @ViewBuilder
+    private func providerMenuEntry(_ provider: AIProviderConfig) -> some View {
+        let isActive = state.settingsStore.ai.activeProviderID == provider.id
+
+        if provider.models.count > 1 {
+            Menu {
+                ForEach(provider.models, id: \.self) { model in
+                    Button(model) { activate(provider, model: model) }
+                }
+            } label: {
+                if isActive {
+                    Label("\(provider.name)（\(provider.selectedModel)）", systemImage: "checkmark")
+                } else {
+                    Text("\(provider.name)（\(provider.selectedModel)）")
+                }
+            }
+        } else {
+            Button {
+                activate(provider)
+            } label: {
+                if isActive {
+                    Label(provider.name, systemImage: "checkmark")
+                } else {
+                    Text(provider.name)
+                }
+            }
+        }
+    }
+
+    /// 提示词模板切换。
+    ///
+    /// 「默认」放在最前面，而不是让某个预设默认选中：默认行为是经过调校的
+    /// （系统提示里逐条堵住了幻觉、客套话、过度概括），套模板是在它之上做加法。
+    /// 所以「不加东西」必须是一个一眼看得到、随时回得来的选项。
+    private var templateMenu: some View {
+        let templates = state.settingsStore.ai.templates
+        let activeID = state.settingsStore.ai.activeTemplateID
+
+        return Menu {
+            Button {
+                state.settingsStore.ai.activeTemplateID = nil
+            } label: {
+                if activeID == nil {
+                    Label("默认", systemImage: "checkmark")
+                } else {
+                    Text("默认")
+                }
+            }
+
+            Divider()
+
+            ForEach(templates) { template in
+                Button {
+                    state.settingsStore.ai.activeTemplateID = template.id
+                } label: {
+                    if template.id == activeID {
+                        Label(template.name, systemImage: "checkmark")
+                    } else {
+                        Text(template.name)
+                    }
+                }
+            }
+
+            Divider()
+
+            Button("编辑提示词…") { isTemplateEditorVisible = true }
+        } label: {
+            chip(dotColor: nil, text: activeTemplateName, icon: "text.badge.checkmark")
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .help("切换提示词模板")
+    }
+
+    private var activeTemplateName: String {
+        guard let id = state.settingsStore.ai.activeTemplateID,
+              let template = state.settingsStore.ai.templates.first(where: { $0.id == id }) else {
+            return "默认"
+        }
+        return template.name
+    }
+
+    /// chip 的统一外形。
+    ///
+    /// 「状态点」做成可选是有意的：服务商有「配没配好」要表达，模板没有对应状态，
+    /// 那就不要挂一个永远亮着的假指示灯——用户会以为它在表示什么。
+    private func chip(dotColor: Color?, text: String, icon: String? = nil) -> some View {
+        HStack(spacing: 4) {
+            if let dotColor {
+                Circle().fill(dotColor).frame(width: 5, height: 5)
+            }
+            if let icon {
+                Image(systemName: icon).font(DS.Typo.ui(size: 9.5))
+            }
+            Text(text)
+                .font(DS.Typo.ui(size: 10.5, weight: .medium))
+                .lineLimit(1)
+        }
+        .foregroundStyle(DS.Palette.textSecondary)
+        .padding(.horizontal, DS.Space.s)
+        .padding(.vertical, 3)
+        .background(Capsule().fill(DS.Palette.surfaceRaised))
+        .overlay(Capsule().strokeBorder(DS.Palette.separator, lineWidth: 0.5))
+    }
+
+    private func activate(_ provider: AIProviderConfig, model: String? = nil) {
+        var updated = provider
+        if let model { updated.selectedModel = model }
+        state.settingsStore.upsertProvider(updated)
+        state.settingsStore.settings.ai.activeProviderID = provider.id
+    }
+
+    private func openSettingsAndActivate() {
+        openSettings()
+        NSApp.activate(ignoringOtherApps: true)
     }
 
     // MARK: - 对话区
@@ -348,6 +481,15 @@ struct AIPanelView: View {
         bridge.selection?.isUsable ?? false
     }
 
+    /// 当前选中的提示词模板。`nil` 表示不套模板，走 `PromptLibrary` 的默认行为。
+    ///
+    /// 每次用 id 去查而不是在切换时缓存一份：模板可能在编辑器里被改名或删掉，
+    /// 缓存的话会继续拿着一份已经不存在的旧副本。
+    private var activeTemplate: PromptTemplate? {
+        guard let id = state.settingsStore.ai.activeTemplateID else { return nil }
+        return state.settingsStore.ai.templates.first { $0.id == id }
+    }
+
     private func sendDraft() {
         guard canSend else { return }
         let question = chat.draft.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -361,7 +503,8 @@ struct AIPanelView: View {
             locator: locator,
             config: state.settingsStore.activeProvider,
             memory: state.aiMemoryPayload,
-            translateTarget: state.settingsStore.ai.translateTarget
+            translateTarget: state.settingsStore.ai.translateTarget,
+            template: activeTemplate
         )
     }
 
@@ -377,7 +520,8 @@ struct AIPanelView: View {
             citations: nil,
             config: state.settingsStore.activeProvider,
             memory: state.aiMemoryPayload,
-            translateTarget: state.settingsStore.ai.translateTarget
+            translateTarget: state.settingsStore.ai.translateTarget,
+            template: activeTemplate
         )
     }
 

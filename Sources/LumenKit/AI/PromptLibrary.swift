@@ -36,7 +36,23 @@ public enum AITask: Sendable, Equatable {
 public enum PromptLibrary {
 
     /// 单一系统提示，保证不同任务下模型的行为基线一致。
-    public static func systemPrompt(readerPersona: String = "") -> String {
+    ///
+    /// `template` 提供 `systemPrompt` 时**整段替换**，而不是拼接：
+    /// 模板的意义就是换一种读法（「批判性审读」的立场与「严谨学术解读」并不相同），
+    /// 把两段立场不同的指令拼在一起，模型只会两头都不满足。
+    /// 读者背景仍然保留——那是「关于谁在读」，与「怎么读」不冲突。
+    public static func systemPrompt(readerPersona: String = "", template: PromptTemplate? = nil) -> String {
+        if let custom = template?.systemPrompt.trimmingCharacters(in: .whitespacesAndNewlines),
+           !custom.isEmpty {
+            var lines = [custom]
+            if !readerPersona.isEmpty {
+                lines.append("")
+                lines.append("关于这位读者的持久背景（来自其本人在设置中填写的内容，可直接使用，不必再问）：")
+                lines.append(readerPersona)
+            }
+            return lines.joined(separator: "\n")
+        }
+
         var lines = [
             "你是一位严谨的阅读助手，正在帮助用户理解他手上正在读的文档。",
             "",
@@ -90,10 +106,11 @@ public enum PromptLibrary {
         context: String,
         memory: String,
         history: [AIMessage] = [],
-        translateTarget: String = "简体中文"
+        translateTarget: String = "简体中文",
+        template: PromptTemplate? = nil
     ) -> [AIMessage] {
 
-        var messages: [AIMessage] = [.system(systemPrompt(readerPersona: memory))]
+        var messages: [AIMessage] = [.system(systemPrompt(readerPersona: memory, template: template))]
 
         // 带上最近几轮，让「追问」能接上前文
         messages.append(contentsOf: history.suffix(6))
@@ -143,6 +160,14 @@ public enum PromptLibrary {
                 user += "\n\n"
             }
             user += prompt
+        }
+
+        // 模板的额外要求追加在最后。位置是刻意的：任务自带的要求先出现，
+        // 模型看到的是「先理解这次要做什么，再满足这个模板额外要什么」；
+        // 反过来插在前面，会被任务要求盖过去。
+        if let extra = template?.instruction.trimmingCharacters(in: .whitespacesAndNewlines),
+           !extra.isEmpty {
+            user += "\n\n" + extra
         }
 
         messages.append(.user(user))
