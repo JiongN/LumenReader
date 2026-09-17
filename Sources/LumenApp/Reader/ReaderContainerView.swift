@@ -18,6 +18,14 @@ struct ReaderContainerView: View {
     private static let immersiveMaxWidth: CGFloat = 880
 
     @EnvironmentObject private var state: AppState
+    /// 宽度直接观察 `SettingsStore` 而不是经由 `AppState` 间接读：
+    ///
+    /// 拖动分隔线写的是 `settingsStore.ui.sidebarWidth`，`@Published` 触发的是
+    /// **SettingsStore** 的 `objectWillChange`。这个视图此前只观察了 `AppState`，
+    /// 「设置变了」这个消息根本传不到这里——拖动手势每帧都在写值、模型每帧都在变，
+    /// 布局却纹丝不动，看起来就是「分隔线拖不动」。修复只差一行声明：
+    /// 声明观察之后，SwiftUI 才会在设置变化时让这一层失效、用新宽度重建布局。
+    @EnvironmentObject private var settings: SettingsStore
     /// 通道与对话模型都挂在 AppState 上（菜单栏、命令面板也要用），这里只是取用
     private var bridge: ReaderBridge { state.bridge }
     private var chat: AIChatModel { state.chat }
@@ -82,7 +90,7 @@ struct ReaderContainerView: View {
                 )
 
                 AIPanelView()
-                    .frame(width: state.settingsStore.ui.aiPanelWidth)
+                    .frame(width: settings.ui.aiPanelWidth)
                     .layoutProbe("aiPanel")
                     .background(.regularMaterial)
                     .transition(.opacity.combined(with: .offset(x: 10)))
@@ -149,6 +157,12 @@ struct ReaderContainerView: View {
     /// 必须等文档真的装好之后再动手——阅读视图在 `prepare()` 里会调 `bridge.reset()`，
     /// 早于它插入的状态会被清掉，自检就会得到「浮层没出现」这种假结论。
     private func applyLaunchDiagnostics() async {
+        // 面板宽度响应式自检：等布局稳定后写一次宽度，断言布局真的跟着变。
+        // 必须挂在这里（文档装好、视图出现之后）——启动早期写入测不到响应式链路。
+        if LaunchOptions.resizeReport {
+            await ResizeAudit.run(state: state)
+        }
+
         let needsWork = LaunchOptions.sidebarTab != nil
             || LaunchOptions.injectsDemoSelection
             || LaunchOptions.runAction != nil

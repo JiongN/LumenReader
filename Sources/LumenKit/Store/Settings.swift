@@ -460,9 +460,24 @@ public struct UISettings: Codable, Sendable, Equatable {
     ///
     /// 存进配置而不是只放内存：面板宽度属于「调一次就长期沿用」的偏好，
     /// 每次开新文档都弹回默认值会逼用户反复调同一个东西。
-    public var sidebarWidth: Double = PanelWidth.sidebarDefault
+    ///
+    /// 钳制放在**属性这一层**而不是各写入点：拖拽手势、双击复位、自检通道、
+    /// 将来的任何新入口，写进来的值都过同一道闸。此前钳制散在调用方，
+    /// 漏掉一处（比如直接 `store.ui.sidebarWidth = 2000`）就会把阅读区挤没。
+    /// didSet 里重赋值会再触发一次 didSet，第二次值已合法、不再写，不会成环。
+    public var sidebarWidth: Double = PanelWidth.sidebarDefault {
+        didSet {
+            let clamped = PanelWidth.clampSidebar(sidebarWidth)
+            if clamped != sidebarWidth { sidebarWidth = clamped }
+        }
+    }
     /// AI 面板宽度（pt）。同上。
-    public var aiPanelWidth: Double = PanelWidth.aiDefault
+    public var aiPanelWidth: Double = PanelWidth.aiDefault {
+        didSet {
+            let clamped = PanelWidth.clampAI(aiPanelWidth)
+            if clamped != aiPanelWidth { aiPanelWidth = clamped }
+        }
+    }
 
     /// 面板宽度的允许范围。
     ///

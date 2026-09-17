@@ -147,6 +147,15 @@ enum LaunchOptions {
     /// 批注自检：在 /tmp 的副本上跑一遍「高亮 → 页面批注 → 写盘 → 重开核对 → 删除」。
     static var annotateReport: Bool { flag("--annotate-report") }
 
+    /// 面板宽度响应式自检：`--resize-report 1`。
+    ///
+    /// 存在的理由：拖动分隔线的 bug 恰好落在旧自检的盲区里——`--panel-width` 是在
+    /// **视图出现之前**写入宽度的，首帧直接按新值布局，「改了设置 → 布局跟着变」这条
+    /// 响应式链路从来没被验过（视图不观察 SettingsStore 时它就是断的，自检照样全绿）。
+    /// 这条通道在布局稳定**之后**再写一次宽度（与拖动手势走同一个设置项），
+    /// 然后读布局探针实际记录到的 frame，断言它真的变了。
+    static var resizeReport: Bool { flag("--resize-report") }
+
     /// 搜索高亮自检：验证页面高亮出现、定位准确、且**不会**被写进用户的书。
     static var searchReport: Bool { flag("--search-report") }
 
@@ -247,7 +256,7 @@ struct LayoutProbe: ViewModifier {
     let name: String
 
     func body(content: Content) -> some View {
-        if LaunchOptions.layoutReport {
+        if LaunchOptions.layoutReport || LaunchOptions.resizeReport {
             content.background(
                 GeometryReader { proxy in
                     let frame = proxy.frame(in: .global)
@@ -277,17 +286,22 @@ final class LayoutAuditLog {
     private var frames: [String: CGRect] = [:]
     private var dumpScheduled = false
 
+    /// 读回某个探针最近记录的 frame。`--resize-report` 用它断言「宽度写入后布局真的变了」。
+    func frame(named name: String) -> CGRect? { frames[name] }
+
     /// 从第一次上报起算，2s 后统一打印。演示选区要等文档装好才注入，
     /// 所以划词条的首次上报会晚于状态条，用一个稍长的窗口把两者都收进来。
     func record(_ name: String, _ frame: CGRect) {
-        guard LaunchOptions.layoutReport else { return }
+        guard LaunchOptions.layoutReport || LaunchOptions.resizeReport else { return }
         frames[name] = frame
 
         guard !dumpScheduled else { return }
         dumpScheduled = true
         Task { @MainActor in
             try? await Task.sleep(nanoseconds: 2_000_000_000)
-            self.dump()
+            // 只有 --layout-report 才统一打印；--resize-report 只要「读得到」，
+            // 打印反而会把它的断言输出淹没。
+            if LaunchOptions.layoutReport { self.dump() }
         }
     }
 
