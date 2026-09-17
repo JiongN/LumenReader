@@ -17,6 +17,8 @@ struct AIPanelView: View {
     @State private var followTail = true
     /// 提示词模板编辑器
     @State private var isTemplateEditorVisible = false
+    /// Agent 编辑器
+    @State private var isAgentEditorVisible = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -34,6 +36,10 @@ struct AIPanelView: View {
         }
         .sheet(isPresented: $isTemplateEditorVisible) {
             PromptTemplateEditor()
+                .environmentObject(state)
+        }
+        .sheet(isPresented: $isAgentEditorVisible) {
+            AgentEditor()
                 .environmentObject(state)
         }
     }
@@ -55,6 +61,7 @@ struct AIPanelView: View {
             // 而 sparkles 图标本身已经说明了这是 AI 面板，标题是纯冗余。
             providerMenu
             templateMenu
+            agentMenu
 
             Spacer(minLength: 0)
 
@@ -201,6 +208,59 @@ struct AIPanelView: View {
         .menuIndicator(.hidden)
         .fixedSize()
         .help("切换提示词模板")
+    }
+
+    /// Agent 切换。
+    ///
+    /// 放在提示词旁边，是因为两者常被同时用到但解决的不是同一件事：
+    /// 模板换「读法」（立场与输出形态），Agent 换「谁在读、带什么装备」
+    /// （角色、技能、要不要联网）。用户想换苏格拉底式追问时，他要找的是后者。
+    private var agentMenu: some View {
+        let agents = state.settingsStore.ai.agents
+        let activeID = state.settingsStore.ai.activeAgentID
+        let active = agents.first { $0.id == activeID }
+
+        return Menu {
+            Button {
+                state.settingsStore.ai.activeAgentID = nil
+            } label: {
+                if activeID == nil {
+                    Label("不用 Agent", systemImage: "checkmark")
+                } else {
+                    Text("不用 Agent")
+                }
+            }
+
+            Divider()
+
+            ForEach(agents) { agent in
+                Button {
+                    state.settingsStore.ai.activeAgentID = agent.id
+                } label: {
+                    // 联网检索是「会走出去的动作」，标在菜单里让人一眼看见自己选的是哪一个
+                    let suffix = agent.usesWebSearch ? "（联网）" : ""
+                    if agent.id == activeID {
+                        Label("\(agent.name)\(suffix)", systemImage: "checkmark")
+                    } else {
+                        Text("\(agent.name)\(suffix)")
+                    }
+                }
+            }
+
+            Divider()
+
+            Button("管理 Agent…") { isAgentEditorVisible = true }
+        } label: {
+            chip(
+                dotColor: active?.usesWebSearch == true ? DS.Palette.accent : nil,
+                text: active?.name ?? "Agent",
+                icon: "person.crop.circle.badge.checkmark"
+            )
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .help("切换 Agent：角色、技能与联网检索")
     }
 
     private var activeTemplateName: String {
@@ -490,6 +550,13 @@ struct AIPanelView: View {
         return state.settingsStore.ai.templates.first { $0.id == id }
     }
 
+    /// 当前选中的 Agent。`nil` = 不加角色，走默认助手行为。
+    /// 与 activeTemplate 同理，每次按 id 现查，避免拿到已被删除的旧副本。
+    private var activeAgent: AgentConfig? {
+        guard let id = state.settingsStore.ai.activeAgentID else { return nil }
+        return state.settingsStore.ai.agents.first { $0.id == id }
+    }
+
     private func sendDraft() {
         guard canSend else { return }
         let question = chat.draft.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -504,7 +571,8 @@ struct AIPanelView: View {
             config: state.settingsStore.activeProvider,
             memory: state.aiMemoryPayload,
             translateTarget: state.settingsStore.ai.translateTarget,
-            template: activeTemplate
+            template: activeTemplate,
+            agent: activeAgent
         )
     }
 
@@ -521,7 +589,8 @@ struct AIPanelView: View {
             config: state.settingsStore.activeProvider,
             memory: state.aiMemoryPayload,
             translateTarget: state.settingsStore.ai.translateTarget,
-            template: activeTemplate
+            template: activeTemplate,
+            agent: activeAgent
         )
     }
 
@@ -633,6 +702,10 @@ struct AIBubbleView: View {
     @EnvironmentObject private var state: AppState
     @State private var showReasoning = false
     @State private var justRemembered = false
+    /// 「已复制」「已批注」的短暂确认态。做成按钮上的对勾而不是 toast：
+    /// 用户手就在这条消息上，反馈不该跑到屏幕另一头去。
+    @State private var justCopied = false
+    @State private var justAnnotated = false
 
     var body: some View {
         switch bubble.role {
@@ -777,15 +850,41 @@ struct AIBubbleView: View {
         }
     }
 
-    /// 引用跳回 + 「记住这条」。
+    /// 引用跳回 + 「复制」「添加到批注」+「记住这条」。
     ///
     /// 「记住」放在这里而不是让用户去设置页手打：真正值得记的往往是模型刚刚
     /// 说清楚的那句结论，离开这一屏就想不起来要记了。
+    /// 「复制」「添加到批注」紧挨页码放：用户认可一条回答后，最常用的两个动作
+    /// 就是把它拿走（复制）和把它留在书上（批注），这两件事不该要求选中文字再操作。
     private var footerRow: some View {
         HStack(spacing: DS.Space.xs) {
             citationRow
 
             Spacer(minLength: 0)
+
+            Button {
+                copyAnswer()
+            } label: {
+                miniChip(
+                    icon: justCopied ? "checkmark" : "doc.on.doc",
+                    text: justCopied ? "已复制" : "复制",
+                    tint: justCopied ? DS.Palette.success : DS.Palette.textTertiary
+                )
+            }
+            .buttonStyle(.plain)
+            .help("复制这条回答的完整内容")
+
+            Button {
+                annotateAnswer()
+            } label: {
+                miniChip(
+                    icon: justAnnotated ? "checkmark" : "square.and.pencil",
+                    text: justAnnotated ? "已批注" : "添加到批注",
+                    tint: justAnnotated ? DS.Palette.success : DS.Palette.textTertiary
+                )
+            }
+            .buttonStyle(.plain)
+            .help("把这条回答写进当前页（PDF）或当前章（EPUB）的批注")
 
             Button {
                 rememberAnswer()
@@ -818,6 +917,70 @@ struct AIBubbleView: View {
             locatorLabel: bubble.citations.first?.displayLabel() ?? ""
         )
         withAnimation(DS.Motion.quick) { justRemembered = true }
+    }
+
+    /// 「复制」「添加到批注」共用的迷你按钮外形，与「记住」保持同一种视觉语言。
+    private func miniChip(icon: String, text: String, tint: Color) -> some View {
+        HStack(spacing: 3) {
+            Image(systemName: icon)
+                .font(DS.Typo.ui(size: 9, weight: .semibold))
+            Text(text)
+                .font(DS.Typo.ui(size: 10, weight: .medium))
+        }
+        .foregroundStyle(tint)
+        .padding(.horizontal, 6)
+        .padding(.vertical, 3)
+        .background(
+            Capsule().fill(tint == DS.Palette.textTertiary ? DS.Palette.surfaceRaised : tint.opacity(0.14))
+        )
+        .contentShape(Capsule())
+    }
+
+    private func copyAnswer() {
+        let text = bubble.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
+        withAnimation(DS.Motion.quick) { justCopied = true }
+        // 一秒半后收回对勾，让按钮回到可再次点击的常态
+        Task {
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+            withAnimation(DS.Motion.quick) { justCopied = false }
+        }
+    }
+
+    /// 把整条回答写进书的批注。
+    ///
+    /// 落点取「这条回答引用的第一处」，拿不到引用就退回读者当前所在的位置——
+    /// 一条回答常常横跨好几页，而读者此刻多半正看着最相关的那一页。
+    /// 划词还在时把划的那段当锚文本：批注就钉在那句话旁边，而不是飘在页脚。
+    private func annotateAnswer() {
+        let text = bubble.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty, let addNote = bridge.addPageNote else {
+            state.showToast("当前文档不支持批注", isError: true)
+            return
+        }
+
+        let locator = bubble.citations.first
+        let unitIndex: Int
+        switch locator {
+        case .pdf(let page, _):      unitIndex = page
+        case .epub(let chapter, _, _): unitIndex = chapter
+        case nil:                     unitIndex = bridge.currentUnitIndex
+        }
+
+        var anchor = ""
+        if let selection = bridge.selection, selection.isUsable,
+           selection.locator.pageIndex == unitIndex || selection.locator.chapterIndex == unitIndex {
+            anchor = selection.text
+        }
+
+        addNote(unitIndex, anchor, text)
+        withAnimation(DS.Motion.quick) { justAnnotated = true }
+        Task {
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+            withAnimation(DS.Motion.quick) { justAnnotated = false }
+        }
     }
 
     // MARK: 提示

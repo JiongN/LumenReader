@@ -68,6 +68,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // 快捷键自检：打印当前表并实跑一遍改绑规则（用临时文件，不碰用户配置）
         KeyBindingsAudit.run()
 
+        // Agent 自检：预设、提示词拼装、一次真实的联网文献检索
+        if LaunchOptions.agentReport {
+            Task { await AgentAudit.run() }
+        }
+
         // 钥匙串自检：只读查询，打印访问成本与缓存状态（不写不删用户钥匙串）
         KeychainAudit.run()
 

@@ -386,6 +386,11 @@ public struct AISettings: Codable, Sendable, Equatable {
     /// 让「不加东西」成为默认，用户的现状就不会被这次改动悄悄改变。
     public var activeTemplateID: UUID?
 
+    /// 可选的 Agent（角色 + 技能 + 是否联网检索）。首次启动填入内置预设。
+    public var agents: [AgentConfig] = AgentConfig.presets
+    /// 当前选中的 Agent。`nil` = 不加角色，走默认助手行为。
+    public var activeAgentID: String?
+
     public init() {}
 
     public init(from decoder: Decoder) throws {
@@ -396,11 +401,14 @@ public struct AISettings: Codable, Sendable, Equatable {
         self.persistentMemory = (try? container.decode(String.self, forKey: .persistentMemory)) ?? ""
         self.streaming = (try? container.decode(Bool.self, forKey: .streaming)) ?? true
         self.translateTarget = (try? container.decode(String.self, forKey: .translateTarget)) ?? "简体中文"
-        // 旧配置里没有这两个键。templates 缺失时补上预设（否则老用户看不到任何模板，
-        // 会以为功能坏了），activeTemplateID 缺失时保持 nil（即默认行为）。
+        // 旧配置里没有这些键。templates/agents 缺失时补上预设（否则老用户看不到任何模板或角色，
+        // 会以为功能坏了），两个 active* 缺失时保持 nil（即默认行为）。
         self.templates = (try? container.decode([PromptTemplate].self, forKey: .templates))
             ?? PromptTemplate.presets
         self.activeTemplateID = try? container.decode(UUID.self, forKey: .activeTemplateID)
+        self.agents = (try? container.decode([AgentConfig].self, forKey: .agents))
+            ?? AgentConfig.presets
+        self.activeAgentID = try? container.decode(String.self, forKey: .activeAgentID)
     }
 }
 

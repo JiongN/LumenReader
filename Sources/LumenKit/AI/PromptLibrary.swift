@@ -41,17 +41,38 @@ public enum PromptLibrary {
     /// 模板的意义就是换一种读法（「批判性审读」的立场与「严谨学术解读」并不相同），
     /// 把两段立场不同的指令拼在一起，模型只会两头都不满足。
     /// 读者背景仍然保留——那是「关于谁在读」，与「怎么读」不冲突。
-    public static func systemPrompt(readerPersona: String = "", template: PromptTemplate? = nil) -> String {
+    /// - Parameter agent: 选中的 Agent。它的角色与技能**追加**在系统提示之后，
+    ///   而不是替换默认提示——这一点与 `template` 的整段替换语义刻意不同：
+    ///   默认提示里的防幻觉、要引用、禁客套话这几条是阅读场景的地基，
+    ///   换一个角色不该把它们拆掉。角色改变的是「谁在读」，不是「能不能编」。
+    public static func systemPrompt(
+        readerPersona: String = "",
+        template: PromptTemplate? = nil,
+        agent: AgentConfig? = nil
+    ) -> String {
+        var base: [String]
+
         if let custom = template?.systemPrompt.trimmingCharacters(in: .whitespacesAndNewlines),
            !custom.isEmpty {
-            var lines = [custom]
+            base = [custom]
             if !readerPersona.isEmpty {
-                lines.append("")
-                lines.append("关于这位读者的持久背景（来自其本人在设置中填写的内容，可直接使用，不必再问）：")
-                lines.append(readerPersona)
+                base.append("")
+                base.append("关于这位读者的持久背景（来自其本人在设置中填写的内容，可直接使用，不必再问）：")
+                base.append(readerPersona)
             }
-            return lines.joined(separator: "\n")
+        } else {
+            base = defaultSystemLines(readerPersona: readerPersona)
         }
+
+        if let section = agent?.promptSection, !section.isEmpty {
+            base.append("")
+            base.append(section)
+        }
+        return base.joined(separator: "\n")
+    }
+
+    /// 默认系统提示。
+    private static func defaultSystemLines(readerPersona: String) -> [String] {
 
         var lines = [
             "你是一位严谨的阅读助手，正在帮助用户理解他手上正在读的文档。",
@@ -71,7 +92,8 @@ public enum PromptLibrary {
             lines.append("关于这位读者的持久背景（来自其本人在设置中填写的内容，可直接使用，不必再问）：")
             lines.append(readerPersona)
         }
-        return lines.joined(separator: "\n")
+        // 返回行数组而不是拼好的字符串：Agent 段落要接在后面，交给上层统一 join
+        return lines
     }
 
     /// 文档抬头，让模型知道它在读什么。
@@ -107,59 +129,83 @@ public enum PromptLibrary {
         memory: String,
         history: [AIMessage] = [],
         translateTarget: String = "简体中文",
-        template: PromptTemplate? = nil
+        template: PromptTemplate? = nil,
+        agent: AgentConfig? = nil,
+        webContext: String = ""
     ) -> [AIMessage] {
 
-        var messages: [AIMessage] = [.system(systemPrompt(readerPersona: memory, template: template))]
+        var messages: [AIMessage] = [
+            .system(systemPrompt(readerPersona: memory, template: template, agent: agent))
+        ]
 
         // 带上最近几轮，让「追问」能接上前文
         messages.append(contentsOf: history.suffix(6))
 
-        var user = documentBlock(metadata: metadata, locatorLabel: locatorLabel)
-        user += "\n\n"
+        // 拼装顺序是刻意的，三块分开攒再按序合并：
+        //   ① 材料：文档抬头 → 原文（选区 / 当前位置） → 联网检索结果
+        //   ② 要求：这次任务要做什么
+        //   ③ 模板的额外要求
+        //
+        // 为什么联网结果必须排在任务要求**之前**：它是「可用的材料」，
+        // 要先于「拿这些材料做什么」出现；反过来放，模型容易先形成结论再回头挑材料。
+        //
+        // 旧版把 webContext 追加在 switch **之后**，与注释里写的顺序正好相反——
+        // 而这个差异在终值上完全看不出来（都是同一条 user 消息、都含这些字），
+        // 是 `--agent-report` 里那条「检索结果排在任务要求之前」的断言把它抓出来的。
+        var material = documentBlock(metadata: metadata, locatorLabel: locatorLabel)
+        var instruction = ""
 
         switch task {
         case .explain:
             if let selection {
-                user += selection.contextBlock()
-                user += "\n\n请解释【选中内容】：它说的是什么，以及它在这段论述里起什么作用。"
+                material += "\n\n" + selection.contextBlock()
+                instruction = "请解释【选中内容】：它说的是什么，以及它在这段论述里起什么作用。"
             } else {
-                user += "【当前阅读位置的内容】\n" + truncate(context, limit: 6000)
-                user += "\n\n请解释这段内容的核心意思。"
+                material += "\n\n【当前阅读位置的内容】\n" + truncate(context, limit: 6000)
+                instruction = "请解释这段内容的核心意思。"
             }
 
         case .translate:
             if let selection {
-                user += "【待翻译内容】\n" + selection.text
-                user += "\n\n请把【待翻译内容】译成\(translateTarget)。只输出译文，不要加解释、不要加原译文对照。保持原文的分段与语气。"
+                material += "\n\n【待翻译内容】\n" + selection.text
+                instruction = "请把【待翻译内容】译成\(translateTarget)。只输出译文，不要加解释、不要加原译文对照。保持原文的分段与语气。"
             } else {
-                user += "【待翻译内容】\n" + truncate(context, limit: 6000)
-                user += "\n\n请把【待翻译内容】译成\(translateTarget)。只输出译文，保持原文的分段。"
+                material += "\n\n【待翻译内容】\n" + truncate(context, limit: 6000)
+                instruction = "请把【待翻译内容】译成\(translateTarget)。只输出译文，保持原文的分段。"
             }
 
         case .ask(let question):
             if let selection {
-                user += selection.contextBlock()
-                user += "\n\n读者的问题：\(question)"
+                material += "\n\n" + selection.contextBlock()
             } else {
-                user += "【当前阅读位置的内容】\n" + truncate(context, limit: 6000)
-                user += "\n\n读者的问题：\(question)"
+                material += "\n\n【当前阅读位置的内容】\n" + truncate(context, limit: 6000)
             }
+            instruction = "读者的问题：\(question)"
 
         case .summarize(.currentUnit):
-            user += "【待总结内容】\n" + truncate(context, limit: 7000)
-            user += "\n\n请总结上述内容。要求：先一句话概括主旨，再用 3–5 条列出要点，最后指出作者在此处的立场或论证方式。"
+            material += "\n\n【待总结内容】\n" + truncate(context, limit: 7000)
+            instruction = "请总结上述内容。要求：先一句话概括主旨，再用 3–5 条列出要点，最后指出作者在此处的立场或论证方式。"
 
         case .summarize(.wholeDocument):
-            user += "【待总结内容】\n" + truncate(context, limit: 12000)
-            user += "\n\n以上是一份文档各章的摘要。请基于它们写出整份文档的概览：先用两三句话讲清它整体在讨论什么，再列出主要论点，最后指出它可能的局限或未展开之处。"
+            material += "\n\n【待总结内容】\n" + truncate(context, limit: 12000)
+            instruction = "以上是一份文档各章的摘要。请基于它们写出整份文档的概览：先用两三句话讲清它整体在讨论什么，再列出主要论点，最后指出它可能的局限或未展开之处。"
 
         case .custom(let prompt):
             if let selection {
-                user += selection.contextBlock()
-                user += "\n\n"
+                material += "\n\n" + selection.contextBlock()
             }
-            user += prompt
+            instruction = prompt
+        }
+
+        var user = material
+
+        let web = webContext.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !web.isEmpty {
+            user += "\n\n" + web
+        }
+
+        if !instruction.isEmpty {
+            user += "\n\n" + instruction
         }
 
         // 模板的额外要求追加在最后。位置是刻意的：任务自带的要求先出现，

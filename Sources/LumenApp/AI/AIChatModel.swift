@@ -129,7 +129,8 @@ final class AIChatModel: ObservableObject {
         config: AIProviderConfig?,
         memory: String,
         translateTarget: String,
-        template: PromptTemplate? = nil
+        template: PromptTemplate? = nil,
+        agent: AgentConfig? = nil
     ) {
         guard !isStreaming else { return }
         guard let config else {
@@ -157,20 +158,45 @@ final class AIChatModel: ObservableObject {
         pendingDelta = ""
         lastFlush = Date.distantPast
 
-        let messages = PromptLibrary.messages(
-            task: task,
-            selection: selection,
-            metadata: metadata,
-            locatorLabel: locatorLabel,
-            context: context,
-            memory: memory,
-            history: history,
-            translateTarget: translateTarget,
-            template: template
-        )
-
+        // 消息构造挪进 Task：开了联网检索的 Agent 要先等检索回来，
+        // 而那几秒里界面不该是「正在思考…」——那是模型在想的措辞，
+        // 用户该看到的是「正在联网检索文献…」，否则会以为卡住了。
         streamTask = Task { [weak self] in
             guard let self else { return }
+
+            var webContext = ""
+            if let agent, agent.usesWebSearch {
+                let query = Self.webSearchQuery(task: task, selection: selection, metadata: metadata)
+                if !query.isEmpty {
+                    self.setProgress("正在联网检索文献…")
+                    let outcome = await WebLiteratureSearch.search(query: query)
+                    webContext = WebLiteratureSearch.promptBlock(outcome)
+                    if outcome.isEmpty {
+                        self.setProgress("这次联网没有检索到文献，改为只依据原文回答")
+                    } else {
+                        self.setProgress("已检索到 \(outcome.hits.count) 篇文献，正在阅读…")
+                    }
+                    if !outcome.failures.isEmpty {
+                        NSLog("[Lumen] 文献检索部分失败：\(outcome.failures.joined(separator: "；"))")
+                    }
+                }
+            }
+
+            let messages = PromptLibrary.messages(
+                task: task,
+                selection: selection,
+                metadata: metadata,
+                locatorLabel: locatorLabel,
+                context: context,
+                memory: memory,
+                history: history,
+                translateTarget: translateTarget,
+                template: template,
+                agent: agent,
+                webContext: webContext
+            )
+
+            self.setProgress("")
             var failure: String?
             do {
                 try await self.streamIntoBubble(messages: messages, config: config)
@@ -182,6 +208,22 @@ final class AIChatModel: ObservableObject {
             self.flushDelta(force: true)
             self.finishStreaming(failure: failure)
         }
+    }
+
+    /// 联网检索用的查询词。
+    ///
+    /// 取「读者真正在问的那句话」：有划词时用划的词（他关心的是这一段），
+    /// 没有划词时用提问本身，再退到书名 + 当前页的定位标签。
+    /// 不把整页正文丢进去——学术库按关键词匹配，一页几百字反而检索不到东西。
+    static func webSearchQuery(task: AITask, selection: ReaderSelection?, metadata: DocumentMetadata) -> String {
+        if case .ask(let question) = task {
+            let trimmed = question.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty { return PromptLibrary.truncate(trimmed, limit: 120) }
+        }
+        if let selection, selection.isUsable {
+            return PromptLibrary.truncate(selection.text, limit: 120)
+        }
+        return metadata.title.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     /// 追问：沿用已有上下文，只补一句新问题。
@@ -196,7 +238,8 @@ final class AIChatModel: ObservableObject {
         config: AIProviderConfig?,
         memory: String,
         translateTarget: String,
-        template: PromptTemplate? = nil
+        template: PromptTemplate? = nil,
+        agent: AgentConfig? = nil
     ) {
         let trimmed = question.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
@@ -212,7 +255,8 @@ final class AIChatModel: ObservableObject {
             config: config,
             memory: memory,
             translateTarget: translateTarget,
-            template: template
+            template: template,
+            agent: agent
         )
     }
 
