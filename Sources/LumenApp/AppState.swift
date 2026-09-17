@@ -94,6 +94,11 @@ final class AppState: ObservableObject {
     private var sidebarBeforeImmersive = true
     private var aiPanelBeforeImmersive = true
 
+    /// 承载阅读界面的主窗口。全屏是**窗口级**操作，必须有个明确的施力对象——
+    /// 用 `keyWindow` 会在「刚在设置窗口里点过一下」时把设置窗口全屏掉，
+    /// 而阅读窗口纹丝不动。由 `WindowStateProbe` 在视图挂上窗口时报进来。
+    private weak var mainWindow: NSWindow?
+
     /// 阅读区上报的文档元数据镜像。
     /// 菜单栏与命令面板拿不到 `ReaderBridge`，但「导出摘要」这类动作需要作者/篇幅，
     /// 与其让每个调用方各取一次，不如在桥外留一份。
@@ -245,7 +250,65 @@ final class AppState: ObservableObject {
 
     // MARK: - 沉浸模式
 
+    /// 进入 / 退出沉浸模式（含系统全屏）。
     func setImmersive(_ on: Bool) {
+        setIsImmersive(on, animated: true)
+    }
+
+    /// 由 `WindowStateProbe` 在视图挂上窗口时调用。
+    ///
+    /// 两件事都在拿到窗口的这一刻做掉：
+    /// 1. 把窗口记下来，供全屏操作施力。
+    /// 2. 让它出现在**用户当前所在的空间**。用户开了多个桌面时，不做这一步，
+    ///    从命令行或程序化启动的窗口会落在别的桌面，用户会觉得「点了没反应」。
+    func adoptMainWindow(_ window: NSWindow) {
+        window.collectionBehavior.insert(.moveToActiveSpace)
+        guard mainWindow !== window else { return }
+        mainWindow = window
+
+        // 补一次全屏。启动路径上 `setImmersive(true)`（`--immersive 1`）跑在窗口创建之前，
+        // 那时没有窗口可施力，全屏这一步会被静默丢掉——剩下半套状态的沉浸最难排查。
+        // 真实用户点按钮时窗口早已存在，走不到这里。
+        if isImmersive, !window.styleMask.contains(.fullScreen) {
+            window.toggleFullScreen(nil)
+        }
+    }
+
+    /// 系统全屏状态变化（来自窗口的进出全屏通知）。
+    ///
+    /// **只处理「退出全屏」这一个方向，是刻意的。**
+    ///
+    /// 退出全屏必须把沉浸一起收掉：全屏可以脱离沉浸单独存在（用户直接按系统
+    /// ⌃⌘F 或绿灯进入全屏，此时面板、工具栏都该留着），但反过来不行——
+    /// 沉浸态下工具栏被 `.hidden` 锁住、两侧面板收着、正文限宽，
+    /// 如果用户用系统方式退出全屏而这里不响应，这些状态就永远回不来了。
+    /// 此前没有任何地方监听全屏通知，所以「退出 zoom 后回不到正常页面」必然发生。
+    func systemFullScreenChanged(_ isFullScreen: Bool) {
+        NSLog("[Lumen][immersive] 收到全屏通知 isFullScreen=\(isFullScreen)"
+            + " 当前 isImmersive=\(isImmersive)")
+        guard isImmersive, !isFullScreen else { return }
+        // 不走动画：退出全屏的动画由系统负责，这里再叠一层 SwiftUI 动画
+        // 会让面板展开与跨 Space 动画互相抢帧。
+        setIsImmersive(false, animated: false)
+        NSLog("[Lumen][immersive] 已随退出全屏复位：isImmersive=\(isImmersive)"
+            + " 侧栏=\(isSidebarVisible) AI面板=\(isAIPanelVisible)")
+    }
+
+    /// 自检：模拟「用户从系统那一侧退出全屏」。
+    ///
+    /// 刻意**不**调用 `setImmersive(false)`——那正是被测的那条捷径，
+    /// 走它当然能对；走它也就等于什么都没验到。这里只 toggle 窗口，
+    /// 剩下的全交给通知链路，以此证明回程确实存在。
+    func simulateSystemExitFullScreen() {
+        guard let window = resolvedWindow(), window.styleMask.contains(.fullScreen) else {
+            NSLog("[Lumen][immersive] 模拟退出全屏失败：窗口当前不在全屏")
+            return
+        }
+        NSLog("[Lumen][immersive] 模拟系统方式退出全屏（未触碰 isImmersive，当前=\(isImmersive)）")
+        window.toggleFullScreen(nil)
+    }
+
+    private func setIsImmersive(_ on: Bool, animated: Bool) {
         guard isImmersive != on else { return }
 
         if on {
@@ -253,30 +316,59 @@ final class AppState: ObservableObject {
             aiPanelBeforeImmersive = isAIPanelVisible
         }
 
-        withAnimation(DS.Motion.panel) {
-            isImmersive = on
-            isSidebarVisible = on ? false : sidebarBeforeImmersive
-            isAIPanelVisible = on ? false : aiPanelBeforeImmersive
+        let apply = {
+            self.isImmersive = on
+            self.isSidebarVisible = on ? false : self.sidebarBeforeImmersive
+            self.isAIPanelVisible = on ? false : self.aiPanelBeforeImmersive
+        }
+        if animated {
+            withAnimation(DS.Motion.panel) { apply() }
+        } else {
+            apply()
         }
 
-        Self.applyFullScreen(on)
+        driveFullScreen(on, animated: animated)
     }
 
-    /// 切换系统全屏。
+    /// 把窗口的全屏状态推向目标值。
     ///
-    /// 优先用 `keyWindow`：全屏是**窗口级**属性，作用在错误的窗口上会出现
-    /// 「设置窗口变成了全屏，而阅读窗口纹丝不动」这种莫名其妙的场面。
-    /// 找不到 keyWindow 时退回「最大的可见窗口」，避免子窗口/面板抢到全屏。
-    private static func applyFullScreen(_ on: Bool) {
-        let candidate = NSApp.keyWindow
-            ?? NSApp.windows
-                .filter { $0.isVisible && ($0.contentView?.bounds.height ?? 0) > 100 }
-                .max { $0.frame.width * $0.frame.height < $1.frame.width * $1.frame.height }
-
-        guard let window = candidate else { return }
+    /// **进入时延后、退出时不延后**，不是随手选的：
+    /// 进入沉浸要同时做两件事——收起面板（`DS.Motion.panel` 弹簧，response 0.34s）
+    /// 与进入全屏（系统跨 Space 动画，约 0.5s）。两者同帧启动会互相抢帧，
+    /// 布局在跨空间动画期间被反复重算，看到的正是「动作效果异常」。
+    /// 把全屏推到布局动画之后，两段动画就串成了一条。
+    /// 退出则不延后：退出全屏是回到原空间，越早启动越跟手，而且面板是在
+    /// 空间切回之后才被看到的，观感上依然是「先退出全屏，再看到面板展开」。
+    private func driveFullScreen(_ on: Bool, animated: Bool) {
+        guard let window = resolvedWindow() else { return }
         // 状态一致就不要重复 toggle：连按两次会让窗口在全屏与不全屏之间来回横跳
         guard window.styleMask.contains(.fullScreen) != on else { return }
-        window.toggleFullScreen(nil)
+
+        guard on, animated else {
+            window.toggleFullScreen(nil)
+            return
+        }
+
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 340_000_000)
+            // 这 0.34s 里用户可能已经改主意（又按了一次），所以重新取状态与窗口，
+            // 而不是沿用启动那一刻的捕获值。
+            guard let self, self.isImmersive,
+                  let fresh = self.resolvedWindow(),
+                  !fresh.styleMask.contains(.fullScreen) else { return }
+            fresh.toggleFullScreen(nil)
+        }
+    }
+
+    /// 全屏要作用在哪个窗口上。
+    ///
+    /// 优先用探针记下的主窗口；拿不到时退回「最大的可见窗口」，
+    /// 避免子窗口 / 面板抢到全屏。
+    private func resolvedWindow() -> NSWindow? {
+        if let mainWindow, mainWindow.isVisible { return mainWindow }
+        return NSApp.windows
+            .filter { $0.isVisible && ($0.contentView?.bounds.height ?? 0) > 100 }
+            .max { $0.frame.width * $0.frame.height < $1.frame.width * $1.frame.height }
     }
 
     func presentAlert(title: String, message: String) {

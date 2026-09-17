@@ -154,6 +154,7 @@ struct ReaderContainerView: View {
             || LaunchOptions.runAction != nil
             || LaunchOptions.jumpToUnit != nil
             || LaunchOptions.smartOutline
+            || LaunchOptions.exitFullScreenAfter != nil
         guard needsWork else { return }
 
         try? await Task.sleep(nanoseconds: 1_000_000_000)
@@ -180,6 +181,34 @@ struct ReaderContainerView: View {
         if LaunchOptions.smartOutline {
             await runSmartOutlineAudit()
         }
+
+        if let delay = LaunchOptions.exitFullScreenAfter {
+            await runImmersiveExitAudit(after: delay)
+        }
+    }
+
+    /// 自检：验证「从系统那一侧退出全屏」能把沉浸状态带回来。
+    ///
+    /// 这条链路此前是断的——全仓库没有任何地方监听 `didExitFullScreen`，
+    /// 于是用户从绿灯按钮 / 系统菜单退出全屏后，`isImmersive` 永远停在 true，
+    /// 表现为「退出 zoom 后回不到正常页面」，外加「工具栏不见了」
+    /// （工具栏被 `.toolbar(.hidden, for: .windowToolbar)` 锁住了）。
+    ///
+    /// 验收标准很硬：模拟退出全屏之后，`isImmersive` 必须是 false，
+    /// 且侧栏与 AI 面板回到**进入沉浸之前各自的可见性**。
+    private func runImmersiveExitAudit(after delay: Double) async {
+        try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+
+        NSLog("[Lumen][immersive] 模拟前：isImmersive=\(state.isImmersive)"
+            + " 侧栏=\(state.isSidebarVisible) AI面板=\(state.isAIPanelVisible)")
+
+        state.simulateSystemExitFullScreen()
+
+        // 等系统退出全屏的动画跑完、通知送达（跨 Space 动画约 0.5s，留足余量）
+        try? await Task.sleep(nanoseconds: 1_500_000_000)
+
+        NSLog("[Lumen][immersive] 模拟后：isImmersive=\(state.isImmersive)"
+            + " 侧栏=\(state.isSidebarVisible) AI面板=\(state.isAIPanelVisible)")
     }
 
     /// 自检：跑一遍智能目录的两步链路，并把结果落成可核对的日志。

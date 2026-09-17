@@ -125,6 +125,33 @@ enum LaunchOptions {
     /// 但它是个纯粹的浪费与否问题，不看日志根本分辨不出来（跳过和渲染的外观一样）。
     static var thumbnailReport: Bool { flag("--thumb-report") }
 
+    /// 自检：进入沉浸 N 秒后，**绕过应用逻辑**直接用 AppKit 让窗口退出全屏。
+    ///
+    /// 存在的理由：`state.setImmersive(false)` 那条路径是应用自己发起的，状态当然对得上。
+    /// 真正会坏的是用户从系统那一侧退出全屏（绿灯按钮 / 「显示 → 退出全屏」菜单 / ⌃⌘F），
+    /// 那条路径不会经过我们的任何一行代码。这个开关就是来复现它的：
+    /// 它只 toggle 窗口、绝不碰 `isImmersive`，于是「回程到底通没通」一眼可辨。
+    static var exitFullScreenAfter: Double? {
+        guard let raw = value(for: "--exit-fullscreen-after") else { return nil }
+        return Double(raw)
+    }
+
+    /// 自检：打印可选主题清单与废弃主题的迁移落点：`--theme-report 1`。
+    ///
+    /// 「纯黑主题已移除」这件事必须可断言，而不是靠读代码相信：它有两个
+    /// 很容易只做一半的地方——枚举删了但 `all` 里还留着（界面上还能选到），
+    /// 或者 `all` 删了但旧配置解码时掉进 `?? .paper`（把深色用户变成纸白）。
+    /// 这条通道把两边都打出来，一眼能看出是哪一半没做。
+    static var themeReport: Bool { flag("--theme-report") }
+
+    /// 自检钥匙串访问成本：`--keychain-report 1`。
+    ///
+    /// 起因是「每重编译一次就疯狂弹钥匙串授权框」。这件事只有一条通道能验：
+    /// 存在性判断是走属性通道（不解密，永不弹窗）还是走密文通道（每次解密都要授权）。
+    /// 两者都会返回一个 Bool，从终值上看不出区别，差别全在**耗时与钥匙串调用次数**上。
+    /// 所以这条通道连打两次并分别计时——第二次的耗时差就是「缓存是否生效」的证据。
+    static var keychainReport: Bool { flag("--keychain-report") }
+
     /// 自检 AI 智能目录：`--smart-outline 1`。
     ///
     /// 这条链路的关键产物（目录条目、页码落点、缓存文件）全都不在可视区域里，

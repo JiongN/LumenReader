@@ -14,6 +14,8 @@ struct ImmersiveHUD: View {
 
     @EnvironmentObject private var state: AppState
     @EnvironmentObject private var bridge: ReaderBridge
+    /// 提示文案要用**用户当前的真实绑定**，写死组合键的话，用户一改绑定它就开始骗人。
+    @EnvironmentObject private var keyBindings: KeyBindingStore
 
     @State private var isRevealed = false
 
@@ -67,7 +69,7 @@ struct ImmersiveHUD: View {
                     .animation(DS.Motion.quick, value: bridge.positionLabel)
             }
             .buttonStyle(.plain)
-            .help("点击跳转到指定\(unitName)（⌘G）")
+            .help(hint("点击跳转到指定\(unitName)", for: .goToPage))
 
             Button {
                 bridge.goToNextUnit?()
@@ -87,7 +89,7 @@ struct ImmersiveHUD: View {
                     .font(DS.Typo.ui(size: 11.5, weight: .medium))
             }
             .buttonStyle(.plain)
-            .help("退出沉浸模式（⌃⌘F）")
+            .help(hint("退出沉浸模式", for: .toggleImmersive))
         }
         .foregroundStyle(DS.Palette.textSecondary)
         .padding(.horizontal, DS.Space.l)
@@ -100,5 +102,11 @@ struct ImmersiveHUD: View {
                 )
         )
         .shadow(color: .black.opacity(0.16), radius: 14, y: 5)
+    }
+
+    /// 把动作的当前绑定拼进提示。拿不到绑定（用户把它清空了）时只回标签本身。
+    private func hint(_ label: String, for action: LumenAction) -> String {
+        guard let combo = keyBindings.combo(for: action) else { return label }
+        return "\(label)（\(combo.display)）"
     }
 }

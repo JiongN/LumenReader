@@ -14,6 +14,14 @@ struct RootView: View {
 
     private var systemIsDark: Bool { systemColorScheme == .dark }
 
+    /// 窗口最终该用深色还是浅色。
+    ///
+    /// 打开文档后由阅读主题统辖（选了「深夜」就整屏暗下来），欢迎页跟随系统深浅色。
+    /// 抽成属性而不是把三元留在修饰符链里，理由见 `.windowAppearance` 那行的注释。
+    private var effectiveIsDark: Bool {
+        state.document == nil ? systemIsDark : state.settingsStore.reader.theme.isDark
+    }
+
     var body: some View {
         Group {
             if let document = state.document {
@@ -31,14 +39,18 @@ struct RootView: View {
         // 挂在状态本身上才能一次覆盖全部，漏掉任何一条都会退化成硬切。
         .animation(DS.Motion.content, value: state.document?.id)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(state.document == nil ? AnyView(DS.Palette.surfaceSunken) : AnyView(Color.clear))
-        // 主题切换的过渡只做到这一层垫色为止，不往下碰阅读内容。
+        // 主题过渡**只挂在这块垫色上**。
         //
-        // 边界在哪儿、以及为什么在这儿：PDF 要整页重绘、EPUB 的 WebView 要重新排版，
-        // 把它们卷进动画只会看到一片闪白（详见 `DS.Motion.theme` 的注释）；而窗口外观
-        // （`windowAppearance`）是即时生效的 AppKit 属性，也没法插值。
-        // 剩下唯一能真正平滑过渡的，就是这块纯 SwiftUI 绘制的背景。
-        .animation(DS.Motion.theme, value: state.settingsStore.reader.theme.id)
+        // 之前这个 `.animation(theme)` 直接挂在 `Group` 上，覆盖面是整棵子树——
+        // 注释写着「不往下碰阅读内容」，实现上却把 `ReaderContainerView`（内含
+        // PDFView / WKWebView）一起卷进了动画事务，主题一变每帧都要为它们求可动画值。
+        // 收窄到背景层之后，动画作用域才和注释一致：只有这块纯 SwiftUI 颜色在插值。
+        // （PDF 要整页重绘、WebView 要重新排版，卷进动画只会看到闪白；
+        //   窗口外观 `windowAppearance` 是即时生效的 AppKit 属性，也没法插值。）
+        .background(ThemeBackdrop(
+            isWelcome: state.document == nil,
+            themeID: state.settingsStore.reader.themeID
+        ))
         .overlay {
             if state.isCommandPaletteVisible {
                 CommandPaletteOverlay()
@@ -60,8 +72,15 @@ struct RootView: View {
         // 它要在全屏窗口的底部中央出现，而阅读区在沉浸时可能已经被收窄居中，
         // 锚在阅读区上会跟着一起缩，位置就不在"屏幕底部"了。
         .overlay(alignment: .bottom) { ImmersiveHUD() }
-        // 打开文档后由阅读主题统辖窗口外观；欢迎页跟随系统深浅色
-        .windowAppearance(isDark: state.document == nil ? systemIsDark : state.settingsStore.reader.theme.isDark)
+        // 打开文档后由阅读主题统辖窗口外观；欢迎页跟随系统深浅色。
+        // 用计算属性而不是把三元写进来：三元里的两次属性链访问同样会给
+        // 编译器增加推断负担，而这行已经在一条很长的修饰符链上了。
+        .windowAppearance(isDark: effectiveIsDark)
+        // 窗口探针：把主窗口交给 AppState（全屏必须作用在它上面，
+        // 而不是 keyWindow——在设置窗口点过一下就会打错对象），
+        // 并接住系统全屏的进出通知。沉浸模式此前只有「去程」没有「回程」，
+        // 用系统方式退出全屏后状态永远卡在沉浸里，就是丢在这里。
+        .windowState(state)
         .task {
             if let size = LaunchOptions.windowSize {
                 await Self.applyWindowSize(size)
@@ -223,5 +242,24 @@ struct RootView: View {
     private func helpText(_ label: String, for action: LumenAction) -> String {
         guard let combo = keyBindings.combo(for: action) else { return label }
         return "\(label) (\(combo.display))"
+    }
+}
+
+// MARK: - 主题垫色
+
+/// 阅读器与欢迎页共用的一层垫色，**主题切换的过渡只做在这里**。
+///
+/// 单独成一个视图而不是内联成 `.background { … }` 闭包：闭包里的三元表达式
+/// 会叠进 `body` 那条已经很长的修饰符链，把编译器的类型推断拖垮
+/// （报 `unable to type-check this expression in reasonable time`）。
+/// 顺带也把「过渡边界在哪儿」变成一处能指认的代码，而不是链条里的一段闭包。
+private struct ThemeBackdrop: View {
+
+    let isWelcome: Bool
+    let themeID: ReadingThemeID
+
+    var body: some View {
+        (isWelcome ? DS.Palette.surfaceSunken : Color.clear)
+            .animation(DS.Motion.theme, value: themeID)
     }
 }

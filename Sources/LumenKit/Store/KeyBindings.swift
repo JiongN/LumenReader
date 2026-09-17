@@ -248,9 +248,13 @@ public enum LumenAction: String, CaseIterable, Codable, Sendable, Identifiable {
 
         case .toggleSidebar:  return KeyCombo(key: "s", modifiers: [.command, .option])
         case .toggleAIPanel:  return KeyCombo(key: "a", modifiers: [.command, .shift])
-        // 沿用 macOS 的「全屏」惯用组合。沉浸模式本身就包含进全屏，
-        // 语义一致，用户不必再记一套新的。
-        case .toggleImmersive: return KeyCombo(key: "f", modifiers: [.control, .command])
+        // **刻意避开 ⌃⌘F**。那是 macOS 系统的「进入 / 退出全屏」标准组合，也是
+        // SwiftUI `WindowGroup` 自动生成的「进入全屏」菜单项所用的组合。绑成同一个键，
+        // 按一次会让「系统全屏」与「应用沉浸」两个 toggle 同时触发，两套状态机各自翻转，
+        // 外观上正是「全屏后显示与动作效果异常」；而且系统那条路径退出全屏后
+        // 不会回写沉浸状态，于是又变成「退不回来」。
+        // 用 ⌥⌘F：F 的语义（Fullscreen / Focus）保留，且不与系统抢。
+        case .toggleImmersive: return KeyCombo(key: "f", modifiers: [.option, .command])
         case .commandPalette: return KeyCombo(key: "k", modifiers: [.command])
 
         case .nextUnit:       return KeyCombo(key: KeyCombo.SpecialKey.rightArrow, modifiers: [.command, .option])
