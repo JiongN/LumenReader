@@ -73,6 +73,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             Task { await AgentAudit.run() }
         }
 
+        // 联网文献检索自检：逐源跑一遍，记录命中数 / 失败 / 耗时（真实联网）
+        if LaunchOptions.webSearchReport {
+            Task { await WebSearchAudit.run() }
+        }
+
         // 钥匙串自检：只读查询，打印访问成本与缓存状态（不写不删用户钥匙串）
         KeychainAudit.run()
 

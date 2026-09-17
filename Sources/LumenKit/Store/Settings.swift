@@ -391,6 +391,17 @@ public struct AISettings: Codable, Sendable, Equatable {
     /// 当前选中的 Agent。`nil` = 不加角色，走默认助手行为。
     public var activeAgentID: String?
 
+    /// 输入框上的「联网检索」手动开关。
+    ///
+    /// 与 `AgentConfig.usesWebSearch` 是**两个独立的触发条件**（满足其一即检索）：
+    /// Agent 那个是「这个角色定位上就需要查文献」（属于 Agent 的一部分，跟着 Agent 走），
+    /// 这个是「我这一次想查」（属于这一次提问，不改动任何 Agent）。
+    /// 合二为一的话，用户想临时查一次就得去改 Agent 配置——而改完往往忘了改回来。
+    ///
+    /// 默认关：检索要给三个外部库发请求，每次提问多花几秒，
+    /// 不该在用户没要求的时候替他付这个代价。
+    public var webSearchEnabled: Bool = false
+
     public init() {}
 
     public init(from decoder: Decoder) throws {
@@ -409,6 +420,7 @@ public struct AISettings: Codable, Sendable, Equatable {
         self.agents = (try? container.decode([AgentConfig].self, forKey: .agents))
             ?? AgentConfig.presets
         self.activeAgentID = try? container.decode(String.self, forKey: .activeAgentID)
+        self.webSearchEnabled = (try? container.decode(Bool.self, forKey: .webSearchEnabled)) ?? false
     }
 }
 

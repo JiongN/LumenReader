@@ -75,7 +75,9 @@
 | `--thumb-report 1` | 打印缩略图的渲染与跳过明细（证明滚出可视区的页不再渲染） |
 | `--annotate-report 1` | 批注自检（15 项）：高亮 → 锚定批注 → 写盘 → 重开核对 → 编辑 → 定位 → 新建 → id 去重 → 删除 |
 | `--search-report 1` | 搜索高亮自检：高亮出现、逐条定位、**且不会写进用户的书** |
-| `--agent-report 1` | Agent 自检：预设稳定性、系统提示拼装顺序、真实联网检索 |
+| `--agent-report 1` | Agent 自检（20 项）：预设稳定性、系统提示拼装顺序、温度覆盖、容错解码、真实联网检索 |
+| `--websearch-report 1` | **联网文献检索自检**：逐源跑一遍，记录命中数 / 失败 / 耗时；断言至少一个源命中且总命中 ≥ 3 |
+| `--rerun-report 1` | 「重新生成」自检：需配合 `--mock-ai 1`；断言气泡被替换、history 未叠加 |
 | `--resize-report 1` | 面板宽度自检（6 项）：布局跟随写入、上下限都被钳制、连续逐帧写入不越界且终值正确 |
 | `--ask "问题"` | 启动后自动发起一次提问（端到端跑 AI 链路） |
 
@@ -258,6 +260,33 @@ dist/Lumen.app/Contents/MacOS/Lumen --open /tmp/lumen-test/large.pdf \
 可以直接用「预览」打开核对高亮的位置与颜色。
 
 ---
+
+### 验证 AI 的三条新通道
+
+```bash
+# 联网文献检索：真实联网，逐源记录命中数 / 失败 / 耗时
+dist/Lumen.app/Contents/MacOS/Lumen --websearch-report 1 --capture /tmp/x.png --capture-delay 14
+
+# 「重新生成」：需要桩服务在跑（终端 A：python3 tools/mock_openai_server.py 8777）
+dist/Lumen.app/Contents/MacOS/Lumen --open /tmp/lumen-test/large.pdf \
+  --mock-ai 1 --rerun-report 1 --capture /tmp/x.png --capture-delay 14
+```
+
+**`--websearch-report` 看的是「取数」本身**（三个源现在通不通、各出几条、耗时多少），
+与 `--agent-report` 里那次检索（关心的是结果有没有按正确顺序进提示词）分工不同。
+三个源都是外部服务，可用性会随时间变——Semantic Scholar 就是这样被判出局的——
+所以这条通道要能随时单独重跑，而不必顺带跑一遍 Agent 拼装。
+查询词写死成一个跨库都有存量的学术词组：用冷门词会因为「确实没有文献」而失败，
+那是不可判定的失败，只会给自检掺噪声。
+
+**`--rerun-report` 验的是两件在界面上看不出来的事**：气泡是被**替换**的还是被追加的
+（截图里长得一样），以及 history 有没有被叠加（症状是「重跑之后模型开始答非所问」）。
+它拿两个外部产物当证据：气泡条数不变，以及桩服务收到的两次请求体规模一致
+（`/tmp/lumen-mock-requests.jsonl`）。读不到转储文件时如实跳过，不拿空结果充数。
+
+> ⚠️ 两条通道都必须带 `--capture`，否则进程不退出（会挂到超时，退出码 137）。
+> 另外 `--rerun-report` 会先 `chat.clear()` 清掉这本书此前的对话——
+> 气泡数与请求体规模都拿来做断言，带着上一轮历史进来自检就成了掷骰子。
 
 ### 验证缓存与失效判定
 

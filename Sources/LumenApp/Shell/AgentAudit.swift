@@ -11,6 +11,61 @@ import LumenKit
 /// 而不是让「Agent 说找不到文献」变成一个查不出原因的黑盒。
 enum AgentAudit {
 
+    /// 温度覆盖的两条断言：盖得住、且不改回写服务商设置。
+    @MainActor
+    private static func checkTemperatureOverride(_ check: (String, Bool, String) -> Void) {
+        let model = AIChatModel()
+        let provider = AIProviderConfig(
+            name: "自检服务商",
+            baseURL: "http://127.0.0.1:1/v1",
+            models: ["mock"],
+            selectedModel: "mock",
+            temperature: 0.9
+        )
+        let originalTemperature = provider.temperature
+
+        func snapshot(with agent: AgentConfig?) -> AIChatModel.RequestSnapshot {
+            AIChatModel.RequestSnapshot(
+                task: .explain,
+                selection: nil,
+                metadata: DocumentMetadata(title: "自检文档"),
+                locatorLabel: "第 1 页",
+                context: "自检正文",
+                locator: .pdf(page: 0, charOffset: 0),
+                citations: [],
+                config: provider,
+                memory: "",
+                translateTarget: "简体中文",
+                template: nil,
+                agent: agent,
+                webSearchEnabled: false
+            )
+        }
+
+        var withOverride = AgentConfig(name: "自检 Agent", temperatureOverride: 0.15)
+        let overridden = model.effectiveConfig(for: snapshot(with: withOverride)).temperature
+        check("Agent 的温度覆盖生效", abs(overridden - 0.15) < 0.0001,
+              "实际 \(overridden)，期望 0.15")
+
+        // 越界值必须被钳制：手改 settings.json 塞个 9.9 进来，
+        // 不加这道闸就会把请求直接打成一个服务端会拒绝的参数。
+        let upperBound = AgentConfig.temperatureRange.upperBound
+        withOverride.temperatureOverride = 9.9
+        let clamped = model.effectiveConfig(for: snapshot(with: withOverride)).temperature
+        check("越界的温度覆盖被钳制到 \(upperBound)", abs(clamped - upperBound) < 0.0001,
+              "实际 \(clamped)，期望 \(upperBound)")
+
+        withOverride.temperatureOverride = nil
+        let followed = model.effectiveConfig(for: snapshot(with: withOverride)).temperature
+        check("未设覆盖时跟随服务商设置", abs(followed - originalTemperature) < 0.0001,
+              "实际 \(followed)，期望 \(originalTemperature)")
+    }
+
+    private static func decode<T: Decodable>(_ type: T.Type, from json: String) -> T? {
+        guard let data = json.data(using: .utf8) else { return nil }
+        return try? JSONDecoder().decode(T.self, from: data)
+    }
+
     static func run() async {
         var passed = 0
         var failures: [String] = []
@@ -44,6 +99,48 @@ enum AgentAudit {
 
         let withoutAgent = PromptLibrary.systemPrompt(readerPersona: "")
         check("不选 Agent 时不出现角色段落", !withoutAgent.contains("角色设定"))
+
+        // 自定义指令：拼接位置必须**可预期**——排在技能之后。
+        // 顺序反了从终值上看不出来（同一段系统提示、同样都含这些字），
+        // 所以立一条断言钉住它。
+        var withInstruction = socratic
+        withInstruction.customInstruction = "每次都要给出一条可证伪的反对意见"
+        let systemWithInstruction = PromptLibrary.systemPrompt(agent: withInstruction)
+        if let skillIndex = systemWithInstruction.range(of: "不要直接给出结论")?.lowerBound,
+           let customIndex = systemWithInstruction.range(of: "可证伪的反对意见")?.lowerBound {
+            check("自定义指令排在技能之后", skillIndex < customIndex,
+                  "技能位置 \(skillIndex) 应在自定义指令 \(customIndex) 之前")
+        } else {
+            check("系统提示里同时含技能与自定义指令", false)
+        }
+
+        // 容错解码：旧配置里没有 `customInstruction` / `temperatureOverride` /
+        // `webSearchEnabled` 这几个键。缺一个键就整份解码失败的话，
+        // 用户自己建的 Agent 会被静默重置成预设——这属于最糟的那类降级。
+        let legacyAgent = """
+        {"id":"LEGACY-1","name":"旧 Agent","persona":"旧角色","skills":["socratic"],
+         "usesWebSearch":false,"isBuiltIn":false}
+        """
+        let legacyAgentOK = decode(AgentConfig.self, from: legacyAgent).map { agent in
+            agent.name == "旧 Agent"
+                && agent.customInstruction.isEmpty
+                && agent.temperatureOverride == nil
+                && agent.skills.count == 1
+        } ?? false
+        check("旧 Agent 配置缺新字段仍能解码", legacyAgentOK)
+
+        let legacyAI = """
+        {"providers":[],"streaming":true,"templates":[],"agents":[]}
+        """
+        let legacyAIOK = decode(AISettings.self, from: legacyAI).map { settings in
+            settings.webSearchEnabled == false && settings.agents.isEmpty
+        } ?? false
+        check("旧 AI 配置缺 webSearchEnabled 时默认为关", legacyAIOK)
+
+        // 温度覆盖：Agent 上那个值要盖掉服务商的，且**不能**回头改掉服务商设置本身。
+        // 这是纯输入→输出的规则，可以直接实跑断言；不这么验的话，
+        // 「温度到底有没有传出去」在这台没有视觉通道的机器上无从判断。
+        await checkTemperatureOverride(check)
 
         // 联网检索：真跑一次，把结果和失败原因都打出来
         let query = "cultural capital education inequality"

@@ -234,6 +234,11 @@ struct ReaderContainerView: View {
             await ResizeAudit.run(state: state)
         }
 
+        // 「重新生成」自检：需要文档装好（上下文来自 bridge），所以挂在这里
+        if LaunchOptions.rerunReport {
+            await RerunAudit.run(state: state)
+        }
+
         let needsWork = LaunchOptions.sidebarTab != nil
             || LaunchOptions.injectsDemoSelection
             || LaunchOptions.runAction != nil

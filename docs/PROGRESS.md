@@ -18,11 +18,37 @@
    而 180 已经窄到搜索结果的三行摘要被裁掉两行）。已存过 180 的用户会被钳到 200。
 3. 面板**上限**改为随窗口宽度收窄（阅读区保底 320pt）。窗口够宽时行为与之前一致。
 
-### 已落地
+### 已落地（第二批：AI —— 实时切换 / 重新生成 / Agent 自定义 / 联网检索）
 
 | 项 | 改在哪 | 验证方式 | 关键结论 |
 | --- | --- | --- | --- |
-| 常驻纵向图标栏 `LeftRail` | `Sources/LumenApp/Reader/Sidebar/LeftRail.swift` | `--layout-report 1` + `tools/layout_assert.py` | `sidebarRail` x=0 w=52；`--sidebar 0` 时内容面板探针消失、图标栏仍在；沉浸模式下图标栏随侧栏一起隐藏（只上报 `readerSurface`，880 居中 x=280） |
+| `rerunLast()` 原样重跑上一条 | `AIChatModel.RequestSnapshot` | `--rerun-report 1`（7 项，配桩服务） | 气泡 2→2（替换非追加）；history 2→2 未叠加；两次请求体规模一致 |
+| 断言可证伪 | 同上 | 人为删掉「重跑前摘掉 history 那一对」后重跑 | 红 2 项（history 4→6、请求体 2 vs 6）——不是恒真断言 |
+| 「重新生成」入口 | 最后一条 assistant 气泡 footer + 右上 ⋯ 菜单 | 代码路径 + 自检 | **无键盘快捷键**（付费动作，与项目既定约定一致）；流式输出期间禁用 |
+| 切模板 / Agent 后的提示 | `AIPanelView.noteRerunAvailability` | 仅在 `canRerunLast` 为真时才提示 | 没有可重跑的请求时不弹，避免出现点了没反应的按钮 |
+| Agent 自定义指令 | `AgentConfig.customInstruction` | `--agent-report 1` | 断言「自定义指令排在技能之后」（顺序反了从终值上看不出来） |
+| Agent 温度覆盖 | `AgentConfig.temperatureOverride` + `effectiveConfig` | `--agent-report 1` | 0.15 生效、9.9 被钳到 2.0、未设时跟随服务商（0.9） |
+| 容错解码 | `AgentConfig.init(from:)` / `AISettings.init(from:)` | `--agent-report 1` | 旧配置缺 `customInstruction` / `temperatureOverride` / `webSearchEnabled` 仍能解出默认值 |
+| 联网检索手动开关 | composer 左侧 globe 按钮 → `AISettings.webSearchEnabled` | 代码路径 | 触发 = `agent.usesWebSearch \|\| webSearchEnabled`；help 里写明三个数据源与「每次多花几秒」 |
+| 重试策略 | `WebLiteratureSearch.withRetry` | `--websearch-report 1` | 最多 3 次 + 指数退避（0.8 → 1.6，封顶 2.4s）；仍只重试瞬时错误 |
+| 联网检索自检 | 新增 `--websearch-report 1` | 实跑 | 3/3：Crossref 4 条 / OpenAlex 4 条 / arXiv 4 条，去重后 12 条，0 失败 |
+| 过时文案修正 | `AgentEditor` | 全文 grep | 「Crossref、Semantic Scholar、arXiv」→「Crossref、OpenAlex、arXiv」（代码早就换了源） |
+
+### 未变（回归）
+
+| 项 | 验证方式 | 结论 |
+| --- | --- | --- |
+| 联网结果注入顺序 | `--agent-report 1` | 「检索结果排在任务要求之前」「原文排在检索结果之前」仍为 ✅ |
+| 端到端提问 | `--ask` + 桩服务 | 请求体已含文档抬头 / 原文 / 模板要求 |
+| 自检不污染配置 | 跑前跑后 `md5 settings.json` | 一致（`--mock-ai` 与自检宽度写入都走 `suppressSave`） |
+
+---
+
+### 已落地（第一批：界面 —— 侧栏图标栏与拖拽手感）
+
+| 项 | 改在哪 | 验证方式 | 关键结论 |
+| --- | --- | --- | --- |
+| 常驻纵向图标栏 `LeftRail` | `Sources/LumenApp/Reader/Sidebar/LeftRail.swift` | `--layout-report 1` + `tools/layout_assert.py` | `sidebarRail` x=0 w=52；`--sidebar 0` 时内容面板探针消失、图标栏仍在；沉浸模式下图标栏随侧栏一起隐藏（只上报 `readerSurface`，880 居中） |
 | 页签入口不随面板收起消失 | `ReaderContainerView.selectSidebarTab` 与 `AppState.revealSidebar` 同源 | 代码同源 + 布局自检 | ⌘1–⌘5 / 菜单 / 图标栏三条入口共用一条「展开 + 切换」实现 |
 | 拖拽不再逐帧写设置 | `PanelResizeHandle` + 容器 `liveWidth` | 代码路径 + `--resize-report 1` | 拖动期间只改一条 `.frame(width:)`；松手走 `SettingsStore.commitSidebarWidth`（与设置页、自检同一函数） |
 | 上下限钳制（含按窗口收窄） | `UISettings.PanelWidth` + `PanelWidthPolicy` | `--resize-report 1`（窄窗口 1000pt） | 6/6；上限 347（静态上限 420）说明动态钳制真的在生效 |
@@ -66,8 +92,8 @@
 | **PDF 批注与高亮** | `--annotate-report 1` | 10/10：写回**原文件**（重开磁盘文件核对条数）；锚回的高亮与取选区那一行**相交** |
 | **搜索高亮** | `--search-report 1` | 6/6：逐条定位准确；保存后重开**批注数仍是起点值**（临时高亮没被固化） |
 | **AI 消息操作** | 侧栏批注页签可见 | 复制进剪贴板；「添加到批注」锚回原文行 |
-| **Agent + 联网检索** | `--agent-report 1` | 14/14：预设 id 稳定、系统提示拼装顺序正确；Crossref + OpenAlex + arXiv 三源 0 失败 |
-| **批注列表页签** | `--sidebar-tab annotations --layout-report 1` | 5 个页签在 920pt 最小窗口下不被挤掉；几何断言通过 |
+| **Agent + 联网检索** | `--agent-report 1` | 20/20：预设 id 稳定、系统提示拼装顺序正确、温度覆盖与容错解码、Crossref + OpenAlex + arXiv 三源 0 失败 |
+| **批注列表页签** | `--sidebar-tab annotations --layout-report 1` | 5 个页签（现在在图标栏里，不再占内容面板顶部）在 920pt 最小窗口下不被挤掉；几何断言通过 |
 
 > 侧栏页签顺序即快捷键编号，插入「批注」后页面顺延：**⌘1 目录 / ⌘2 智能 / ⌘3 搜索 /
 > ⌘4 批注 / ⌘5 页面**。这是对既有绑定的**可见变更**，`--keys-report 1` 已覆盖。
@@ -108,7 +134,7 @@
 | EPUB 批注写回原文件 | **做不了，已在界面上说明** | EPUB 是压缩包，写回会破坏结构与签名 → 存应用数据目录 |
 | 拖拽手势验证 | 受权限限制 | 辅助功能权限未授予，无法程序化触发鼠标拖拽。面板宽度的计算链路已验，但「按下时命中区域对不对」未验 |
 | 真实服务商兼容性 | 未覆盖 | 桩服务只覆盖 OpenAI 兼容协议的标准形态 |
-| 检索源长期可用性 | 需定期重跑 | `--agent-report 1` 反映的是**当下**网络状态；Semantic Scholar 就是这样被判出局的（连测两次 429） |
+| 检索源长期可用性 | 需定期重跑 | `--agent-report 1` / `--websearch-report 1` 反映的是**当下**网络状态；Semantic Scholar 就是这样被判出局的（连测两次 429） |
 
 ---
 

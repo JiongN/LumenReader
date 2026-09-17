@@ -78,7 +78,7 @@ public enum WebLiteratureSearch {
                 }
             }
 
-            // 去重：同一篇可能同时被 Crossref 与 Semantic Scholar 返回。
+            // 去重：同一篇可能同时被 Crossref 与 OpenAlex 返回。
             // 用标题归一化后比对（标点与大小写差异不该被当成两篇）。
             var seen = Set<String>()
             let deduped = hits.filter { hit in
@@ -159,21 +159,32 @@ public enum WebLiteratureSearch {
         }
     }
 
-    /// 带退避的重试。只重试**暂时性**失败，且只再试一次。
+    /// 带指数退避的重试。只重试**暂时性**失败。
     ///
     /// 它修的是「瞬时限流 / 服务端抖一下」这类问题：一次运气不好就让整整一个数据源缺席，
     /// 代价与收益不成比例。
     ///
     /// 它**修不了结构性限流**——那种要靠换源，不靠重试。Semantic Scholar 就是这样退场的：
-    /// 不带 key 时走共享配额池，本机连着跑两次都是 429，重试只是白等 1.2s。
+    /// 不带 key 时走共享配额池，本机连着跑两次都是 429，重试只是白等。
     /// 判断标准很简单：重试后仍然每次都失败的源，说明它需要的不是重试而是 key。
     ///
-    /// 为什么只重试一次、退避 1.2s：三个源是并发跑的，最慢的那个决定整体耗时。
-    /// 读者在等一次回答，不能为了凑齐第三个源让他多等好几秒。
+    /// 为什么是「最多 3 次 + 0.8s→1.6s→封顶 2.4s」而不是更早的「2 次 + 固定 1.2s」：
+    /// - 退避**指数增长**才符合限流的恢复节奏：429 通常伴随一个窗口，
+    ///   固定间隔要么太短（再撞一次墙）要么太长（白白多等）。
+    /// - 首退避定在 0.8s 而不是常见的 1s：三个源并发跑，最慢的那个决定整体耗时，
+    ///   而读者是在等一次回答。三次尝试的最坏等待是 0.8 + 1.6 = 2.4s，
+    ///   再往上加，等待时间就超过「这次检索值不值」了。
+    /// - 2.4s 是**封顶值**而不是第三段的实际时长（第三段按 2 的幂本是 3.2s），
+    ///   写在这里是为了把最坏情况钉死，将来调 attempts 时不会失控。
+    ///
     /// 重试的定位是「提高命中率」，不是「保证成功」——重试后仍失败就如实报给读者，
     /// 而不是把失败吞掉、让「查不到文献」变成查不出原因的黑盒。
+    private static let maxAttempts = 3
+    private static let baseBackoff: TimeInterval = 0.8
+    private static let maxBackoff: TimeInterval = 2.4
+
     private static func withRetry<T>(
-        attempts: Int = 2,
+        attempts: Int = maxAttempts,
         _ operation: () async -> Result<T, Error>
     ) async -> Result<T, Error> {
         var last: Result<T, Error> = .failure(SearchError.malformed)
@@ -182,7 +193,8 @@ public enum WebLiteratureSearch {
             if case .success = last { return last }
             if case .failure(let error) = last, !isTransient(error) { return last }
             if attempt < attempts - 1 {
-                try? await Task.sleep(nanoseconds: 1_200_000_000 * UInt64(attempt + 1))
+                let backoff = min(baseBackoff * pow(2, Double(attempt)), maxBackoff)
+                try? await Task.sleep(nanoseconds: UInt64(backoff * 1_000_000_000))
             }
         }
         return last
@@ -214,7 +226,7 @@ public enum WebLiteratureSearch {
 
     // MARK: Crossref
 
-    static func crossref(_ query: String, timeout: TimeInterval) async -> Result<[LiteratureHit], Error> {
+    public static func crossref(_ query: String, timeout: TimeInterval) async -> Result<[LiteratureHit], Error> {
         var components = URLComponents(string: "https://api.crossref.org/works")!
         components.queryItems = [
             URLQueryItem(name: "query.bibliographic", value: query),
@@ -271,7 +283,7 @@ public enum WebLiteratureSearch {
 
     // MARK: OpenAlex
 
-    static func openAlex(_ query: String, timeout: TimeInterval) async -> Result<[LiteratureHit], Error> {
+    public static func openAlex(_ query: String, timeout: TimeInterval) async -> Result<[LiteratureHit], Error> {
         var components = URLComponents(string: "https://api.openalex.org/works")!
         components.queryItems = [
             URLQueryItem(name: "search", value: query),
@@ -349,7 +361,7 @@ public enum WebLiteratureSearch {
 
     // MARK: arXiv（Atom XML）
 
-    static func arxiv(_ query: String, timeout: TimeInterval) async -> Result<[LiteratureHit], Error> {
+    public static func arxiv(_ query: String, timeout: TimeInterval) async -> Result<[LiteratureHit], Error> {
         var components = URLComponents(string: "https://export.arxiv.org/api/query")!
         components.queryItems = [
             URLQueryItem(name: "search_query", value: "all:\(query)"),

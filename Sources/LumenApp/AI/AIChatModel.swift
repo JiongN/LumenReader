@@ -45,6 +45,45 @@ final class AIChatModel: ObservableObject {
     /// 正在流式输出的那条消息 id
     @Published private(set) var streamingID: UUID?
 
+    /// 一次请求的完整参数快照。
+    ///
+    /// 存在的理由很具体：用户在 AI 面板上换了模型 / 模板 / Agent 之后，
+    /// 想对**当前同一段内容**立刻看到效果，只能重新划词再问一遍——
+    /// 而划的那段可能已经滚走了。记下参数就能原样重跑（见 `rerunLast`）。
+    ///
+    /// 字段刻意按「足够重跑」而非「尽量少」来选：少记一个（比如 `context`）
+    /// 就会出现「重跑出来的回答和第一次不一样，因为给模型的材料变了」——
+    /// 那正是这个功能最容易被认为坏了的地方。
+    struct RequestSnapshot {
+        var task: AITask
+        var selection: ReaderSelection?
+        var metadata: DocumentMetadata
+        var locatorLabel: String
+        var context: String
+        var locator: DocumentLocator
+        var citations: [DocumentLocator]
+        var config: AIProviderConfig
+        var memory: String
+        var translateTarget: String
+        var template: PromptTemplate?
+        var agent: AgentConfig?
+        /// 输入框上的「联网检索」手动开关
+        var webSearchEnabled: Bool
+    }
+
+    /// 最近一次请求的快照。`nil` 表示没有可重跑的请求。
+    private var lastRequest: RequestSnapshot?
+
+    /// 能不能重跑上一条。流式输出期间禁用——重跑也是一次真实请求，
+    /// 两条请求同时飞会互相抢同一个气泡。
+    var canRerunLast: Bool { lastRequest != nil && !isStreaming }
+
+    /// 喂给下一轮的历史消息条数。**应当恒为偶数**（只收完整的「问—答」对子）。
+    ///
+    /// 暴露给自检用：`--rerun-report` 靠它断言「重跑没有把 history 叠成两份」——
+    /// 那正是「重跑之后模型开始答非所问」的根因，而它在界面上完全看不出来。
+    var historyMessageCount: Int { history.count }
+
     private var history: [AIMessage] = []
     private var streamTask: Task<Void, Never>?
     private var documentPath: String?
@@ -70,6 +109,8 @@ final class AIChatModel: ObservableObject {
         bubbles = []
         draft = ""
         pendingDelta = ""
+        // 换书之后「上一条请求」指向的是另一本书的内容，重跑它没有意义
+        lastRequest = nil
         documentPath = document?.url.standardizedFileURL.path
         loadPersistedChat()
     }
@@ -130,7 +171,8 @@ final class AIChatModel: ObservableObject {
         memory: String,
         translateTarget: String,
         template: PromptTemplate? = nil,
-        agent: AgentConfig? = nil
+        agent: AgentConfig? = nil,
+        webSearchEnabled: Bool = false
     ) {
         guard !isStreaming else { return }
         guard let config else {
@@ -144,14 +186,72 @@ final class AIChatModel: ObservableObject {
             return
         }
 
+        let snapshot = RequestSnapshot(
+            task: task,
+            selection: selection,
+            metadata: metadata,
+            locatorLabel: locatorLabel,
+            context: context,
+            locator: locator,
+            citations: citations ?? selection.map { [$0.locator] } ?? [locator],
+            config: config,
+            memory: memory,
+            translateTarget: translateTarget,
+            template: template,
+            agent: agent,
+            webSearchEnabled: webSearchEnabled
+        )
+        lastRequest = snapshot
+
+        // ⚠️ 这里是 `citations` 的默认值解析点：重跑时必须沿用第一次算出来的引用，
+        // 否则「重新生成」之后引用会变（第一次带选区、重跑时选区已经没了）。
         bubbles.append(Bubble(
             role: .user,
             text: Self.userDisplayText(task: task, selection: selection),
             taskTitle: task.title
         ))
+        startAnswer(snapshot)
+    }
 
-        var answer = Bubble(role: .assistant, text: "", taskTitle: task.title)
-        answer.citations = citations ?? selection.map { [$0.locator] } ?? [locator]
+    /// 重跑上一条请求（换模型 / 模板 / Agent 之后对**同一段内容**再看一次）。
+    ///
+    /// 三条刻意的取舍：
+    ///
+    /// 1. **替换而不是追加**上一条回答。追加会让气泡序列变成「问、答、答」，
+    ///    而 `finishStreaming` 是按「最后一个 user + 最后一个 assistant」配对的，
+    ///    两条答会各自和同一个问配成一对，history 里于是出现重复的一问。
+    /// 2. **重跑前先把上一轮那一对从 history 里摘掉**，重跑成功后再由
+    ///    `finishStreaming` 补回来。净效果是一对换一对，history 的
+    ///    「只收完整对子」这条规则没有被打破。
+    /// 3. 走的是 `submit` 里同一条 `startAnswer`，因此联网检索、进度文案、
+    ///    可中止（stop）这些行为与首次请求完全一致。
+    func rerunLast() {
+        guard let snapshot = lastRequest, !isStreaming else { return }
+        guard snapshot.config.isConfigured else {
+            appendNotice("「\(snapshot.config.name)」当前不可用。请先在「设置 → AI」里完成配置。")
+            return
+        }
+
+        // 摘掉上一轮那一对（顺序不能反：先答后问）
+        if history.last?.role == .assistant { history.removeLast() }
+        if let lastUser = bubbles.last(where: { $0.role == .user })?.text,
+           history.last?.role == .user, history.last?.content == lastUser {
+            history.removeLast()
+        }
+
+        // 用一条**新的**回答替换旧的：文本、推理、进度、失败标记都要是干净的，
+        // 否则用户会在新答案下面看到上一次的「⚠️ 请求超时」。
+        if let lastIndex = bubbles.indices.last, bubbles[lastIndex].role == .assistant {
+            bubbles.remove(at: lastIndex)
+        }
+
+        startAnswer(snapshot)
+    }
+
+    /// 建一条 assistant 气泡并开始请求。`submit` 与 `rerunLast` 共用。
+    private func startAnswer(_ snapshot: RequestSnapshot) {
+        var answer = Bubble(role: .assistant, text: "", taskTitle: snapshot.task.title)
+        answer.citations = snapshot.citations
         bubbles.append(answer)
         streamingID = answer.id
         isStreaming = true
@@ -165,8 +265,9 @@ final class AIChatModel: ObservableObject {
             guard let self else { return }
 
             var webContext = ""
-            if let agent, agent.usesWebSearch {
-                let query = Self.webSearchQuery(task: task, selection: selection, metadata: metadata)
+            // 触发条件两路：Agent 自带「要查文献」，或输入框上的手动开关。
+            if snapshot.agent?.usesWebSearch == true || snapshot.webSearchEnabled {
+                let query = Self.webSearchQuery(task: snapshot.task, selection: snapshot.selection, metadata: snapshot.metadata)
                 if !query.isEmpty {
                     self.setProgress("正在联网检索文献…")
                     let outcome = await WebLiteratureSearch.search(query: query)
@@ -183,23 +284,23 @@ final class AIChatModel: ObservableObject {
             }
 
             let messages = PromptLibrary.messages(
-                task: task,
-                selection: selection,
-                metadata: metadata,
-                locatorLabel: locatorLabel,
-                context: context,
-                memory: memory,
+                task: snapshot.task,
+                selection: snapshot.selection,
+                metadata: snapshot.metadata,
+                locatorLabel: snapshot.locatorLabel,
+                context: snapshot.context,
+                memory: snapshot.memory,
                 history: history,
-                translateTarget: translateTarget,
-                template: template,
-                agent: agent,
+                translateTarget: snapshot.translateTarget,
+                template: snapshot.template,
+                agent: snapshot.agent,
                 webContext: webContext
             )
 
             self.setProgress("")
             var failure: String?
             do {
-                try await self.streamIntoBubble(messages: messages, config: config)
+                try await self.streamIntoBubble(messages: messages, config: self.effectiveConfig(for: snapshot))
             } catch {
                 if !Task.isCancelled {
                     failure = Self.describe(error)
@@ -208,6 +309,24 @@ final class AIChatModel: ObservableObject {
             self.flushDelta(force: true)
             self.finishStreaming(failure: failure)
         }
+    }
+
+    /// 这次请求实际使用的服务商配置：Agent 带了温度覆盖时按它改一份副本。
+    ///
+    /// 改的是**副本**而不是 `config` 本身：快照里存的是设置里的那一份，
+    /// 直接改它会把用户的服务商设置一起改掉——那是「换了个 Agent，结果
+    /// 设置页里的温度也变了」这种最难解释的不一致。
+    ///
+    /// 不标 `private` 是为了让 `--agent-report` 能直接喂参数进去断言
+    /// （温度有没有生效，在这台没有视觉通道的机器上只能这样验）。
+    func effectiveConfig(for snapshot: RequestSnapshot) -> AIProviderConfig {
+        guard let override = snapshot.agent?.temperatureOverride else { return snapshot.config }
+        var config = snapshot.config
+        config.temperature = min(
+            max(override, AgentConfig.temperatureRange.lowerBound),
+            AgentConfig.temperatureRange.upperBound
+        )
+        return config
     }
 
     /// 联网检索用的查询词。
@@ -239,7 +358,8 @@ final class AIChatModel: ObservableObject {
         memory: String,
         translateTarget: String,
         template: PromptTemplate? = nil,
-        agent: AgentConfig? = nil
+        agent: AgentConfig? = nil,
+        webSearchEnabled: Bool = false
     ) {
         let trimmed = question.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
@@ -256,7 +376,8 @@ final class AIChatModel: ObservableObject {
             memory: memory,
             translateTarget: translateTarget,
             template: template,
-            agent: agent
+            agent: agent,
+            webSearchEnabled: webSearchEnabled
         )
     }
 
@@ -290,6 +411,12 @@ final class AIChatModel: ObservableObject {
         streamingID = answer.id
         isStreaming = true
         pendingDelta = ""
+
+        // 整本书总结不走 `submit`，也就没有可原样重跑的快照：
+        // 它要么一次问完、要么先逐片 map 再 reduce（取决于篇幅），
+        // 重跑时若走 `startAnswer` 会退化成「把上一次的摘要再总结一遍」——
+        // 那不是用户要的「重新生成」。所以这里清掉，界面上也不给这个入口。
+        lastRequest = nil
 
         let totalCharacters = slices.reduce(0) { $0 + $1.text.count }
 
@@ -381,6 +508,7 @@ final class AIChatModel: ObservableObject {
         stop()
         bubbles = []
         history = []
+        lastRequest = nil
         persistChat()
     }
 

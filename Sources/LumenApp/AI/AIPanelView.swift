@@ -69,6 +69,11 @@ struct AIPanelView: View {
                 Button("总结本节") { run(.summarize(scope: .currentUnit)) }
                 Button("总结全书") { summarizeWholeDocument() }
                 Divider()
+                // 「重新生成」是**付费动作**，所以只放在菜单与气泡 footer 里，
+                // 不给键盘快捷键：一次误触的代价是一次真实的模型调用。
+                Button("重新生成上一条回答") { chat.rerunLast() }
+                    .disabled(!chat.canRerunLast)
+                Divider()
                 Button("记住选中内容") { rememberSelection() }
                     .disabled(!hasSelection)
                 Button("记住当前这一节") { rememberCurrentUnit() }
@@ -176,6 +181,7 @@ struct AIPanelView: View {
         return Menu {
             Button {
                 state.settingsStore.ai.activeTemplateID = nil
+                noteRerunAvailability("已切回默认读法")
             } label: {
                 if activeID == nil {
                     Label("默认", systemImage: "checkmark")
@@ -188,7 +194,7 @@ struct AIPanelView: View {
 
             ForEach(templates) { template in
                 Button {
-                    state.settingsStore.ai.activeTemplateID = template.id
+                    selectTemplate(template)
                 } label: {
                     if template.id == activeID {
                         Label(template.name, systemImage: "checkmark")
@@ -223,6 +229,7 @@ struct AIPanelView: View {
         return Menu {
             Button {
                 state.settingsStore.ai.activeAgentID = nil
+                noteRerunAvailability("已改为不用 Agent")
             } label: {
                 if activeID == nil {
                     Label("不用 Agent", systemImage: "checkmark")
@@ -235,7 +242,7 @@ struct AIPanelView: View {
 
             ForEach(agents) { agent in
                 Button {
-                    state.settingsStore.ai.activeAgentID = agent.id
+                    selectAgent(agent)
                 } label: {
                     // 联网检索是「会走出去的动作」，标在菜单里让人一眼看见自己选的是哪一个
                     let suffix = agent.usesWebSearch ? "（联网）" : ""
@@ -269,6 +276,30 @@ struct AIPanelView: View {
             return "默认"
         }
         return template.name
+    }
+
+    // MARK: - 切换模型 / 模板 / Agent
+
+    /// 切模板。切换本身已经对**下一次**请求生效（请求时才解析配置），
+    /// 但对「当前这条回答」不会自动重跑——那是付费动作，得由用户发起。
+    /// 所以切完给一句可操作的提示，而不是让他自己去发现「怎么没变」。
+    private func selectTemplate(_ template: PromptTemplate) {
+        state.settingsStore.ai.activeTemplateID = template.id
+        noteRerunAvailability("已切到模板「\(template.name)」")
+    }
+
+    private func selectAgent(_ agent: AgentConfig) {
+        state.settingsStore.ai.activeAgentID = agent.id
+        noteRerunAvailability("已切到 Agent「\(agent.name)」")
+    }
+
+    /// 告诉用户「可以用新配置重跑上一条」。
+    ///
+    /// 只在**确实有上一条可重跑**时才提示：没有历史请求时弹这句话，
+    /// 等于承诺一个点了没反应的按钮。
+    private func noteRerunAvailability(_ prefix: String) {
+        guard chat.canRerunLast else { return }
+        state.showToast("\(prefix)：点「重新生成」可按新配置重跑当前内容")
     }
 
     /// chip 的统一外形。
@@ -316,8 +347,12 @@ struct AIPanelView: View {
                 } else {
                     LazyVStack(alignment: .leading, spacing: DS.Space.m) {
                         ForEach(chat.bubbles) { bubble in
-                            AIBubbleView(bubble: bubble, isStreaming: chat.streamingID == bubble.id)
-                                .id(bubble.id)
+                            AIBubbleView(
+                                bubble: bubble,
+                                isStreaming: chat.streamingID == bubble.id,
+                                isLast: bubble.id == chat.bubbles.last?.id
+                            )
+                            .id(bubble.id)
                         }
                         Color.clear.frame(height: 1).id(Self.bottomAnchor)
                     }
@@ -461,6 +496,8 @@ struct AIPanelView: View {
             }
 
             HStack(alignment: .bottom, spacing: DS.Space.s) {
+                webSearchToggle
+
                 TextField("就当前内容提问…", text: $chat.draft, axis: .vertical)
                     .textFieldStyle(.plain)
                     .font(DS.Typo.aiBody)
@@ -500,6 +537,53 @@ struct AIPanelView: View {
             }
         }
         .padding(DS.Space.m)
+    }
+
+    /// 输入框上的「联网检索」手动开关。
+    ///
+    /// 与 Agent 自己的联网开关是**两个独立条件**（满足其一即检索）：
+    /// Agent 那个属于「这个角色定位上就要查文献」，跟着 Agent 走；
+    /// 这个属于「我这一次想查」，不改动任何 Agent。
+    ///
+    /// 图标旁的 help 把**代价**写出来（每次提问多几秒）而不是只写好处：
+    /// 它要给三个外部库发请求，用户有权在按下之前知道这一点。
+    private var webSearchToggle: some View {
+        let isOn = state.settingsStore.ai.webSearchEnabled
+
+        return Button {
+            state.settingsStore.ai.webSearchEnabled.toggle()
+            state.showToast(
+                isOn ? "已关闭本次联网检索" : "已开启联网检索：每次提问会多花几秒"
+            )
+        } label: {
+            Image(systemName: "globe")
+                .font(DS.Typo.ui(size: 13, weight: isOn ? .semibold : .regular))
+                .foregroundStyle(isOn ? Color.white : DS.Palette.textTertiary)
+                .frame(width: 26, height: 26)
+                .background(
+                    Circle().fill(isOn ? DS.Palette.accent : DS.Palette.surfaceRaised)
+                )
+                .overlay(
+                    Circle().strokeBorder(
+                        isOn ? DS.Palette.accent : DS.Palette.separator,
+                        lineWidth: 0.5
+                    )
+                )
+                .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .help(
+            """
+            联网检索文献（Crossref · OpenAlex · arXiv）
+
+            开启后每次提问会先查这三个公开学术库，把命中的文献连同 DOI / 编号
+            一起交给模型，因此每次提问会多花几秒。三个源都是免密钥的公开接口；
+            知网、万方、Web of Science 没有可用的公开接口，接不了。
+
+            勾了「联网检索」的 Agent 不需要再开这个——两者满足其一即触发。
+            """
+        )
+        .accessibilityLabel("联网检索文献")
     }
 
     private var canSend: Bool {
@@ -572,7 +656,8 @@ struct AIPanelView: View {
             memory: state.aiMemoryPayload,
             translateTarget: state.settingsStore.ai.translateTarget,
             template: activeTemplate,
-            agent: activeAgent
+            agent: activeAgent,
+            webSearchEnabled: state.settingsStore.ai.webSearchEnabled
         )
     }
 
@@ -590,7 +675,8 @@ struct AIPanelView: View {
             memory: state.aiMemoryPayload,
             translateTarget: state.settingsStore.ai.translateTarget,
             template: activeTemplate,
-            agent: activeAgent
+            agent: activeAgent,
+            webSearchEnabled: state.settingsStore.ai.webSearchEnabled
         )
     }
 
@@ -697,9 +783,13 @@ struct AIBubbleView: View {
 
     let bubble: AIChatModel.Bubble
     let isStreaming: Bool
+    /// 是不是最后一条消息。「重新生成」只挂在这条上——
+    /// 挂在每条回答上会让人以为它能重跑任意一条，而模型只存了最近一次的快照。
+    var isLast: Bool = false
 
     @EnvironmentObject private var bridge: ReaderBridge
     @EnvironmentObject private var state: AppState
+    @EnvironmentObject private var chat: AIChatModel
     @State private var showReasoning = false
     @State private var justRemembered = false
     /// 「已复制」「已批注」的短暂确认态。做成按钮上的对勾而不是 toast：
@@ -861,6 +951,24 @@ struct AIBubbleView: View {
             citationRow
 
             Spacer(minLength: 0)
+
+            // 「重新生成」是付费动作，所以**不给键盘快捷键**（项目里的既定约定：
+            // 一次误触的代价是一次真实的模型调用）。它也不在流式输出期间出现——
+            // 那时要的是「停止」，两个按钮同时亮着容易按错。
+            if isLast && bubble.role == .assistant && !isStreaming {
+                Button {
+                    chat.rerunLast()
+                } label: {
+                    miniChip(
+                        icon: "arrow.clockwise",
+                        text: "重新生成",
+                        tint: chat.canRerunLast ? DS.Palette.accent : DS.Palette.textTertiary
+                    )
+                }
+                .buttonStyle(.plain)
+                .disabled(!chat.canRerunLast)
+                .help("用当前的模型 / 模板 / Agent 重新生成这条回答（不会改动你的提问）")
+            }
 
             Button {
                 copyAnswer()

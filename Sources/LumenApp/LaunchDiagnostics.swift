@@ -162,6 +162,23 @@ enum LaunchOptions {
     /// Agent 自检：打印预设、拼装后的系统提示、以及一次真实的联网文献检索结果。
     static var agentReport: Bool { flag("--agent-report") }
 
+    /// 联网文献检索自检：`--websearch-report 1`。
+    ///
+    /// **真实联网**跑一次 `WebLiteratureSearch.search`，逐源记录命中数 / 失败 / 耗时，
+    /// 断言「至少一个源命中」且「去重后总命中 ≥ 3」。与 `--agent-report` 里那次检索
+    /// 分开，是因为它要能单独重跑：三个源都是外部服务，可用性会随时间变
+    /// （Semantic Scholar 就是这么被判出局的），而这条通道是发现「某个源挂了」的地方。
+    ///
+    /// ⚠️ 必须搭配 `--capture` 使用，否则进程不会自己退出（自检的老坑，退出码 137）。
+    static var webSearchReport: Bool { flag("--websearch-report") }
+
+    /// 「重新生成」自检：`--rerun-report 1`。
+    ///
+    /// 需要配合 `--mock-ai 1`（否则要烧真实密钥）：跑一次提问、再 `rerunLast()` 一次，
+    /// 断言气泡被**替换**（条数不变）且两次请求体规模一致（history 未被叠加）。
+    /// ⚠️ 同样必须与 `--capture` 同用。
+    static var rerunReport: Bool { flag("--rerun-report") }
+
     /// 自检钥匙串访问成本：`--keychain-report 1`。
     ///
     /// 起因是「每重编译一次就疯狂弹钥匙串授权框」。这件事只有一条通道能验：

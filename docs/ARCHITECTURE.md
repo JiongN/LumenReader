@@ -191,15 +191,21 @@ EPUB：写进应用数据目录
 ### 3.5 一次带 Agent 的 AI 请求
 
 ```
-AIPanelView 的 agentMenu 选定 AgentConfig（角色设定 + 技能集 + 是否联网）
-  └─ AIChatModel.submit(..., agent:)
-       ├─ agent.usesWebSearch 时先 WebLiteratureSearch.search(query:)
-       │    └─ withTaskGroup 并发 Crossref / OpenAlex / arXiv（各自的解析器）
+AIPanelView 的 agentMenu 选定 AgentConfig（角色 + 技能 + 自定义指令 + 温度覆盖 + 是否联网）
+  └─ AIChatModel.submit(..., agent:, webSearchEnabled:)
+       ├─ 触发条件两路：agent.usesWebSearch || AISettings.webSearchEnabled（输入框上的手动开关）
+       │    └─ WebLiteratureSearch.search(query:)   三源并发，各自最多 3 次尝试 + 指数退避
        │         └─ 任一个失败都不影响其余；失败原因进 Outcome.failures
+       ├─ agent.temperatureOverride 只在这里盖掉 config.temperature（改的是副本）
        └─ PromptLibrary.messages(..., agent:, webContext:)
             ├─ system = 默认系统提示 + agent.promptSection   ← 追加，不是替换
             └─ user   = 材料（抬头 → 原文 → 联网结果）→ 要求 → 模板额外要求
 ```
+
+`promptSection` 内部顺序是固定的：角色设定 → 技能指令 → 自定义指令。
+自定义指令排在技能**之后**是刻意的：技能是调好的行为约束，先立规矩；
+用户自己的话放在后面，等于「在此之上还要……」。反过来放，长段自定义指令
+会把那几条简短的技能要求冲淡。这条顺序由 `--agent-report` 断言钉住。
 
 **Agent 与提示词模板的语义刻意不同**：模板给 `systemPrompt` 时是**整段替换**
 （换一种读法），而 Agent 是**追加**——默认提示里的防幻觉、要引用、禁客套话
@@ -212,6 +218,12 @@ AIPanelView 的 agentMenu 选定 AgentConfig（角色设定 + 技能集 + 是否
 **为什么要能容忍单源失败**：三个源是独立的外部服务，任何一个都可能超时或被限流。
 一个源挂掉只让覆盖面变小，不该让整个功能不可用——但失败必须如实报出来，
 不能让「查不到文献」变成查不出原因的黑盒。
+
+**重试只修瞬时故障**：最多 3 次尝试 + 指数退避（0.8s → 1.6s，封顶 2.4s），
+且只对 429 / 408 / 5xx / 超时 / 断连重试。结构性限流（共享配额池那种）重试也修不了，
+那种情况要换源——Semantic Scholar 就是这样被判出局的。
+
+---
 
 ### 3.6 侧栏：一条常驻图标栏 + 一块可收起的内容面板
 
@@ -262,6 +274,29 @@ LeftRail（常驻 52pt，沉浸时隐）        SidebarColumn（可收起，宽 
 
 ---
 
+### 3.8 重新生成：换配置重跑同一段内容
+
+```
+submit(...)  → 存一份 RequestSnapshot（task / selection / context / config / template /
+               agent / webSearchEnabled …足以原样重跑）
+rerunLast()  → 从 history 摘掉上一轮那一对 → 用一条新气泡替换旧的 → 同一条 startAnswer
+```
+
+三条刻意的取舍：
+
+1. **替换而不是追加**。追加会让气泡序列变成「问、答、答」，而 `finishStreaming`
+   是按「最后一个 user + 最后一个 assistant」配对的，两条答会各自和同一个问配成一对。
+2. **重跑前先摘掉 history 里那一对**，成功后由 `finishStreaming` 补回来。
+   净效果是一对换一对，「只收完整对子」的规则没有被打破——
+   否则下一轮模型会看到一个已经被回答过的旧问题，表现正是「答非所问」。
+3. 走 `submit` 里同一条 `startAnswer`，所以联网检索、进度文案、可中止（stop）
+   与首次请求完全一致。
+
+`summarizeDocument`（总结全书）**不产生快照**：它要么一次问完、要么先逐片 map
+再 reduce，重跑时若走 `startAnswer` 会退化成「把上一次的摘要再总结一遍」。
+所以那里主动把 `lastRequest` 清掉，界面上也不给这个入口——
+给一个点了会给出错误结果的按钮，比不给更糟。
+
 ## 4. 存储布局
 
 `~/Library/Application Support/com.jn.lumen/`
@@ -309,6 +344,12 @@ docs/<路径哈希>/
 | 批注类型判断统一走 `lumenTypeName`（去斜杠） | `PDFAnnotationSubtype.highlight.rawValue == "/Highlight"` 带斜杠，而 `annotation.type` 返回 `"Highlight"` 不带——直接比较恒为假。同一个坑还带来第二个错误：`Text` 便签会自动带一个 `Popup` 影子批注，不排除它计数会虚高一倍 |
 | 联网检索源要能**被实测淘汰** | Semantic Scholar 在实现完成后被判出局：不带 key 时走共享配额池，本机连测两次都 429，默认配置下它只贡献一个错误。换成 OpenAlex 后命中 8→12 条、失败源 1→0、耗时 4478→3273ms。**重试修不了结构性限流**——那种情况要换源，不是加重试 |
 | 配置里预设的 id 写成固定 UUID 字面量 | 用 `UUID()` 会让每次求值得到新 id，「配置里没有 agents 时退回预设」这条路径每轮 id 都不同，用户选中的 Agent 静默丢失 |
+| 重新生成**替换**旧回答而不是追加 | 追加会让气泡变成「问、答、答」，而 history 是按「最后一个 user + 最后一个 assistant」配对的，两条答会各自配成一对——下一轮模型看到一个已经答过的旧问题，表现就是答非所问 |
+| 重跑前先从 history 摘掉那一对 | 重跑成功后 `finishStreaming` 会补回来，净效果是一对换一对，「只收完整对子」的规则没被打破 |
+| 总结全书不提供「重新生成」 | 它走 map-reduce，重跑会退化成「把上一次的摘要再总结一遍」。给一个点了会给出错误结果的按钮，比不给更糟 |
+| 付费动作（含重新生成）不给快捷键 | 一次误触的代价是一次真实的模型调用。它只在菜单项与气泡 footer 里 |
+| 联网检索有两路触发条件 | `agent.usesWebSearch`（这个角色定位上就要查，跟着 Agent 走）与输入框上的 `webSearchEnabled`（我这一次想查，不改任何 Agent）。合二为一的话，临时查一次就得去改 Agent 配置，改完往往忘了改回来 |
+| 联网失败如实上报 + 只重试瞬时故障 | 结构性限流（共享配额池）重试修不了，那种要换源；但「哪个源挂了」必须能让用户在日志里看到，否则「查不到文献」就是个黑盒 |
 | 面板宽度只保留拖拽一个入口 | 设置页里再放一份就是同一个值两个入口，改了一个另一个不跟着变——「看起来能用其实不同步」的经典来源 |
 
 ---

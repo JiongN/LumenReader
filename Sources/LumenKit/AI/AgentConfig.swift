@@ -94,7 +94,7 @@ public enum AgentSkill: String, Codable, CaseIterable, Identifiable, Sendable {
 
 // MARK: - Agent 配置
 
-/// 一个 Agent = 角色设定 + 一组技能 + 是否联网检索。
+/// 一个 Agent = 角色设定 + 一组技能 + 自由文本指令 + 是否联网检索 + 参数覆盖。
 ///
 /// 与「提示词模板」的分工：模板换的是**读法**（整段替换系统提示），
 /// Agent 补的是**身份与工具**（追加在默认约束之后）。
@@ -108,6 +108,23 @@ public struct AgentConfig: Codable, Identifiable, Sendable, Equatable {
     /// 是否在提问前联网检索文献
     public var usesWebSearch: Bool
     public var isBuiltIn: Bool
+    /// 自由文本追加指令。
+    ///
+    /// 与 `persona` 的分工：`persona` 回答「你是谁」，这一条回答「另外还要做什么」
+    /// （例如「每次回答都要给出一条可证伪的反对意见」）。
+    /// 之所以还需要它：枚举技能是**调好的**固定指令，覆盖不到用户自己的具体要求，
+    /// 而让用户去改角色设定来表达具体要求，等于把两类信息塞进一个字段——
+    /// 结果是他下次想改角色时，得先把自己写的指令从里面挑出来。
+    public var customInstruction: String
+    /// 温度覆盖。`nil` = 跟随服务商设置（默认）。
+    ///
+    /// 只影响**对话请求**（AI 面板里的提问 / 解释 / 翻译 / 总结），
+    /// 不影响智能目录这类内部请求——后者要的是稳定的 JSON，不该被 Agent 的
+    /// 创造性设置带偏。这一点在编辑器里也写明了。
+    public var temperatureOverride: Double?
+
+    /// 温度的允许区间。滑杆与解码都按它钳制。
+    public static let temperatureRange: ClosedRange<Double> = 0...2
 
     public init(
         id: String = UUID().uuidString,
@@ -115,7 +132,9 @@ public struct AgentConfig: Codable, Identifiable, Sendable, Equatable {
         persona: String = "",
         skills: [AgentSkill] = [],
         usesWebSearch: Bool = false,
-        isBuiltIn: Bool = false
+        isBuiltIn: Bool = false,
+        customInstruction: String = "",
+        temperatureOverride: Double? = nil
     ) {
         self.id = id
         self.name = name
@@ -123,6 +142,29 @@ public struct AgentConfig: Codable, Identifiable, Sendable, Equatable {
         self.skills = skills
         self.usesWebSearch = usesWebSearch
         self.isBuiltIn = isBuiltIn
+        self.customInstruction = customInstruction
+        self.temperatureOverride = temperatureOverride
+    }
+
+    /// 容错解码。理由同其余设置结构：**旧配置里没有 `customInstruction` /
+    /// `temperatureOverride` 这两个键**，缺一个键就让整份设置解码失败的话，
+    /// 用户所有的 Agent 会被静默重置成四个预设——他自己建的那几个就白建了。
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.id = (try? container.decode(String.self, forKey: .id)) ?? UUID().uuidString
+        self.name = (try? container.decode(String.self, forKey: .name)) ?? "未命名 Agent"
+        self.persona = (try? container.decode(String.self, forKey: .persona)) ?? ""
+        // 技能里出现一个不认识的 rawValue 会让整个数组解码失败；
+        // 那时正确的行为是「忽略那一项」而不是「丢掉整个 Agent」。
+        self.skills = (try? container.decode([AgentSkill].self, forKey: .skills)) ?? []
+        self.usesWebSearch = (try? container.decode(Bool.self, forKey: .usesWebSearch)) ?? false
+        self.isBuiltIn = (try? container.decode(Bool.self, forKey: .isBuiltIn)) ?? false
+        self.customInstruction = (try? container.decode(String.self, forKey: .customInstruction)) ?? ""
+        // 缺失与显式 null 都落到 nil（= 跟随服务商设置）
+        let rawTemperature = try? container.decode(Double.self, forKey: .temperatureOverride)
+        self.temperatureOverride = rawTemperature.map {
+            min(max($0, Self.temperatureRange.lowerBound), Self.temperatureRange.upperBound)
+        }
     }
 
     /// 拼进系统提示的段落。返回空串表示这个 Agent 不改变系统提示。
@@ -139,7 +181,24 @@ public struct AgentConfig: Codable, Identifiable, Sendable, Equatable {
             lines.append("在遵守上面所有基本约束的前提下，另外执行以下要求：")
             lines.append(contentsOf: activeSkills.map(\.instruction))
         }
+        // 自定义指令排在技能**之后**：技能是调好的行为约束，先立规矩；
+        // 用户自己的话放在后面，等于「在此之上还要……」。
+        // 反过来放的话，长段自定义指令会把那几条简短的技能要求冲淡。
+        let trimmedInstruction = customInstruction.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmedInstruction.isEmpty {
+            lines.append("")
+            lines.append("另外，读者为这个角色额外提出以下要求：")
+            lines.append(trimmedInstruction)
+        }
         return lines.joined(separator: "\n")
+    }
+
+    /// 是否真的带了内容（用于界面上「留空即等同不用 Agent」的说明）。
+    public var isEmpty: Bool {
+        persona.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && customInstruction.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && skills.isEmpty
+            && temperatureOverride == nil
     }
 
     /// 预设 Agent。
