@@ -20,6 +20,12 @@ let package = Package(
             dependencies: ["LumenKit"],
             path: "Sources/LumenApp",
             swiftSettings: [.swiftLanguageMode(.v5)]
+        ),
+        // 引擎层回归测试。运行：swift test --disable-sandbox
+        .testTarget(
+            name: "LumenKitTests",
+            dependencies: ["LumenKit"],
+            path: "Tests/LumenKitTests"
         )
     ]
 )
