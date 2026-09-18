@@ -13,7 +13,9 @@ struct ThumbnailPane: View {
     @EnvironmentObject private var bridge: ReaderBridge
     @EnvironmentObject private var state: AppState
 
-    @State private var cache: [Int: NSImage] = [:]
+    @State private var cache = ThumbnailCache(
+        capacity: LaunchOptions.perfThumbnailUnbounded ? nil : ThumbnailCache.defaultCapacity
+    )
     @State private var pending: Set<Int> = []
     /// 当前真正落在可视区里的页。修掉卡顿靠的就是它。
     @State private var visible = VisibleTracker()
@@ -118,7 +120,9 @@ struct ThumbnailPane: View {
             let image = provider(index, size)
             DispatchQueue.main.async {
                 pending.remove(index)
-                if let image { cache[index] = image }
+                // 存入时带上「当前页」，超出上限就按「离当前页远近」淘汰最远的那些。
+                // 这一步是「大文档滚完全本内存不再线性增长」的落点：缓存张数被封顶。
+                if let image { cache.store(image, at: index, current: bridge.currentUnitIndex) }
             }
         }
     }

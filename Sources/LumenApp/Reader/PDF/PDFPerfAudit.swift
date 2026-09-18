@@ -171,21 +171,24 @@ enum PDFPerfAudit {
         return samples
     }
 
-    /// 缩略图内存：模拟「把侧栏从头滚到尾」，量缓存最终驻留多少张、常驻内存涨多少。
+    /// 缩略图内存：用与侧栏**完全相同的策略**模拟「把侧栏从头滚到尾」，
+    /// 量缓存最终驻留多少张、常驻内存涨多少。
     ///
-    /// 它是「大文档内存持续增长」的定点探针。侧栏每渲染一页就 `cache[index] = image`，
-    /// 而 `cache` 只在换文档时清空——所以「滚完全本后缓存里留了多少张」是**确定性**的，
-    /// 与内存采样无关，作为主判据；`phys_footprint` 增量作为现场佐证（受分配器复用影响，
-    /// 会有抖动，故只报不断言）。
+    /// 它是「大文档内存持续增长」的定点探针。侧栏每渲染一页就存进 `ThumbnailCache`，
+    /// 而缓存只在换文档时清空——所以「滚完全本后仍驻留多少张」是**确定性**的，
+    /// 与内存采样无关，作为主判据；`phys_footprint` 增量作为现场佐证（受分配器复用
+    /// 影响会有抖动，故只报不断言）。
     ///
-    /// 这里先量**当前（无上限）**行为作基线；优化阶段引入容量上限后，本行会同时报
-    /// 「有上限 / 无上限（`--perf-thumbnail-unbounded 1`）」一对读数，作为可证伪的证据。
+    /// 走的是**生产同一套** `ThumbnailCache`：所以这里的读数就是侧栏的真实行为，
+    /// 不是在测一个只为自检而存在的旁路。`--perf-thumbnail-unbounded 1` 把容量上限
+    /// 关掉——重跑时驻留张数会回到「等于页数」，这就是本优化可证伪的证据。
     private static func measureThumbnailFootprint(
         controller: PDFController,
         pageCount: Int
     ) async -> ThumbnailMeasurement {
+        let capacity = LaunchOptions.perfThumbnailUnbounded ? nil : ThumbnailCache.defaultCapacity
         guard let doc = controller.document else {
-            return ThumbnailMeasurement(rendered: 0, resident: 0, footprintDeltaMB: 0, capacity: nil)
+            return ThumbnailMeasurement(rendered: 0, resident: 0, footprintDeltaMB: 0, capacity: capacity)
         }
         // 与 `ThumbnailPane` 一致的 2 倍尺寸（132pt × 2）。
         let size = CGSize(width: 264, height: 354)
@@ -199,12 +202,12 @@ enum PDFPerfAudit {
         await settle(milliseconds: 600)
         let baseline = footprintBytes()
 
-        // 模拟滚动：逐页渲染并存入缓存（走与侧栏相同的「先查再存」路径）。
-        var cache: [Int: NSImage] = [:]
+        // 模拟滚动：逐页渲染并按侧栏策略存入（当前页 = 刚渲染的这一页）。
+        var cache = ThumbnailCache(capacity: capacity)
         var rendered = 0
         for index in 0..<pageCount {
             if let image = doc.page(at: index)?.thumbnail(of: size, for: .mediaBox) {
-                cache[index] = image
+                cache.store(image, at: index, current: index)
                 rendered += 1
             }
             await Task.yield()
@@ -213,13 +216,14 @@ enum PDFPerfAudit {
         let held = footprintBytes()
         // 保证 `cache` 活到读完之后再释放，否则编译器可能提前回收，读到的增量是假的。
         let delta = signedMB(from: baseline, to: held)
+        let resident = cache.count
         withExtendedLifetime(cache) {}
 
         return ThumbnailMeasurement(
             rendered: rendered,
-            resident: cache.count,
+            resident: resident,
             footprintDeltaMB: delta,
-            capacity: nil
+            capacity: capacity
         )
     }
 
@@ -312,6 +316,17 @@ enum PDFPerfAudit {
             secondPassMB <= footprintBudgetMB,
             String(format: "实测 %+.1fMB", secondPassMB)
         )
+        if let capacity = thumbs.capacity {
+            check(
+                "④ 缩略图缓存有上限：滚完全本后仍驻留 ≤ \(capacity) 张（内存不随页数增长）",
+                thumbs.resident <= capacity,
+                "实测驻留 \(thumbs.resident) 张 / 全本 \(thumbs.rendered) 页"
+            )
+        } else {
+            // 证伪对照：关掉上限后驻留张数应当回到「等于全本页数」。
+            NSLog("[Lumen][perf] ④ 缩略图缓存上限已关闭（`--perf-thumbnail-unbounded 1`）："
+                  + "驻留 \(thumbs.resident) 张 = 全本 \(thumbs.rendered) 页（证伪对照，不作断言）")
+        }
 
         // 「摘掉回调更快」本身不是断言——回调是功能的一部分，不能删。这里只把它记成
         // 一条**诊断结论**，供后续优化判断该往哪一层使劲（见上文 ① 的差值行）。
