@@ -61,14 +61,25 @@ struct RecentDocumentsDecodingTests {
         _ = original
     }
 
-    @Test("解码失败时不得把已有文件误判为空后回写（防御规则：静默清空是最坏的失败模式）")
+    @Test("解码失败：原文件被改名备份，而不是被清空后回写（LESSONS #1 类级回归）")
     @MainActor
-    func corruptFileDoesNotTriggerRewrite() throws {
+    func corruptFileIsBackedUpNotOverwritten() throws {
         let file = try makeTempFile(content: "{ 这不是合法 JSON")
         let store = RecentDocuments(fileURL: file)
-        #expect(store.entries.isEmpty, "损坏文件应按空处理")
-        // 关键断言：加载失败后 persist 不应立刻把空列表写回去盖掉原始文件
-        let raw = try String(contentsOf: file, encoding: .utf8)
-        #expect(raw.contains("这不是合法 JSON"), "load 失败不应覆写原文件")
+        #expect(store.entries.isEmpty, "损坏文件解不出任何记录，内存保持为空")
+
+        // 关键断言 1：坏文件被改名成 recent.json.corrupt-<时间戳>，字节原样保留（可人工抢救）。
+        let backups = try FileManager.default
+            .contentsOfDirectory(at: file.deletingLastPathComponent(),
+                                 includingPropertiesForKeys: nil)
+            .filter { $0.lastPathComponent.hasPrefix("recent.json.corrupt-") }
+        let backup = try #require(backups.first, "损坏文件必须留下备份，不能静默清空")
+        let raw = try String(contentsOf: backup, encoding: .utf8)
+        #expect(raw.contains("这不是合法 JSON"), "备份必须原样保留损坏前的字节")
+
+        // 关键断言 2：原路径已不再指向那份坏文件——后续 persist 写的是**新文件**，
+        // 不可能把用户原数据覆盖成一份空列表。
+        #expect(!FileManager.default.fileExists(atPath: file.path),
+                "原文件应已被移走，避免被下一次保存覆盖")
     }
 }

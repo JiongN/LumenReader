@@ -541,6 +541,6 @@ public final class KeyBindingStore: ObservableObject {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         guard let data = try? encoder.encode(overrides) else { return }
-        try? data.write(to: fileURL, options: .atomic)
+        PersistFile.write(data, to: fileURL, label: "keybindings.json")
     }
 }

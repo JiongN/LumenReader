@@ -320,7 +320,7 @@ final class SmartOutlineModel: ObservableObject {
             return
         }
         guard let data = try? JSONEncoder().encode(outline) else { return }
-        try? data.write(to: url, options: .atomic)
+        PersistFile.write(data, to: url, label: "smart-outline.json")
     }
 
     // MARK: - 工具

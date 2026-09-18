@@ -15,6 +15,9 @@
   - 代码修复 + 注释（`RecentDocuments.swift` load()）
   - 回归测试 `Tests/LumenKitTests/RecentDocumentsDecodingTests.swift`
   - 规则 `.claude/rules/persistence-coding.md`
+- **后记（类级补修，见 #7）**：本条当时只修了**实例**——补上 iso8601 策略、加回归测试，
+  却把「解码失败 → `try? ?? 空` → 下次保存覆盖原文件」这个**坏结构**留在了另外三处。
+  真正封死同类坑的是 #7 的 `PersistFile.decodeOrBackup`。
 
 ## #2 图标书页路径画成「M / 蝶形结」（2026-09-17）
 
@@ -53,3 +56,28 @@
 - **根因**：ad-hoc 身份 = CDHash，每次构建都变，login 钥匙串 ACL 认的是身份。
 - **沉淀**：`docs/ISSUES-2026-09-17.md` 第 9 节（自签证书方案）；
   规则 `.claude/rules/build-and-signing.md`（元数据查询不解密）。
+
+## #7 「解码失败静默清空 → 下次保存覆盖用户数据」是一类，不是一个点（2026-09-18）
+
+- **现象**：`recent.json` / 阅读进度 / `memory.json` / `settings.json` 里的服务商配置，
+  只要解码失败一次，就会被容错成空值，随后被下一次持久化**原样写回磁盘**——
+  用户数据被一份「合法但空」的文件替换，且没有任何提示或日志可查。
+- **根因**：`let x = (try? decode(...)) ?? 默认值` 把「**没有数据**」与「**解码失败**」
+  压成了同一个结果，而「默认值」在实际写入路径上就等于「清空」。这是结构问题：
+  同一形状在代码里有四处（LESSONS #1 只修了其中一处的实例）。
+- **修法（类级，一处工具函数）**：`PersistFile.decodeOrBackup(data:type:fileURL:)`——
+  解码失败时把原文件**改名**为 `<name>.corrupt-<时间戳>` 并 NSLog，返回 nil；
+  调用方拿 nil 时**不把内存赋成空值**。改名（而非复制）是关键：原路径随即变空，
+  后续任何 `persist()` 只能写新文件，**不可能**再覆盖用户原数据。
+  - 四个调用点：`RecentDocuments.swift`（recent.json）、`ReadingStateStore.swift`
+    （阅读进度）、`MemoryStore.swift`（memory.json，注意：旧「纯字符串数组」格式
+    能解出来就是有效文件，**不得**误判为损坏）、`SettingsStore.swift`（settings.json）。
+  - `settings.json` 的次级情形：逐字段容错会让「整份文件解得出、但 `providers`
+    被吞成空数组」，文件级备份抓不到；故 `SettingsStore` 额外比对「磁盘上有几条
+    providers」与「解出来几条」，命中才备份（判据见 `providersLookLost`）。
+  - 编码侧的对称问题：`try? data.write` 失败同样无声，统一改走 `PersistFile.write`（失败 NSLog）。
+- **沉淀**：
+  - 工具函数 `Sources/LumenKit/Store/PersistFile.swift`
+  - 回归测试 `Tests/LumenKitTests/PersistFileTests.swift`（备份生成 / 字节保留 /
+    内存不写死空 / 旧格式不误判 / 服务商丢失才备份 / 键路径护栏）
+  - 本账本条 + `docs/AUDIT-code-health-2026-09-17.md` P1-1 / P1-2

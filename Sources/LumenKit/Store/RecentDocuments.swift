@@ -81,7 +81,19 @@ public final class RecentDocuments: ObservableObject {
         // 此前漏了这一行：解码默认按时间戳读 Double，遇到 "2026-09-17T…"
         // 直接整体失败 → entries 静默归零，「最近打开」每次启动都是空的。
         decoder.dateDecodingStrategy = .iso8601
-        entries = (try? decoder.decode([RecentEntry].self, from: data)) ?? []
+        // 解码失败时 decodeOrBackup 会把原文件**改名**备份（并 NSLog），返回 nil。
+        // 这里刻意**不写 `?? []`**：内存值保持原样（首次为空），而不是被赋成空列表；
+        // 且原文件已被移走，后续 persist() 写的是新文件，用户旧记录躺在备份里可抢救。
+        // 这就是 LESSONS #1 的类级修法——不再依赖「解码策略别再漏」这种约定。
+        if let decoded = PersistFile.decodeOrBackup(
+            data: data,
+            type: [RecentEntry].self,
+            fileURL: fileURL,
+            decoder: decoder,
+            reason: "recent.json"
+        ) {
+            entries = decoded
+        }
     }
 
     private func persist() {
@@ -89,7 +101,7 @@ public final class RecentDocuments: ObservableObject {
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         encoder.dateEncodingStrategy = .iso8601
         if let data = try? encoder.encode(entries) {
-            try? data.write(to: fileURL, options: .atomic)
+            PersistFile.write(data, to: fileURL, label: "recent.json")
         }
     }
 

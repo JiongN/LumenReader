@@ -154,7 +154,7 @@ final class AIChatModel: ObservableObject {
         let url = AppPaths.chatHistoryFile(forPath: documentPath)
         let snapshot = bubbles.filter { $0.role != .notice }
         guard let data = try? JSONEncoder().encode(snapshot) else { return }
-        try? data.write(to: url, options: .atomic)
+        PersistFile.write(data, to: url, label: "chat-history.json")
     }
 
     // MARK: - 单轮任务

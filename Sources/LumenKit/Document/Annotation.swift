@@ -129,6 +129,6 @@ public final class AnnotationStore {
 
     public func flush() {
         guard let data = try? JSONEncoder().encode(archive) else { return }
-        try? data.write(to: fileURL, options: .atomic)
+        PersistFile.write(data, to: fileURL, label: "annotations.json")
     }
 }

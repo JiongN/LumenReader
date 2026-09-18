@@ -406,6 +406,17 @@ public struct AISettings: Codable, Sendable, Equatable {
 
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
+        // 逐字段容错解码是项目硬约束（见 docs/AUDIT-code-health-2026-09-17.md 的
+        // 「明确不算问题」一节），所以这里保留 `?? []`。
+        //
+        // 但 providers 的默认值 [] 是唯一一个**危险默认**：它是用户的全部服务商配置，
+        // 一旦因为某个字段解码失败被容错成空数组，SettingsStore 下一次保存就会把
+        // 「用户把服务商全删了」这个假象写死到磁盘上（密钥还在 Keychain，配置要重录）。
+        //
+        // 由于 AppSettings.init(from:) 用的是同一套逐字段容错（`try?`），这种失败
+        // **不会**让整份文件解码抛错，文件级备份因此抓不到它。所以真正的防护在
+        // SettingsStore.load：它比对「磁盘上 providers 有几条」与「解出来有几条」，
+        // 发现「磁盘非空、解出为空」就把 settings.json 整份备份掉。这里不再重复实现。
         self.providers = (try? container.decode([AIProviderConfig].self, forKey: .providers)) ?? []
         // 没有激活的服务商是合法状态（用户可能全删了），所以这里允许解出 nil
         self.activeProviderID = try? container.decode(UUID.self, forKey: .activeProviderID)

@@ -31,7 +31,42 @@ public final class SettingsStore: ObservableObject {
     private static func load(from url: URL) -> AppSettings {
         guard let data = try? Data(contentsOf: url), !data.isEmpty else { return AppSettings() }
         let decoder = JSONDecoder()
-        return (try? decoder.decode(AppSettings.self, from: data)) ?? AppSettings()
+        // 整份文件解不出来（JSON 语法坏 / 顶层类型不对）→ 备份原文件 + NSLog，退回默认。
+        // 原文件已被改名，之后的防抖保存写的是新文件，不会把用户配置盖成一份默认值。
+        guard let settings = PersistFile.decodeOrBackup(
+            data: data,
+            type: AppSettings.self,
+            fileURL: url,
+            decoder: decoder,
+            reason: "settings.json"
+        ) else {
+            return AppSettings()
+        }
+        // 次级防线：整份文件可能「解得出」——因为逐字段容错把服务商配置吞成了空数组。
+        // 判据：磁盘上列着服务商、解出来却是空的（见 providersLookLost）。
+        // 命中就把 settings.json 备份掉，保住用户重录不出来的那部分配置。
+        if settings.ai.providers.isEmpty, providersLookLost(inJSON: data) {
+            PersistFile.backupCorrupt(url, reason: "AI 服务商配置解码失败（磁盘有条目、解出为空）")
+        }
+        return settings
+    }
+
+    /// `settings.json` 里「服务商条目被静默吞掉」的判据。
+    ///
+    /// 顶层结构是 `{ "ai": { "providers": [...] } }`（键名来自 `AISettings` / `AppSettings`
+    /// 的合成 CodingKeys，此处硬编码——`SettingsStore` 与它们同文件同模块，键名改动时
+    /// `PersistFileTests` 里那条「键路径」断言会立刻变红）。
+    ///
+    /// - 「磁盘上是非空数组、解出来是空」→ 解码坏了；
+    /// - 「providers 键存在但不是数组」→ 一定是坏的；
+    /// - 「键不存在」或「是空数组」→ 是合法的「用户没有服务商」，不备份。
+    private static func providersLookLost(inJSON data: Data) -> Bool {
+        guard let object = try? JSONSerialization.jsonObject(with: data),
+              let root = object as? [String: Any],
+              let ai = root["ai"] as? [String: Any],
+              let raw = ai["providers"] else { return false }
+        if let array = raw as? [Any] { return !array.isEmpty }
+        return true
     }
 
     private func scheduleSave() {
@@ -60,7 +95,7 @@ public final class SettingsStore: ObservableObject {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         guard let data = try? encoder.encode(settings) else { return }
-        try? data.write(to: url, options: .atomic)
+        PersistFile.write(data, to: url, label: "settings.json")
     }
 
     // MARK: - 便捷访问

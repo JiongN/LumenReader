@@ -24,14 +24,24 @@ public final class ReadingStateStore: ObservableObject {
 
     public init(documentPath: String) {
         self.fileURL = AppPaths.readingStateFile(forPath: documentPath)
-        self.state = Self.load(from: fileURL)
+        // 解码失败（nil）时退回默认状态；关键是失败路径已由 decodeOrBackup 把
+        // 损坏的进度文件改名备份，随后 scheduleSave 写的是新文件，不会把用户
+        // 原进度覆盖成一份空档。
+        self.state = Self.load(from: fileURL) ?? ReadingState()
     }
 
-    private static func load(from url: URL) -> ReadingState {
-        guard let data = try? Data(contentsOf: url) else { return ReadingState() }
+    private static func load(from url: URL) -> ReadingState? {
+        guard let data = try? Data(contentsOf: url) else { return nil }
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
-        return (try? decoder.decode(ReadingState.self, from: data)) ?? ReadingState()
+        // 解码失败 → 备份原文件 + NSLog + 返回 nil（调用方保持默认值，不写空值回去）。
+        return PersistFile.decodeOrBackup(
+            data: data,
+            type: ReadingState.self,
+            fileURL: url,
+            decoder: decoder,
+            reason: "reading-state.json"
+        )
     }
 
     public func update(_ mutate: (inout ReadingState) -> Void) {
@@ -63,6 +73,6 @@ public final class ReadingStateStore: ObservableObject {
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         encoder.dateEncodingStrategy = .iso8601
         guard let data = try? encoder.encode(state) else { return }
-        try? data.write(to: url, options: .atomic)
+        PersistFile.write(data, to: url, label: "reading-state.json")
     }
 }

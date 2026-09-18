@@ -162,9 +162,21 @@ public final class MemoryStore: ObservableObject {
         if let entries = try? decoder.decode([MemoryEntry].self, from: data) {
             return entries
         }
+        // 注意：legacy 能解出来就算**有效文件**，绝不能当成损坏去备份，
+        // 否则老用户每次启动都会多出一份假的 .corrupt 备份。
         if let legacy = try? JSONDecoder().decode([String].self, from: data) {
             return legacy.map { MemoryEntry(text: $0, source: "手动添加") }
         }
+        // 两种都解不出来 = 真损坏。交给统一的「备份 + 报错」路径：
+        // decodeOrBackup 会再解一次（必然失败）从而触发备份并 NSLog，返回 nil。
+        // 这里不用它的返回值——内存值保持为空，且原文件已被改名，不会被空列表覆盖。
+        PersistFile.decodeOrBackup(
+            data: data,
+            type: [MemoryEntry].self,
+            fileURL: url,
+            decoder: decoder,
+            reason: "memory.json"
+        )
         return []
     }
 
@@ -173,6 +185,6 @@ public final class MemoryStore: ObservableObject {
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         encoder.dateEncodingStrategy = .iso8601
         guard let data = try? encoder.encode(entries) else { return }
-        try? data.write(to: fileURL, options: .atomic)
+        PersistFile.write(data, to: fileURL, label: "memory.json")
     }
 }
