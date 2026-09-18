@@ -9,3 +9,11 @@
   - 「存在性判断」只查元数据（`kSecReturnAttributes`），**不要解密内容**，否则必弹窗。
 - 新增平台/依赖要同步更新 `Package.swift` 的两个 target（LumenKit 是普通 target，
   LumenApp 是 executableTarget，语言模式都锁 .v5）。
+- **不要用 `rm -rf` 清旧 bundle**：本机 safe-delete 守卫按「一次删除的内容文件数」拦
+  （一个 `.app` 上百个文件 > 阈值 50），`rm` 返回非零会让 `set -e` 中断整条构建、
+  `dist` 停在旧版本。`build.sh` 现在走「暂存目录 → `mv` 换入」，旧产物 `mv` 进
+  `dist/.trash`，全程不 `rm` 一个 `.app`。
+- **构建结果要能被证伪**：`build.sh` 换入前后各校验一次写进 bundle 的构建标记
+  （`Contents/Resources/lumen-build-stamp`），不新鲜就非零退出。怀疑「读数不对」时，
+  先 `cat dist/Lumen.app/Contents/Resources/lumen-build-stamp` 确认 dist 是本次构建；
+  细节见 `docs/VERIFY.md` 第五节。

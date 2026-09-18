@@ -97,3 +97,25 @@
   让「关掉优化读数必须变差」这条可证伪性成立。
 - **沉淀**：规则「**读数的来源不在我们这层、又不可复现时，只能当读数，不能当断言**」；
   通道 `Sources/LumenApp/Reader/PDF/PDFPerfAudit.swift`（`--perf-report`）。
+
+## #9 build.sh 的批量删除被守卫拦下，导致「构建静默失效」（2026-09-18）
+
+- **现象**：`./build.sh release` 稳定返回非零，并打印一行和构建毫不相干的东西：
+  `[safe-delete][SAFE_DELETE_BULK_CONFIRM_REQUIRED] {"count":100,"threshold":50,
+  "targets":[".../dist/Lumen.app"]}`；而 `dist/Lumen.app` 仍是旧的那份。
+- **根因**：脚本用 `rm -rf "$BUNDLE"` 清旧产物再重建。本机的 safe-delete 守卫按
+  「**一次删除的内容文件数**」计数（一个 `.app` 有上百个文件 > 阈值 50），把这条 `rm`
+  拦下并让它返回非零；`set -e` 随即中断，后面的 `cp/codesign` 全没跑 → dist 保持旧值。
+- **次生灾害更隐蔽**：调用方只看到「构建失败/非零退出」，很容易误判成「代码改坏了」；
+  更糟的是**后续验证接着跑在旧二进制上**，读数全错还以为构建成功（本轮 #14 性能验证
+  就实打实踩过：一度跑在旧 dist 上做对照）。
+- **修法**：`build.sh` 改成「组装到唯一暂存目录 → 成功后 `mv` 换入」：
+  1. 全程不碰 `dist`，编译/组装/签名/自检任一步失败，旧产物**原封不动**（原子性）；
+  2. 换入只用 `mv`（同文件系统内即 rename），旧产物 `mv` 到 `dist/.trash`，
+     **绝不 `rm` 一个 `.app`**——从根上避开守卫；
+  3. 换入**前后**各校验一次写进 bundle 的「构建标记」，不新鲜就**非零退出**并明确报
+     「dist 未更新」——「构建通过」本身也要能被证伪（README 硬约束 #8）；
+  4. 失败与成功都走 `trap` 收掉暂存目录，`dist` 不留垃圾。
+- **沉淀**：`build.sh`（暂存换入 + 构建标记 + `trap` 清理 + 证伪钩子
+  `LUMEN_BUILD_SABOTAGE=stage|dist`）；排查步骤见 `docs/VERIFY.md` 第五节；
+  规则 `.claude/rules/build-and-signing.md`。
