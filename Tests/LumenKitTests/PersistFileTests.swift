@@ -96,6 +96,66 @@ struct PersistFileTests {
         let ok = PersistFile.write(Data("{}".utf8), to: bogus, label: "test")
         #expect(ok == false, "写进不存在的目录必须返回 false 并在日志留痕")
     }
+
+    // MARK: 备份的失败分支（此前没测到的那条路）
+
+    @Test("备份失败（目录不可写 → 改名失败）→ 返回 nil，原文件原地不动、不留半成品")
+    func backupFailureReturnsNilAndKeepsOriginal() throws {
+        // root 无视文件权限，这条用例在 root 下无法构造失败，跳过（避免伪失败）。
+        guard getuid() != 0 else { return }
+
+        let dir = try makeTempDir()
+        let original = "{ 坏但还没被移走的数据"
+        let file = try write(original, named: "locked.json", in: dir)
+
+        // 把目录设成只读（r-x）：改名（`moveItem`）需要对目录的写权限，于是必然 EACCES，
+        // 正好把我们送进 `backupCorrupt` 的 catch 分支。defer 恢复权限，否则临时目录清不掉。
+        try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: dir.path)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: dir.path) }
+
+        let backup = PersistFile.backupCorrupt(file, reason: "test")
+
+        #expect(backup == nil, "改名失败必须返回 nil——不能谎报「已备份」")
+        #expect(FileManager.default.fileExists(atPath: file.path),
+                "备份失败时原文件必须原地不动，绝不能出现「既没备份成功、原件又没了」")
+        #expect(try String(contentsOf: file, encoding: .utf8) == original,
+                "失败路径不得改动原文件字节")
+        #expect(try backups(ofFile: file).isEmpty, "失败的备份不该留下任何 .corrupt 残留")
+    }
+
+    @Test("文件不存在：返回 nil，且不创建任何东西")
+    func backupWhenFileMissingReturnsNil() throws {
+        let dir = try makeTempDir()
+        let missing = dir.appendingPathComponent("never-existed.json")
+
+        let backup = PersistFile.backupCorrupt(missing, reason: "test")
+
+        #expect(backup == nil, "没有文件可备份时必须返回 nil")
+        #expect(!FileManager.default.fileExists(atPath: missing.path), "不该凭空造出一个文件")
+        #expect(try backups(ofFile: missing).isEmpty, "不该凭空造出一个备份")
+    }
+
+    @Test("解码失败但备份也失败：仍返回 nil，且原文件仍在（不谎报、不销毁）")
+    func decodeFailureWithFailedBackupLeavesFile() throws {
+        guard getuid() != 0 else { return }
+
+        let dir = try makeTempDir()
+        let original = "{ 解不出、也移不走"
+        let file = try write(original, named: "recent.json", in: dir)
+        try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: dir.path)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: dir.path) }
+
+        struct Box: Codable { var value: Int }
+        let decoded = PersistFile.decodeOrBackup(
+            data: try Data(contentsOf: file), type: Box.self, fileURL: file, reason: "recent.json"
+        )
+
+        #expect(decoded == nil, "坏数据一律解出 nil，与备份成败无关")
+        #expect(FileManager.default.fileExists(atPath: file.path),
+                "备份失败时原文件还在——调用方据此知道「这次没能留档」")
+        #expect(try String(contentsOf: file, encoding: .utf8) == original)
+        #expect(try backups(ofFile: file).isEmpty)
+    }
 }
 
 @Suite("损坏存储的解码后备（三个持久化调用点）")
