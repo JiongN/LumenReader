@@ -32,6 +32,8 @@ struct ThumbnailPane: View {
     private static let renderQueue = DispatchQueue(label: "com.jn.lumen.thumbnail", qos: .utility)
 
     var body: some View {
+        // 卡顿自检：body 每次求值都记一次（不能做成 ViewModifier——见 JankAudit 注释）。
+        let _ = Jank.tick(.thumbnailPaneBody)
         Group {
             if bridge.unitCount == 0 {
                 SidebarEmptyState(
@@ -117,6 +119,8 @@ struct ThumbnailPane: View {
             if LaunchOptions.thumbnailReport {
                 NSLog("[Lumen][thumb] 渲染第 \(index + 1) 页")
             }
+            // 卡顿自检：记一次「真的渲染了一张缩略图」（滚动时若它每步都在涨，说明侧栏在重渲）。
+            Jank.tick(.thumbnailRender)
             let image = provider(index, size)
             DispatchQueue.main.async {
                 pending.remove(index)

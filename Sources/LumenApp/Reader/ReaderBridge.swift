@@ -67,6 +67,12 @@ final class ReaderBridge: ObservableObject {
 
     /// 缩略图提供者（PDF 专用）
     var thumbnailProvider: ((Int, CGSize) -> NSImage?)?
+    /// 卡顿自检（`--jank-report`）用：真正被滚动的那个视图（PDF 侧是 `PDFView`）。
+    ///
+    /// 取 `NSView` 而不是 `PDFView`：桥不做 PDFKit 的决策，由自检自己转型。
+    /// 它存在的唯一理由是——滚动驱动的宿主在 `ReaderContainerView`（它管布局），
+    /// 而 PDFView 由 `PDFReaderView` 持有；跨这一层需要一个不含业务语义的把手。
+    var jankScrollSurface: (() -> NSView?)?
     /// 全书检索。给定问题，返回最相关的若干片段及各自定位符，用于把提问从
     /// 「当前这一屏」扩展到「整本书」——不引向量库，靠关键词检索 + 定位符引用
     /// 就能让回答可追溯，这是阅读场景下性价比最高的做法。
@@ -150,6 +156,7 @@ final class ReaderBridge: ObservableObject {
         isScannedDocument = false
         ocrRunningPage = nil
         thumbnailProvider = nil
+        jankScrollSurface = nil
         retrieveProvider = nil
         slicesProvider = nil
         goTo = nil

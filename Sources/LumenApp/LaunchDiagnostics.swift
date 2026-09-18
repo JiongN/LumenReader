@@ -296,6 +296,28 @@ enum LaunchOptions {
     /// 优化本身要能被证伪——关掉它、重新跑一遍，读数必须变差；否则那段优化就是装饰。
     static var perfThumbnailUnbounded: Bool { flag("--perf-thumbnail-unbounded") }
 
+    /// 连续交互卡顿自检：`--jank-report 1`。
+    ///
+    /// 与 `--perf-report` 分工不同：`--perf-report` 量**单次**渲染/翻页代价（结论是都不慢），
+    /// 它覆盖不到「拖动分隔线 / 触控板滚动」这类**连续动作**——那里的卡顿来自
+    /// 「每一帧要重算多少次重活」，而不是单次有多慢。本通道用 60Hz 定时器的迟到量
+    /// 当掉帧代理，并统计每条热路径每步被重算了几次。
+    static var jankReport: Bool { flag("--jank-report") }
+
+    /// 卡顿自检每一段的步数：`--jank-steps 60`。默认 60（约 1 秒 @60Hz 的连续动作）。
+    static var jankSteps: Int {
+        guard let raw = value(for: "--jank-steps"), let n = Int(raw), n > 0 else { return 60 }
+        return n
+    }
+
+    /// **证伪开关**：关掉拖动期宽度写入的「按显示刷新合并」：`--jank-no-coalesce 1`。
+    ///
+    /// 合并打开时，一个显示帧内的多个指针事件只应用一次；关掉之后每次写入都直接落状态。
+    /// 同一台机器、同一个驱动下重跑 `--jank-report 1`，「每步重活」应当从 ~1/步 回到
+    /// ~3/步（本机每帧模拟 3 次指针写入）——这就证明读数变化确实来自合并本身，
+    /// 而不是环境或噪声。
+    static var jankNoCoalesce: Bool { flag("--jank-no-coalesce") }
+
     /// 文档装好后自动执行一个动作，然后把剪贴板回读出来：`--run-action copyFullText`。
     ///
     /// 复制这类功能的产出去向是**剪贴板**，不是界面——截多少张图都证明不了

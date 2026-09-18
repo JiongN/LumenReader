@@ -1142,6 +1142,28 @@ final class AnnotatedPDFView: PDFView {
     /// `menu(for:)` 只读它。默认空闲。
     var ocrMenuDescriptor: OCRMenuDescriptor = .idle
 
+    // MARK: 卡顿自检
+
+    /// 卡顿自检：统计 PDFView 每步重排了几次。
+    ///
+    /// 它是「拖动分隔线 → 阅读区每帧重排 → PDFKit 重光栅化」这条链路的**第一环**：
+    /// 如果一步拖动换来的是一次 `layout`，而其中又开着 `autoScales`，PDFKit 就会
+    /// 为新的宽度重新绘制当前页——那正是手感抖动的来源。
+    override func layout() {
+        Jank.tick(.pdfViewLayout)
+        super.layout()
+    }
+
+    /// 卡顿自检：统计 PDFView 每步重绘了几次。
+    ///
+    /// `layout` 只说明「框变了」，`draw` 才说明「真的把内容重画了一遍」。拖动分隔线时
+    /// 若两者一起涨，就坐实了「每帧重排 + 每帧重光栅化」这条链路；若只有 `layout` 涨、
+    /// `draw` 不涨，那重光栅化其实是 PDFKit 在别处懒做的，优化点也就不在这一层。
+    override func draw(_ dirtyRect: NSRect) {
+        Jank.tick(.pdfViewDraw)
+        super.draw(dirtyRect)
+    }
+
     // MARK: 鼠标手势 → 拖动 / 单击来源
 
     override func mouseDown(with event: NSEvent) {

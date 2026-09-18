@@ -14,6 +14,8 @@ struct SidebarColumn: View {
     @State private var query: String = ""
 
     var body: some View {
+        // 卡顿自检：body 每次求值都记一次（不能做成 ViewModifier——见 JankAudit 注释）。
+        let _ = Jank.tick(.sidebarBody)
         VStack(spacing: 0) {
             // 页签之间交叉淡入。
             //

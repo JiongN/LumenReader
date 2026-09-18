@@ -21,6 +21,9 @@ struct AIPanelView: View {
     @State private var isAgentEditorVisible = false
 
     var body: some View {
+        // 卡顿自检：body 每次求值都记一次。必须写在这里（而不是做成 ViewModifier）——
+        // 修饰符对「值相等的节点」会被复用，tick 只在首帧跑一次，计数恒为 0（本轮踩过）。
+        let _ = Jank.tick(.aiPanelBody)
         VStack(spacing: 0) {
             header
             divider

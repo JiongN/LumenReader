@@ -33,9 +33,15 @@ struct ReaderContainerView: View {
     /// 整棵失效——阅读区（PDFKit / WKWebView）与两块 `.regularMaterial` 都在其中，
     /// 表现就是拖动手感抖动。松手时由 `PanelResizeHandle` 提交一次。
     ///
+    /// 交由 `LivePanelWidth` 持有并**按显示刷新合并**：指针事件率高于屏幕刷新率
+    /// （触控板 90–120Hz、游戏鼠标上千 Hz），每个事件都重排 + 重光栅化是拖动手感抖动的
+    /// 直接来源（实测「每帧 3 次指针写入 → 3 次 PDFView 重光栅化」）。详见 `LivePanelWidth`。
+    ///
     /// 它**不是**第二份真相源：仅在一个手势期间有效，手势结束立刻置回 nil，
     /// 之后一律读设置。所以「双击复位」这类外部改动照旧实时生效。
-    @State private var liveAIPanelWidth: Double?
+    @StateObject private var livePanelWidth = LivePanelWidth(
+        coalescesFrames: !LaunchOptions.jankNoCoalesce
+    )
     /// 容器（窗口内容区）的可用宽度。面板上限要按它动态收窄。
     @State private var containerWidth: CGFloat = 0
 
@@ -44,6 +50,9 @@ struct ReaderContainerView: View {
     private var chat: AIChatModel { state.chat }
 
     var body: some View {
+        // 卡顿自检：三栏整棵树每次重排都会走到这里。必须写在 body 里而不是做成 ViewModifier——
+        // 修饰符对「值相等的节点」会被复用，tick 只在首帧跑一次，计数恒为 0（本轮踩过）。
+        let _ = Jank.tick(.containerBody)
         HStack(spacing: 0) {
             // 图标栏常驻（沉浸模式除外）：内容面板可以收起，切页签的入口不能跟着消失。
             if !state.isImmersive {
@@ -106,7 +115,7 @@ struct ReaderContainerView: View {
             if state.isAIPanelVisible && !state.isImmersive {
                 PanelResizeHandle(
                     committedWidth: aiPanelWidth,
-                    liveWidth: $liveAIPanelWidth,
+                    liveWidth: liveWidthBinding,
                     range: aiPanelRange,
                     defaultWidth: UISettings.PanelWidth.aiDefault,
                     panelIsLeading: false,
@@ -161,7 +170,16 @@ struct ReaderContainerView: View {
     private var aiPanelIsVisible: Bool { state.isAIPanelVisible && !state.isImmersive }
 
     /// AI 面板用户这一刻「想要」的宽度：拖动中用即时值，否则用落库值。
-    private var aiPanelDemand: Double { liveAIPanelWidth ?? settings.ui.aiPanelWidth }
+    private var aiPanelDemand: Double { livePanelWidth.value ?? settings.ui.aiPanelWidth }
+
+    /// 分隔线用的即时宽度绑定。读的是**已应用**值；写走 `LivePanelWidth.submit`，
+    /// 由它按显示刷新合并（不是在绑定这层直接落状态，否则合并就白做了）。
+    private var liveWidthBinding: Binding<Double?> {
+        Binding(
+            get: { self.livePanelWidth.value },
+            set: { self.livePanelWidth.submit($0) }
+        )
+    }
 
     /// 三栏此刻的显示宽度。
     ///
@@ -233,10 +251,37 @@ struct ReaderContainerView: View {
     /// 必须等文档真的装好之后再动手——阅读视图在 `prepare()` 里会调 `bridge.reset()`，
     /// 早于它插入的状态会被清掉，自检就会得到「浮层没出现」这种假结论。
     private func applyLaunchDiagnostics() async {
+        // 侧栏页签**先**钉住，再跑后面的自检。
+        //
+        // 顺序很重要：卡顿自检的滚动阶段要量的正是「位置回调每帧重建缩略图/批注侧栏」
+        // 这条链路（team-lead 的假设之一）。若等滚动跑完才切页签，量到的就是「侧栏收起时」
+        // 的滚动——恰好绕开了最可能存在的那条重活路径，读数会假绿。
+        if let raw = LaunchOptions.sidebarTab, let tab = SidebarTab(rawValue: raw) {
+            bridge.sidebarTab = tab
+        }
+
+        // 页签切换是一次 SwiftUI 状态变更，要让侧栏（缩略图面板）真的挂载起来，
+        // 得先还它一个 runloop 周期；否则滚动阶段量的是「侧栏还没出现」的窗口。
+        if LaunchOptions.jankReport {
+            try? await Task.sleep(nanoseconds: 800_000_000)
+        }
+
         // 面板宽度响应式自检：等布局稳定后写一次宽度，断言布局真的跟着变。
         // 必须挂在这里（文档装好、视图出现之后）——启动早期写入测不到响应式链路。
         if LaunchOptions.resizeReport {
             await ResizeAudit.run(state: state)
+        }
+
+        // 连续交互卡顿自检：驱动真实的滚动 / 拖动，量主线程停顿与每步重活（`--jank-report 1`）。
+        // 挂在这里（文档装好、视图出现之后）——启动早期驱动测不到「装好之后的手感」。
+        if LaunchOptions.jankReport {
+            await JankAudit.run(
+                scrollSurface: bridge.jankScrollSurface ?? { nil },
+                setLiveWidth: { livePanelWidth.submit($0) },
+                committedWidth: aiPanelWidth,
+                range: aiPanelRange,
+                steps: LaunchOptions.jankSteps
+            )
         }
 
         // 「重新生成」自检：需要文档装好（上下文来自 bridge），所以挂在这里
@@ -252,13 +297,10 @@ struct ReaderContainerView: View {
             || LaunchOptions.jumpToUnit != nil
             || LaunchOptions.smartOutline
             || LaunchOptions.exitFullScreenAfter != nil
+            || LaunchOptions.jankReport
         guard needsWork else { return }
 
         try? await Task.sleep(nanoseconds: 1_000_000_000)
-
-        if let raw = LaunchOptions.sidebarTab, let tab = SidebarTab(rawValue: raw) {
-            bridge.sidebarTab = tab
-        }
 
         if LaunchOptions.injectsDemoSelection {
             // 拖动来源：浮条应当出现。这里显式标 true，是为了让这条自检在「只拖动才弹」

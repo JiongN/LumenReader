@@ -14,7 +14,10 @@ struct PDFKitRepresentable: NSViewRepresentable {
     }
 
     func updateNSView(_ nsView: PDFView, context: Context) {
-        // 状态同步全部走 Controller 的命令方法，不需要在这里处理
+        // 状态同步全部走 Controller 的命令方法，不需要在这里处理。
+        // 卡顿自检：记一次「这一步 SwiftUI 把 PDFKit 这个 representable 重算了一遍」
+        // ——拖动分隔线时若它每步都跑，说明阅读区在跟着重排。
+        Jank.tick(.updateNSView)
     }
 }
 
@@ -247,6 +250,11 @@ struct PDFReaderView: View {
     private func wireDocumentWideProviders() {
         let bridge = self.bridge
 
+        // 卡顿自检的滚动驱动需要拿到真正被滚动的 PDFView。
+        if LaunchOptions.jankReport {
+            bridge.jankScrollSurface = { [weak controller] in controller?.view }
+        }
+
         bridge.retrieveProvider = { [weak controller] query in
             guard let controller else { return [] }
             var seenPages = Set<Int>()
@@ -309,6 +317,8 @@ struct PDFReaderView: View {
 
         controller.onPositionChange = { [weak controller] page, count in
             guard count > 0 else { return }
+            // 卡顿自检：记一次位置回调（滚动时若它每步都发，说明滚动在推 SwiftUI 状态）。
+            Jank.tick(.positionCallback)
             let progress = Double(page + 1) / Double(count)
 
             bridge.positionLabel = "第 \(page + 1) / \(count) 页"

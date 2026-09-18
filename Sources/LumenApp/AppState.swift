@@ -141,6 +141,12 @@ final class AppState: ObservableObject {
             self.settingsStore.suppressSave = true
         }
 
+        // 自检用：卡顿自检会驱动真实的滚动/拖动，阅读位置与面板宽度都会高频变动。
+        // 同样是「只改内存、不落盘」，保证跑完不覆盖用户的真实配置。
+        if LaunchOptions.jankReport {
+            self.settingsStore.suppressSave = true
+        }
+
         // 自检用：把 AI 服务商临时指向本机的桩服务。走的是和设置页**同一份**内存配置
         // （providers + activeProviderID），所以「智能目录真的能拿到配置并发出请求」
         // 这条链路是被完整验到的，而不是在测一个只为自检存在的旁路。
