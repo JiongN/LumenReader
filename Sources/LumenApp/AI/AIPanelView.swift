@@ -187,29 +187,36 @@ struct AIPanelView: View {
         let providers = state.settingsStore.ai.providers
         let modelLabel = config.map { $0.selectedModel.isEmpty ? $0.name : $0.selectedModel } ?? "未配置"
 
-        return Menu {
-            if providers.isEmpty {
-                Button("尚未添加服务商") { openSettingsAndActivate() }
-            } else {
-                ForEach(providers) { provider in
-                    providerMenuEntry(provider)
+        return HStack(spacing: 4) {
+            // 状态点在最左，和 Menu 并排——不能塞进 Menu 的 label 里（见 chipContent）
+            statusDot(configured ? DS.Palette.success : DS.Palette.warning)
+
+            Menu {
+                if providers.isEmpty {
+                    Button("尚未添加服务商") { openSettingsAndActivate() }
+                } else {
+                    ForEach(providers) { provider in
+                        providerMenuEntry(provider)
+                    }
                 }
+
+                Divider()
+
+                Button("AI 与阅读设置…") { openSettingsAndActivate() }
+            } label: {
+                chipContent(
+                    text: modelLabel,
+                    // 80 而不是 132：让它连上槽位上限（`modelSlotMinWidth` = 108），
+                    // chip 才不会反过来去挤输入框。完整模型名交给下面的 `.help`。
+                    maxTextWidth: 80
+                )
             }
-
-            Divider()
-
-            Button("AI 与阅读设置…") { openSettingsAndActivate() }
-        } label: {
-            chip(
-                dotColor: configured ? DS.Palette.success : DS.Palette.warning,
-                text: modelLabel,
-                // 80 而不是 132：让它连上槽位上限（`modelSlotMinWidth` = 108），
-                // chip 才不会反过来去挤输入框。完整模型名交给下面的 `.help`。
-                maxTextWidth: 80
-            )
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
         }
-        .menuStyle(.borderlessButton)
-        .menuIndicator(.hidden)
+        // 胶囊外壳挂在 Menu 外面（挂在 label 里不落色，见 ChipShell 的注释）。
+        // 放在 .frame(minWidth:) 之前，胶囊才是「贴着内容」而不是被拉满 108pt。
+        .modifier(ChipShell())
         // 不给 layoutPriority（输入框优先拿宽度），但**必须给最小宽度**——
         // 只靠 layoutPriority，可截断的文本会被压到 0 宽，chip 就整个消失了。
         .layoutPriority(0)
@@ -289,10 +296,11 @@ struct AIPanelView: View {
 
             Button("编辑提示词…") { isTemplateEditorVisible = true }
         } label: {
-            chip(dotColor: nil, text: activeTemplateName, icon: "text.badge.checkmark")
+            chipContent(text: activeTemplateName, icon: "text.badge.checkmark")
         }
         .menuStyle(.borderlessButton)
         .menuIndicator(.hidden)
+        .modifier(ChipShell())
         // 不挂 .fixedSize()：那样这一行在 300pt 下限下会整体溢出面板右边界，
         // 把行尾的收起按钮顶出去（实测 maxX=1340.2 > 面板 1340.0）。
         // 改成「可压缩 + 有下限」，超长模板名截断、完整名字交给 .help。
@@ -310,46 +318,51 @@ struct AIPanelView: View {
         let activeID = state.settingsStore.ai.activeAgentID
         let active = agents.first { $0.id == activeID }
 
-        return Menu {
-            Button {
-                state.settingsStore.ai.activeAgentID = nil
-                noteRerunAvailability("已改为不用 Agent")
-            } label: {
-                if activeID == nil {
-                    Label("不用 Agent", systemImage: "checkmark")
-                } else {
-                    Text("不用 Agent")
-                }
-            }
+        return HStack(spacing: 4) {
+            // 联网中的 Agent 才亮这一点；「不用 Agent」与不联网的 Agent 都不挂灯。
+            statusDot(active?.usesWebSearch == true ? DS.Palette.accent : nil)
 
-            Divider()
-
-            ForEach(agents) { agent in
+            Menu {
                 Button {
-                    selectAgent(agent)
+                    state.settingsStore.ai.activeAgentID = nil
+                    noteRerunAvailability("已改为不用 Agent")
                 } label: {
-                    // 联网检索是「会走出去的动作」，标在菜单里让人一眼看见自己选的是哪一个
-                    let suffix = agent.usesWebSearch ? "（联网）" : ""
-                    if agent.id == activeID {
-                        Label("\(agent.name)\(suffix)", systemImage: "checkmark")
+                    if activeID == nil {
+                        Label("不用 Agent", systemImage: "checkmark")
                     } else {
-                        Text("\(agent.name)\(suffix)")
+                        Text("不用 Agent")
                     }
                 }
+
+                Divider()
+
+                ForEach(agents) { agent in
+                    Button {
+                        selectAgent(agent)
+                    } label: {
+                        // 联网检索是「会走出去的动作」，标在菜单里让人一眼看见自己选的是哪一个
+                        let suffix = agent.usesWebSearch ? "（联网）" : ""
+                        if agent.id == activeID {
+                            Label("\(agent.name)\(suffix)", systemImage: "checkmark")
+                        } else {
+                            Text("\(agent.name)\(suffix)")
+                        }
+                    }
+                }
+
+                Divider()
+
+                Button("管理 Agent…") { isAgentEditorVisible = true }
+            } label: {
+                chipContent(
+                    text: active?.name ?? "Agent",
+                    icon: "person.crop.circle.badge.checkmark"
+                )
             }
-
-            Divider()
-
-            Button("管理 Agent…") { isAgentEditorVisible = true }
-        } label: {
-            chip(
-                dotColor: active?.usesWebSearch == true ? DS.Palette.accent : nil,
-                text: active?.name ?? "Agent",
-                icon: "person.crop.circle.badge.checkmark"
-            )
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
         }
-        .menuStyle(.borderlessButton)
-        .menuIndicator(.hidden)
+        .modifier(ChipShell())
         // 同 templateMenu：可压缩 + 有下限，换掉会让 header 行溢出的 .fixedSize()。
         .frame(minWidth: Self.headerChipMinWidth, maxWidth: Self.headerChipMaxWidth)
         .help("切换 Agent：角色、技能与联网检索")
@@ -387,23 +400,23 @@ struct AIPanelView: View {
         state.showToast("\(prefix)：点「重新生成」可按新配置重跑当前内容")
     }
 
-    /// chip 的统一外形。
+    /// chip 的**内容**（图标 + 文本），作为 `Menu` 的 label。
     ///
-    /// 「状态点」做成可选是有意的：服务商有「配没配好」要表达，模板没有对应状态，
-    /// 那就不要挂一个永远亮着的假指示灯——用户会以为它在表示什么。
+    /// 里面**不能放自绘 Shape（圆点）、background 或 overlay**：macOS 上
+    /// `Menu`（borderlessButton 样式）只保留 label 里的 `Text` 与 `Image`，
+    /// 其余一概丢掉。逐点取色验证过两件事——写成 label 的
+    /// `.background(Capsule().fill(surfaceRaised))` 取不到任何底色，
+    /// `Circle().fill(...)` 状态点也一个像素都取不到。
+    /// 所以外壳（ChipShell）与状态点（statusDot）都必须挂在 Menu **外面**。
     ///
     /// - Parameter maxTextWidth: 文本最大宽度；给了就截断（`.truncationMode(.middle)`），
     ///   chip 因此不会无限变宽、挤压同行的其它控件。完整文字交给 `.help`。
-    private func chip(
-        dotColor: Color?,
+    private func chipContent(
         text: String,
         icon: String? = nil,
         maxTextWidth: CGFloat? = nil
     ) -> some View {
         HStack(spacing: 4) {
-            if let dotColor {
-                Circle().fill(dotColor).frame(width: 5, height: 5)
-            }
             if let icon {
                 Image(systemName: icon).font(DS.Typo.ui(size: 9.5))
             }
@@ -414,10 +427,37 @@ struct AIPanelView: View {
                 .frame(maxWidth: maxTextWidth, alignment: .leading)
         }
         .foregroundStyle(DS.Palette.textSecondary)
-        .padding(.horizontal, DS.Space.s)
-        .padding(.vertical, 3)
-        .background(Capsule().fill(DS.Palette.surfaceRaised))
-        .overlay(Capsule().strokeBorder(DS.Palette.separator, lineWidth: 0.5))
+    }
+
+    /// chip 左侧的状态点（服务商「配没配好」、Agent「要不要联网」）。
+    ///
+    /// 做成可选是有意的：模板没有对应状态，那就不要挂一个永远亮着的假指示灯——
+    /// 用户会以为它在表示什么。传 nil 就整枚不出现。
+    ///
+    /// 必须放在 `Menu` 外面，理由见 `chipContent`。
+    @ViewBuilder
+    private func statusDot(_ color: Color?) -> some View {
+        if let color {
+            Circle().fill(color).frame(width: 5, height: 5)
+        }
+    }
+
+    /// chip 的胶囊外壳（内边距 + 底色 + 描边）。
+    ///
+    /// **必须挂在 `Menu` 外面，不能挂在它的 label 里**。实测（--capture-screen 1，
+    /// 2x 逐点取色）：写成 label 的 `.background(Capsule().fill(surfaceRaised))`
+    /// 时，填充与面板材质背景同为 #F4F4F4，连 0.5pt 描边都取不到——
+    /// 「模型切换按钮」在界面上只剩一串裸字，看不出它是可以点的。
+    /// 同款写法用在非 Menu 的视图上（气泡头像、页码徽章）是正常的，
+    /// 所以这是 Menu（borderlessButton 样式）自己的事，不是颜色的问题。
+    struct ChipShell: ViewModifier {
+        func body(content: Content) -> some View {
+            content
+                .padding(.horizontal, DS.Space.s)
+                .padding(.vertical, 3)
+                .background(DS.Palette.surfaceRaised, in: Capsule())
+                .overlay(Capsule().strokeBorder(DS.Palette.separator, lineWidth: 0.5))
+        }
     }
 
     private func activate(_ provider: AIProviderConfig, model: String? = nil) {
@@ -721,6 +761,10 @@ struct AIPanelView: View {
             RoundedRectangle(cornerRadius: DS.Radius.s, style: .continuous)
                 .fill(DS.Palette.accentSoft)
         )
+        // 几何可外部核对：300pt 下限下这枚「当前选中」条不能被挤换行、也不能
+        // 探出面板右边界（它内部是「图标 + 截断文本 + Spacer + 关闭」，理论上
+        // 只截断不溢出，但 300pt 是人工没法稳定复现的档位，交给探针守）。
+        .layoutProbe("aiSelectionChip")
     }
 
     // MARK: - 动作

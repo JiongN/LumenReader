@@ -247,6 +247,7 @@ struct ReaderContainerView: View {
         let needsWork = LaunchOptions.sidebarTab != nil
             || LaunchOptions.injectsDemoSelection
             || LaunchOptions.injectsDemoClick
+            || LaunchOptions.injectsDemoAnswer
             || LaunchOptions.runAction != nil
             || LaunchOptions.jumpToUnit != nil
             || LaunchOptions.smartOutline
@@ -277,6 +278,13 @@ struct ReaderContainerView: View {
                 locator: .pdf(page: 0, charOffset: 0)
             )
             bridge.selectionFromDrag = false
+        }
+
+        if LaunchOptions.injectsDemoAnswer {
+            // 长文本排版自检：注入一条含长 URL / 长代码行 / 长标识符的假回答。
+            // 注入后等一拍再截图，让「跟随到底部」的滚动落定。
+            state.chat.seedDemoAnswer()
+            try? await Task.sleep(nanoseconds: 600_000_000)
         }
 
         if let raw = LaunchOptions.runAction {

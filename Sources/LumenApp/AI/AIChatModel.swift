@@ -624,6 +624,47 @@ final class AIChatModel: ObservableObject {
         bubbles.append(Bubble(role: .notice, text: text))
     }
 
+    // MARK: - 自检注入
+
+    /// 自检专用：塞一条**假的 AI 回答**（`--demo-answer 1`）。
+    ///
+    /// 存在的理由：长 URL / 长代码行会不会横向撑破面板，只有真有这种内容才看得出来，
+    /// 而自检跑在离线环境里、模型根本不会返回任何东西。注入的内容刻意挑三种
+    /// 「不好断行」的形态各一份：
+    /// - 一条 120+ 字符、没有任何空格的 URL；
+    /// - 一行 180+ 字符的代码；
+    /// - 一个 100 字符的连续标识符。
+    /// 三者都不许把面板撑宽——URL 与标识符靠 `Text` 的字符级断行，代码行走
+    /// 自己的横向滚动区（`MarkdownText` 的 `.code` 分支）。
+    func seedDemoAnswer() {
+        bubbles = [
+            Bubble(role: .user, text: "这篇论文的复现材料在哪？把关键实现也贴一下。"),
+            Bubble(role: .assistant, text: Self.demoAnswerText)
+        ]
+        // 跟着滚到底部：注入后应当停在最后一条上（followTail 的默认行为），
+        // 这样截图一定能拍到注入内容，而不是停在旧位置。
+        draft = ""
+    }
+
+    static let demoAnswerText = """
+    ## 复现材料
+
+    - 论文主页（长 URL，无空格，不许撑破面板）：
+      https://openreview.net/forum?id=AbCdEf1234567890AbCdEf1234567890&referrer=%5Bthe%20profile%20of%20a%20user%5D%28%2Fprofile%3Fid%3D~Some_Authors1%29
+    - 数据集标识符（100 字符连续 token）：
+      dataset_v3_final_augmented_2026_09_17_baseline_reproduction_without_curriculum_learning_shard_00042
+
+    关键实现（一行 180+ 字符，走横向滚动，不许撑破面板）：
+
+    ```python
+    def reproduce(model, dataset, seed=42, temperature=0.7, top_p=0.95, max_new_tokens=2048, batch_size=8, gradient_accumulation_steps=4, use_flash_attention_2=True):
+        return model.generate(dataset, seed=seed, temperature=temperature, top_p=top_p, batch_size=batch_size)
+    ```
+
+    第 3 步的说明也刻意写长一点：这一段是普通段落，用来核对中文长句在面板
+    下限宽度下的换行是否自然、有没有出现「一个字一行」的挤换行。
+    """
+
     // MARK: - 展示文本
 
     private static func userDisplayText(task: AITask, selection: ReaderSelection?) -> String {

@@ -133,6 +133,13 @@ enum LaunchOptions {
     /// 只要有人把这道门删掉，`--demo-click` 立刻会红，断言抓的就是这个。
     static var injectsDemoClick: Bool { flag("--demo-click") }
 
+    /// 塞一条假的 AI 回答：`--demo-answer 1`。
+    ///
+    /// 用来核对长文本排版（长 URL / 长代码行 / 长标识符在面板下限宽度下会不会
+    /// 横向撑破面板、换行自不自然）。离线自检里模型不会返回任何内容，
+    /// 不注入就永远审不到这条路径。内容见 `AIChatModel.demoAnswerText`。
+    static var injectsDemoAnswer: Bool { flag("--demo-answer") }
+
     /// 自检用：启动后直接进入沉浸模式，核对「面板全收 + 正文居中限宽」。
     static var startsImmersive: Bool { flag("--immersive") }
 
