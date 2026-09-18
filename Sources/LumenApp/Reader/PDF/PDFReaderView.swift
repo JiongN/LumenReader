@@ -225,6 +225,10 @@ struct PDFReaderView: View {
         if LaunchOptions.searchReport {
             await AnnotationAudit.runSearchAudit(sourceURL: document.url)
         }
+        // PDF 浏览性能自检：连翻若干页、报耗时分布与内存增量（`--perf-report 1`）。
+        if LaunchOptions.perfReport {
+            await PDFPerfAudit.run(controller: controller)
+        }
     }
 
     private static func metadata(of pdf: PDFDocument) -> DocumentMetadata {

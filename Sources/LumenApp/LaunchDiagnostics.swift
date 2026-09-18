@@ -274,6 +274,28 @@ enum LaunchOptions {
     /// 浮层与阅读区的 frame 都按窗口内容区坐标（`.global`）上报。
     static var layoutReport: Bool { flag("--layout-report") }
 
+    /// PDF 浏览性能自检：`--perf-report 1`。
+    ///
+    /// 存在的理由：用户报「翻页卡顿」，但「卡」是个主观描述——没有读数就只能凭感觉改，
+    /// 改完也不知道有没有变好、甚至可能只是把瓶颈从一个地方挪到另一个。本通道让进程
+    /// 自己连翻 N 页，逐页记耗时并报 p50/p95/max，同时报首尾进程内存（`phys_footprint`）
+    /// 的增量。它同时是**可证伪**的：会把「带回调」与「摘掉回调」两遍都跑一遍，
+    /// 两者之差就是「我们这一层自己的每页开销」——差值接近 0 就说明瓶颈在 PDFKit 里，
+    /// 不该往我们这层使劲。
+    static var perfReport: Bool { flag("--perf-report") }
+
+    /// 翻页自检要翻多少页：`--perf-pages 120`。默认 120（覆盖测试用的 120 页长文档）。
+    /// 文档本身不足这么多页时按实际页数钳制。
+    static var perfPageTurns: Int {
+        guard let raw = value(for: "--perf-pages"), let n = Int(raw), n > 0 else { return 120 }
+        return n
+    }
+
+    /// 证伪开关：让缩略图自检**不做** LRU 上限（`--perf-thumbnail-unbounded 1`）。
+    ///
+    /// 优化本身要能被证伪——关掉它、重新跑一遍，读数必须变差；否则那段优化就是装饰。
+    static var perfThumbnailUnbounded: Bool { flag("--perf-thumbnail-unbounded") }
+
     /// 文档装好后自动执行一个动作，然后把剪贴板回读出来：`--run-action copyFullText`。
     ///
     /// 复制这类功能的产出去向是**剪贴板**，不是界面——截多少张图都证明不了

@@ -135,6 +135,12 @@ final class AppState: ObservableObject {
                   + "（侧栏分量 \(Int(panel.sidebar))pt 已废弃，侧栏固定 \(Int(UISettings.PanelWidth.sidebarDefault))pt）")
         }
 
+        // 自检用：性能自检会连翻若干页、反复进出缩略图，阅读位置会高频变动。
+        // 关掉落盘，保证无论这条链路以后会不会碰设置，都不会覆盖用户的真实配置。
+        if LaunchOptions.perfReport {
+            self.settingsStore.suppressSave = true
+        }
+
         // 自检用：把 AI 服务商临时指向本机的桩服务。走的是和设置页**同一份**内存配置
         // （providers + activeProviderID），所以「智能目录真的能拿到配置并发出请求」
         // 这条链路是被完整验到的，而不是在测一个只为自检存在的旁路。
