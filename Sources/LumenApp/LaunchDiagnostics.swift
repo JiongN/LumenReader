@@ -326,6 +326,53 @@ enum LaunchOptions {
     /// 纯读、不写设置（配合 `suppressSave`）。
     static var jankWatch: Bool { flag("--jank-watch") }
 
+    /// 合成滚动每步的像素增量：`--jank-scroll-delta 1900`。默认见 `JankAudit.defaultScrollDelta`。
+    ///
+    /// 存在的理由：真机触控板滚动的进程 CPU 是合成驱动的好几倍（见 `JankAudit.realMachineCPUPerStepMs`），
+    /// 在本地用轻量驱动迭代等于「测不到要优化的那个负载」。调大它可以把每步要光栅化的新区域拉大，
+    /// 从而把 CPU/步 顶到真机的量级（实测会饱和，见 VERIFY.md 第七节）。
+    static var jankScrollDelta: Int? {
+        guard let raw = value(for: "--jank-scroll-delta"), let n = Int(raw), n > 0 else { return nil }
+        return n
+    }
+
+    /// 合成滚动每步投几个滚轮事件：`--jank-scroll-burst 8`（默认 1）。
+    ///
+    /// 真触控板在一个显示帧里会送来**一串**事件（≈90–120Hz，高于 60Hz 屏幕），而旧驱动
+    /// 每帧只投一个。这个开关把一步的总位移**拆成 N 个小事件**在同一帧内投完，
+    /// 用来验证「事件串」本身会不会触发 PDFKit 的响应式滚动/预取（实测见 VERIFY.md 第七节）。
+    static var jankScrollBurst: Int? {
+        guard let raw = value(for: "--jank-scroll-burst"), let n = Int(raw), n > 0 else { return nil }
+        return min(n, 64)
+    }
+
+    /// 滚动段把 `scaleFactor` 钉在指定值：`--jank-scroll-zoom 2.0`。
+    ///
+    /// 倍率越大，每帧要重光栅化的页面像素越多——这是把合成驱动推满的另一个手段，
+    /// 也用来验证「CPU/步 随倍率怎样变化」（真机在高倍率下更容易卡）。
+    static var jankScrollZoom: Double? {
+        guard let raw = value(for: "--jank-scroll-zoom"), let n = Double(raw), n > 0 else { return nil }
+        return n
+    }
+
+    // MARK: - PDF 渲染旋钮（滚动卡顿的优化面）
+
+    /// 页面投影开关：`--pdf-page-shadows 0|1`。不传 = 用默认（开，与改造前一致）。
+    static var pdfPageShadows: Bool? { optionalFlag("--pdf-page-shadows") }
+
+    /// 页间留白开关：`--pdf-page-breaks 0|1`。不传 = 用默认（开，与改造前一致）。
+    static var pdfPageBreaks: Bool? { optionalFlag("--pdf-page-breaks") }
+
+    /// **一键切到「瘦身件」**：`--pdf-render-slim 1`（关投影 + 关页间留白）。
+    /// 单变量对照的「关掉两个」那一格靠它；三个旋钮已被实测证伪，默认**不开**（见 `PDFRenderTuning`）。
+    static var pdfRenderSlim: Bool { flag("--pdf-render-slim") }
+
+    /// 渲染保真自检：`--pdf-render-report 1`。
+    ///
+    /// 把渲染状态钉死（跳到第 1 页 + 适宽倍率）并打印本次采用的三个旋钮，配合 `--capture`
+    /// 就能得到「同页同倍率、只有旋钮不同」的可逐像素对比的两张图。见 VERIFY.md 第七节。
+    static var pdfRenderReport: Bool { flag("--pdf-render-report") }
+
     /// 文档装好后自动执行一个动作，然后把剪贴板回读出来：`--run-action copyFullText`。
     ///
     /// 复制这类功能的产出去向是**剪贴板**，不是界面——截多少张图都证明不了

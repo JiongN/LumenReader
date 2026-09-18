@@ -73,14 +73,25 @@ final class PDFController: NSObject, ObservableObject {
         view.displayMode = .singlePageContinuous
         view.displayDirection = .vertical
         view.displaysAsBook = false
-        view.displaysPageBreaks = true
+        // —— 渲染三旋钮（滚动卡顿的优化面）——
+        //
+        // 由 `PDFRenderTuning.current` 统一决定，默认 = **原样**（PDFKit 默认 + .high）。
+        // 三个旋钮已被单变量实测证伪（省不下 CPU），所以默认不改渲染；
+        // `--pdf-render-slim 1` / 单项开关只是留作复跑对照。见 `PDFRenderTuning` 与 VERIFY.md 第七节。
+        let tuning = PDFRenderTuning.current
+        view.pageShadowsEnabled = tuning.pageShadows
+        view.displaysPageBreaks = tuning.pageBreaks
+        view.interpolationQuality = tuning.interpolation
+
         view.pageBreakMargins = NSEdgeInsets(top: 14, left: 0, bottom: 14, right: 0)
         view.autoScales = true
         view.minScaleFactor = 0.2
         view.maxScaleFactor = 8.0
         // 打开时不要让 PDFKit 自作主张地缩小到「适宽」以外的倍率
         view.scaleFactor = 1.0
-        view.interpolationQuality = .high
+
+        NSLog("[Lumen][pdf] 渲染旋钮：\(tuning.summary)"
+            + (tuning.isBaseline ? "（默认·与改造前一致）" : "（非默认：被开关覆盖，见 --pdf-render-slim / --pdf-page-*）"))
     }
 
     func applyAppearance(theme: ReadingTheme, brightness: Double) {

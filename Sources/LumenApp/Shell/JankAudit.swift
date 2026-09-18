@@ -169,6 +169,36 @@ enum JankAudit {
     /// 多次写入合并掉，计数就不会翻——这直接决定「合并写入」这个优化值不值得做。
     static let pointerWritesPerFrame = 3
 
+    /// 合成滚动每步的像素增量（可用 `--jank-scroll-delta` 覆盖）。
+    ///
+    /// 为什么默认值不再是 30：**驱动必须重到能复现被测负载**。真机触控板滚动（用户实机
+    /// `--jank-watch`）的进程 CPU 是 **≈50–57ms/帧**（见 `realMachineCPUPerStepMs`），
+    /// 而旧的「30px/步」合成驱动只有 **≈10ms/步**——比真机轻 5 倍，在它上面迭代等于
+    /// 「测不到要优化的那个负载」。
+    ///
+    /// 为什么定在 1900：实测（VERIFY.md 第七节）CPU/步 随 delta **次线性增长并很快饱和**
+    /// （960px→18.6ms、1900px→22.8ms、3800px→22.4ms）。1900 ≈ 适宽倍率下一整页的高度
+    /// （842pt × 2.27 ≈ 1911px），即「每步跨过一整页」——这是饱和点，再加大只是白滚。
+    static let defaultScrollDelta = 1900
+
+    /// 合成滚动每步投几个滚轮事件（`--jank-scroll-burst`，默认 1）。
+    ///
+    /// 真触控板一帧内会送**一串**事件；`burst` 把一步的总位移拆成 N 个小事件在同一帧内投完。
+    /// 结果是**中性**的（实测 burst 1/4/16 的 CPU/步 基本无差），见 VERIFY.md 第七节——
+    /// 这一条本身是个有用的否定结论：PDFKit 的响应式滚动预取不是靠「事件串」触发的。
+    static let defaultScrollBurst = 1
+
+    /// 真机触控板滚动的 CPU 量级，用作合成驱动的**对照基准**。
+    ///
+    /// 来源：用户实机 `--jank-watch` 日志，活跃段连续两个窗口 2 秒各烧掉 **5953ms / 6841ms**
+    /// 进程 CPU，而每个窗口里有 **120 帧**（60Hz × 2s）→ **≈50–57ms CPU/帧**。
+    /// 合成驱动每步 ≈ 一帧，所以这就是「每步 CPU」应当逼近的目标。取中值 53.5。
+    ///
+    /// ⚠️ 诚实交代：那一对窗口与并发的基准跑有重叠，**峰值可能被争抢放大**（team-lead 已说明）。
+    /// 所以本通道把「与真机的倍数」当**参考**而不是验收线——本机合成驱动实测**最多只到 0.42×**
+    /// （见 `defaultScrollDelta` 的饱和说明），能不能到真机量级要用户实机复跑确认。
+    static let realMachineCPUPerStepMs: Double = 53.5
+
     static func run(
         scrollSurface: @escaping () -> NSView?,
         liveWidth: (any LiveWidthApplying)?,
@@ -268,10 +298,21 @@ enum JankAudit {
     // MARK: 滚动
 
     private static func measureScroll(pdfView: PDFView, meter: MainStallMeter, steps: Int) async {
+        // 合成驱动的强度：每步位移（`--jank-scroll-delta`，默认见 `defaultScrollDelta`，现为 1900px）。
+        // 它决定「每步要光栅化多少新区域」，是把 CPU/步 顶到真机量级的主要手段。
+        let delta = CGFloat(LaunchOptions.jankScrollDelta ?? defaultScrollDelta)
+
+        // 倍率：另一个强度旋钮。要重光栅化的页面像素 ∝ 倍率²，所以高倍率下更容易复现真机的饱和。
+        if let zoom = LaunchOptions.jankScrollZoom {
+            let clamped = min(max(CGFloat(zoom), pdfView.minScaleFactor), pdfView.maxScaleFactor)
+            pdfView.scaleFactor = clamped
+            NSLog("[Lumen][jank] 滚动：倍率钉在 \(String(format: "%.2f", pdfView.scaleFactor))（--jank-scroll-zoom）")
+        }
+
         // 方向自适应：不同系统 / 触控板的「自然滚动」设置会翻转滚轮事件的符号约定。
         // 写死符号的话，在一半的机器上「往下滚」实际是「往上滚」——文档已在顶部，
         // 于是怎么投事件都滚不动，计数全 0 还自称「通过」（本轮踩过）。
-        let sign = await detectScrollSign(pdfView)
+        let sign = await detectScrollSign(pdfView, delta: delta)
 
         // 归零到文档开头，保证每一轮从同一起点出发（读数可比）。
         pdfView.document.map { doc in
@@ -280,16 +321,29 @@ enum JankAudit {
         try? await Task.sleep(nanoseconds: 300_000_000)
 
         let offsetBefore = scrollOffsetY(pdfView)
-        let pageBefore = currentPageIndex(pdfView)
+        let pageBefore = viewportPageIndex(pdfView)
+        let burst = LaunchOptions.jankScrollBurst ?? defaultScrollBurst
 
         JankTally.shared.reset()
         let cpuBefore = processCPUSeconds()
         meter.start()
+        // 末尾空转检测：短文档会被大 delta 几步滚到底，之后的步骤只是「撞底不动」——
+        // 那些步几乎不产生重活，会把 CPU/步 稀释掉，读起来像「滚动变轻了」。
+        // 不能让它默默发生，所以要数出来并在收尾处说穿。
+        var stalledSteps = 0
+        var lastOffset = offsetBefore
         for _ in 0..<steps {
-            scrollStep(pdfView: pdfView, deltaY: CGFloat(sign) * 30)
+            // 把一步的总位移拆成 N 个小事件在同一帧内投完，模拟真触控板「一帧一串事件」。
+            for _ in 0..<burst {
+                scrollStep(pdfView: pdfView, deltaY: CGFloat(sign) * delta / CGFloat(burst))
+            }
             await awaitFrame()
+            let now = scrollOffsetY(pdfView)
+            if now == lastOffset { stalledSteps += 1 } else { stalledSteps = 0 }
+            lastOffset = now
         }
-        NSLog("[Lumen][jank] 滚动：投完 \(steps) 步时 页码=\(currentPageIndex(pdfView).map(String.init) ?? "?")"
+        NSLog("[Lumen][jank] 滚动：投完 \(steps) 步（每步 \(Int(delta))px × \(burst) 事件、倍率 "
+            + String(format: "%.2f", pdfView.scaleFactor) + "）时 页=\(viewportPageIndex(pdfView).map(String.init) ?? "?")"
             + " 偏移=\(fmt(scrollOffsetY(pdfView)))（落定后的回调还没发生，下面等惯性）")
         // 关键：投完事件不能立刻收尾。带精确增量的滚轮会进入「响应式滚动 / 惯性」，
         // PDFKit 的页码变更通知要等滚动落定才发——立刻读计数会全 0（本轮踩过）。
@@ -300,13 +354,34 @@ enum JankAudit {
         let cpuSeconds = processCPUSeconds() - cpuBefore
 
         let offsetAfter = scrollOffsetY(pdfView)
-        let pageAfter = currentPageIndex(pdfView)
+        // 页号两端都用**视口几何**换算（与 `pageBefore` 一致）：`PDFView.currentPage` 要等滚动
+        // 落定才更新，用它做「前/后」一端会和另一端不同口径，自证行读起来会自相矛盾。
+        let pageAfter = viewportPageIndex(pdfView)
         report(phase: "滚动", samples: samples, counts: counts, steps: steps, cpuSeconds: cpuSeconds)
+
+        if stalledSteps > 5 {
+            NSLog("[Lumen][jank] 滚动：⚠️ 末尾有 \(stalledSteps) 步没有位移——驱动已滚到文档末尾在空转，"
+                + "这些步几乎不产生重活，CPU/步 被稀释，本段只反映前半段。"
+                + "请换更大文档，或调小 `--jank-scroll-delta`。")
+        }
+
+        // 驱动强度自证：**报出这次驱动有多重**。没有它，「CPU/步」这个数就无从判断
+        // 「这次到底有没有跑到真机的量级」——而所有结论都建立在那上面。
+        let cpuPerStep = cpuSeconds * 1000 / Double(max(steps, 1))
+        NSLog(String(
+            format: "[Lumen][jank] 滚动驱动强度：CPU %.1fms/步；真机触控板实测 ≈ %.1fms/帧"
+                + "（2 秒烧 5.9–6.8s / 120 帧）。本次为真机的 %.2f×。",
+            cpuPerStep, realMachineCPUPerStepMs, cpuPerStep / realMachineCPUPerStepMs
+        ))
+        if cpuPerStep < realMachineCPUPerStepMs * 0.5 {
+            NSLog("[Lumen][jank] 滚动：⚠️ 合成驱动只有真机的 \(String(format: "%.2f", cpuPerStep / realMachineCPUPerStepMs))×"
+                + "——它比真机**轻**，在它上面得出的「不卡」不能代表真机。"
+                + "要逼近真机可加大：`--jank-scroll-delta`、`--jank-scroll-zoom`。")
+        }
 
         // 解释一行：主线程停顿低 ≠ 没干活。PDFKit 的分页光栅化常在**后台线程**上做，
         // 主线程停顿与 PDFView.draw 都量不到它，只有「进程 CPU 时间」看得见。
         // 这一行专门防止把「主线程不卡」误读成「滚动很轻」。
-        let cpuPerStep = cpuSeconds * 1000 / Double(max(steps, 1))
         let stallP95 = stats(samples).p95
         if cpuPerStep > 4 && stallP95 < 4 {
             NSLog(String(
@@ -328,7 +403,7 @@ enum JankAudit {
 
     /// 探一次滚轮符号：试着滚一下，看偏移有没有前进。两个方向都不动就退回 +1
     /// （此时「没滚动」会被自证那句挑明，而不是伪装成一次干净的 0 卡顿）。
-    private static func detectScrollSign(_ pdfView: PDFView) async -> Int32 {
+    private static func detectScrollSign(_ pdfView: PDFView, delta: CGFloat) async -> Int32 {
         guard let doc = pdfView.document, doc.pageCount > 0 else { return 1 }
         logScrollEventOnce(pdfView)
         for candidate in [Int32(-1), Int32(1)] {
@@ -336,7 +411,7 @@ enum JankAudit {
             try? await Task.sleep(nanoseconds: 150_000_000)
             let before = scrollOffsetY(pdfView)
             for _ in 0..<10 {
-                scrollStep(pdfView: pdfView, deltaY: CGFloat(candidate) * 30)
+                scrollStep(pdfView: pdfView, deltaY: CGFloat(candidate) * delta)
                 await awaitFrame()
             }
             if scrollOffsetY(pdfView) != before { return candidate }
@@ -347,6 +422,20 @@ enum JankAudit {
     /// PDFView 内部滚动视图的纵向偏移。拿它作滚动动没动的判据，比只看页码灵敏得多。
     fileprivate static func scrollOffsetY(_ pdfView: PDFView) -> CGFloat? {
         firstScrollView(in: pdfView)?.contentView.bounds.origin.y
+    }
+
+    /// 视口中心此刻落在哪一页（0-based）。
+    ///
+    /// 为什么不用 `PDFView.currentPage`：它是「跨过视口垂直中线的那一页」，而且要等滚动
+    /// **落定**才更新。真机日志里出现 `页=0` 而偏移一直在变，就是它没跟上——
+    /// 日志上没法把「哪一秒卡」和「卡在哪一页」对上。这里改用**几何换算**：
+    /// 取视口中心点，交给 `page(for:nearest:)` 反查页，滚动中即连续更新。
+    /// 视口中心对「翻页方向」不敏感，也不需要判断 view 是否 flipped。
+    static func viewportPageIndex(_ pdfView: PDFView) -> Int? {
+        guard let doc = pdfView.document else { return nil }
+        let probe = NSPoint(x: pdfView.bounds.midX, y: pdfView.bounds.midY)
+        guard let page = pdfView.page(for: probe, nearest: true) else { return nil }
+        return doc.index(for: page)
     }
 
     private static func firstScrollView(in view: NSView) -> NSScrollView? {
@@ -407,11 +496,6 @@ enum JankAudit {
             + " contentView.bounds=\(NSStringFromRect(sv?.contentView.bounds ?? .zero))"
             + " documentView.frame=\(NSStringFromRect(sv?.documentView?.frame ?? .zero))"
             + " hasVerticalScroller=\(sv?.hasVerticalScroller ?? false)")
-    }
-
-    fileprivate static func currentPageIndex(_ pdfView: PDFView) -> Int? {
-        guard let doc = pdfView.document, let page = pdfView.currentPage else { return nil }
-        return doc.index(for: page)
     }
 
     // MARK: 拖动
@@ -687,7 +771,9 @@ final class JankWatch {
         lastCPUSeconds = cpuSeconds
 
         let pdfView = surface?() as? PDFView
-        let page = pdfView.flatMap { JankAudit.currentPageIndex($0) }
+        // 页号用**视口几何**换算，而不是 `PDFView.currentPage`：后者要等滚动落定才更新，
+        // 真机日志里出现过「页=0 而偏移一直在变」，那样没法把尖峰和位置对上（见 `viewportPageIndex`）。
+        let page = pdfView.flatMap { JankAudit.viewportPageIndex($0) }
         let offset = pdfView.flatMap { JankAudit.scrollOffsetY($0) }
 
         let perCounter = JankCounter.allCases.map { counter -> String in
@@ -698,11 +784,15 @@ final class JankWatch {
         lastCounts = counts
 
         let elapsed = Double(DispatchTime.now().uptimeNanoseconds - startTick.uptimeNanoseconds) / 1_000_000_000
+        // 化成「几个核」：窗口时长按实际采样数算（≈2s）。真机那次尖峰就是 5953ms/2s ≈ 3 个核，
+        // 这个数一眼能看出「是不是真的饱和了」，比裸毫秒直观得多。
+        let windowSeconds = Double(samples.count) * MainStallMeter.frameMs / 1000
+        let cores = windowSeconds > 0 ? cpuDeltaMs / (windowSeconds * 1000) : 0
         let line = String(
-            format: "+%.1fs 停顿 p50=%.2f p95=%.2f max=%.2f >16.7ms=%d/%d(%.0f%%) | CPU +%.0fms | 页=%@ 偏移=%@ | %@",
+            format: "+%.1fs 停顿 p50=%.2f p95=%.2f max=%.2f >16.7ms=%d/%d(%.0f%%) | CPU +%.0fms (%.1f 核) | 页=%@ 偏移=%@ | %@",
             elapsed, s.p50, s.p95, s.max, over, samples.count,
             samples.isEmpty ? 0 : Double(over) / Double(samples.count) * 100,
-            cpuDeltaMs,
+            cpuDeltaMs, cores,
             page.map(String.init) ?? "?",
             JankAudit.fmt(offset),
             perCounter
@@ -726,10 +816,18 @@ final class JankWatch {
         let file = """
         ========================================
         jank watch 开始 @ \(stamp)
-        每 \(Int(windowSeconds))s 一行。读数含义：停顿=60Hz 定时器迟到量(ms)，>16.7ms 即掉帧；
-        计数器=该窗口内的增量（body/ai/side/thumbBody/update/layout/draw/thumbR/pos）；
-        CPU=该窗口内进程所有线程的 CPU 时间增量(ms)。
-        用法：正常上下滚动触控板 15–20s，再拖动右侧 AI 面板分隔线 15–20s，然后 ⌘Q 退出。
+        每 \(Int(windowSeconds))s 一行。读数含义：
+          停顿  = 60Hz 定时器迟到量(ms)，>16.7ms 即掉帧；p50/p95/max 与占比都给
+          CPU   = 该窗口内**进程所有线程**的 CPU 时间增量(ms)——与线程无关，后台光栅化只有它看得见
+          页    = 视口中心所在页（滚动中即更新）
+          偏移  = 内部滚动视图的纵向偏移
+          计数器= 该窗口内的增量（body/ai/side/thumbBody/update/layout/draw/thumbR/pos）
+
+        【主要动作】上下滚动触控板 15–20s。这是本通道主要被测的负载。
+        【可选动作】再拖动右侧 AI 面板分隔线 15–20s。
+                    ⚠️ **没拖也没关系**：那段时间所有计数会全 0、看起来像「空闲」，
+                    那是「什么都没做」，不是「卡顿」，可以直接忽略。
+        交互完 ⌘Q 退出。
         ========================================
         """
         write(file)

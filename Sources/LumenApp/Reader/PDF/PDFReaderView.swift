@@ -232,6 +232,11 @@ struct PDFReaderView: View {
         if LaunchOptions.perfReport {
             await PDFPerfAudit.run(controller: controller)
         }
+        // 渲染保真自检：把渲染状态钉死（固定页 + 适宽倍率），好让两次不同旋钮的运行
+        // 截出可直接逐像素比的图（`--pdf-render-report 1`，配合 `--capture`）。
+        if LaunchOptions.pdfRenderReport {
+            await PDFRenderAudit.run(controller: controller)
+        }
     }
 
     private static func metadata(of pdf: PDFDocument) -> DocumentMetadata {
