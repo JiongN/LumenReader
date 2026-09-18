@@ -318,6 +318,14 @@ enum LaunchOptions {
     /// 而不是环境或噪声。
     static var jankNoCoalesce: Bool { flag("--jank-no-coalesce") }
 
+    /// **被动监视**：`--jank-watch 1`。
+    ///
+    /// 与 `--jank-report` 相反——它**不驱动任何东西**，正常启动、正常运行，只在后台把
+    /// 卡顿埋点每 2 秒汇总一行写到 `/tmp/lumen-jank-watch.log`，交给用户用**真触控板**
+    /// 产生手势来复现。合成事件复现不了连续惯性滚动，所以把「产生手势」还给人。
+    /// 纯读、不写设置（配合 `suppressSave`）。
+    static var jankWatch: Bool { flag("--jank-watch") }
+
     /// 文档装好后自动执行一个动作，然后把剪贴板回读出来：`--run-action copyFullText`。
     ///
     /// 复制这类功能的产出去向是**剪贴板**，不是界面——截多少张图都证明不了

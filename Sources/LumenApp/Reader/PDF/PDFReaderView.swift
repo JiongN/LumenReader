@@ -250,8 +250,8 @@ struct PDFReaderView: View {
     private func wireDocumentWideProviders() {
         let bridge = self.bridge
 
-        // 卡顿自检的滚动驱动需要拿到真正被滚动的 PDFView。
-        if LaunchOptions.jankReport {
+        // 卡顿自检 / 被动监视都要拿到真正被滚动的 PDFView。
+        if LaunchOptions.jankReport || LaunchOptions.jankWatch {
             bridge.jankScrollSurface = { [weak controller] in controller?.view }
         }
 

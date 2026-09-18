@@ -20,6 +20,21 @@ enum JankCounter: String, CaseIterable {
     case pdfViewDraw = "PDFView.draw(重绘)"
     case thumbnailRender = "缩略图渲染"
     case positionCallback = "onPositionChange"
+
+    /// watch 日志里的短名（那一行要塞下所有计数器的增量，长名会撑爆）。
+    var short: String {
+        switch self {
+        case .containerBody: return "body"
+        case .aiPanelBody: return "ai"
+        case .sidebarBody: return "side"
+        case .thumbnailPaneBody: return "thumbBody"
+        case .updateNSView: return "update"
+        case .pdfViewLayout: return "layout"
+        case .pdfViewDraw: return "draw"
+        case .thumbnailRender: return "thumbR"
+        case .positionCallback: return "pos"
+        }
+    }
 }
 
 /// 计数累加器。用锁而不是 `@MainActor`：`PDFView.layout` 理论上可能被非主线程触发，
@@ -54,6 +69,7 @@ final class JankTally {
 /// 计数恒为 0（本轮踩过）；直接写在 body 里的语句才每次求值都执行。
 enum Jank {
     static let isEnabled = CommandLine.arguments.contains("--jank-report")
+        || CommandLine.arguments.contains("--jank-watch")
 
     static func tick(_ counter: JankCounter) {
         guard isEnabled else { return }
@@ -150,6 +166,8 @@ enum JankAudit {
         // 阅读视图是异步装好的（PDF 要先解析），挂钩子可能晚于本自检启动。
         // 轮询等它出现，别用固定 sleep 赌时序——赌输了会静默跳过整个滚动阶段。
         if let pdfView = await waitForScrollSurface(scrollSurface) as? PDFView {
+            logEnvironment(pdfView)
+            await verifyDrawCounter(pdfView)
             await measureScroll(pdfView: pdfView, meter: meter, steps: steps)
         } else {
             NSLog("[Lumen][jank] 滚动：等不到 PDFView（可能是 EPUB 或文档未装好），跳过")
@@ -166,6 +184,55 @@ enum JankAudit {
 
         // 收尾：把宽度释放回「不在拖」的状态（走与手势结束同一条路径）。
         setLiveWidth(nil)
+    }
+
+    // MARK: 第一步：证伪「计数器 / 环境」是否可信
+
+    /// 打印窗口与 App 的可见性状态。
+    ///
+    /// 存在的理由：AppKit 的 **responsive scrolling** 在窗口不可见 / 被遮挡时会把绘制
+    /// 推迟（走 overdraw，甚至把滚动搬到后台线程）。若自检跑在「窗口不在屏上」的条件下，
+    /// 「滚动没触发重绘」就只是环境产物，不能当作「滚动不卡」的证据。
+    private static func logEnvironment(_ pdfView: PDFView) {
+        let window = pdfView.window
+        let visible = window?.occlusionState.contains(.visible) ?? false
+        NSLog("[Lumen][jank] 环境：窗口 \(window == nil ? "无" : "有")"
+            + " key=\(window?.isKeyWindow ?? false) visible=\(window?.isVisible ?? false)"
+            + " occlusionVisible=\(visible) appActive=\(NSApp.isActive)"
+            + " layerBacked=\(pdfView.wantsLayer)")
+    }
+
+    /// 计数器自检：**强制一次确定会发生**的重绘，确认 `PDFView.draw` 真的会 +1。
+    ///
+    /// 存在的理由：如果这个计数器在任何场景下都恒为 0，那滚动段的读数一律作废——
+    /// 必须先排除「计数器坏了」，再谈「滚动到底重绘没重绘」。
+    /// 顺带说清楚它**覆盖不到**什么：`draw(_:)` 只在 AppKit 认为这一层需要重画时被调用
+    /// （例如视图 frame 变化）。PDFKit 翻页 / 滚动时的**分页光栅化走的是内部文档视图
+    /// 的 tiled/layer 绘制路径**，不经过 `PDFView.draw(_:)`——所以本计数器量不到它。
+    private static func verifyDrawCounter(_ pdfView: PDFView) async {
+        JankTally.shared.reset()
+        let before = JankTally.shared.snapshot()[.pdfViewDraw] ?? 0
+        pdfView.needsDisplay = true
+        pdfView.displayIfNeeded()
+        let after = JankTally.shared.snapshot()[.pdfViewDraw] ?? 0
+        let ok = after > before
+        NSLog("[Lumen][jank] 计数器自检（强制重绘）：PDFView.draw \(before) → \(after) "
+            + (ok ? "✅ 能亮" : "❌ 恒为 0——本计数器不可信，滚动段读数作废"))
+        NSLog("[Lumen][jank] 计数器覆盖范围：PDFView.draw 只反映「view 被要求重画」"
+            + "（frame 变化等）；PDFKit 翻页/滚动的分页光栅化走内部文档视图的 tiled/layer 路径，"
+            + "**不经此计数器**——所以滚动段 draw=0 不能推出「滚动没重绘」。")
+    }
+
+    /// 进程累计 CPU 时间（所有线程，user+system）。用它当**与线程无关**的工作量旁证：
+    /// 若滚动把光栅化丢到后台线程，主线程停顿会是 0，但进程 CPU 时间照样涨。
+    /// 主线程停顿低 + 进程 CPU 也低，才是「真的没干活」。
+    static func processCPUSeconds() -> Double {
+        var usage = rusage()
+        guard getrusage(RUSAGE_SELF, &usage) == 0 else { return 0 }
+        func seconds(_ tv: timeval) -> Double {
+            Double(tv.tv_sec) + Double(tv.tv_usec) / 1_000_000
+        }
+        return seconds(usage.ru_utime) + seconds(usage.ru_stime)
     }
 
     /// 最多等 10s 让滚动宿主出现（300ms 一次）。
@@ -195,6 +262,7 @@ enum JankAudit {
         let pageBefore = currentPageIndex(pdfView)
 
         JankTally.shared.reset()
+        let cpuBefore = processCPUSeconds()
         meter.start()
         for _ in 0..<steps {
             scrollStep(pdfView: pdfView, deltaY: CGFloat(sign) * 30)
@@ -208,10 +276,25 @@ enum JankAudit {
         try? await Task.sleep(nanoseconds: 500_000_000)
         let samples = meter.stop()
         let counts = JankTally.shared.snapshot()
+        let cpuSeconds = processCPUSeconds() - cpuBefore
 
         let offsetAfter = scrollOffsetY(pdfView)
         let pageAfter = currentPageIndex(pdfView)
-        report(phase: "滚动", samples: samples, counts: counts, steps: steps)
+        report(phase: "滚动", samples: samples, counts: counts, steps: steps, cpuSeconds: cpuSeconds)
+
+        // 解释一行：主线程停顿低 ≠ 没干活。PDFKit 的分页光栅化常在**后台线程**上做，
+        // 主线程停顿与 PDFView.draw 都量不到它，只有「进程 CPU 时间」看得见。
+        // 这一行专门防止把「主线程不卡」误读成「滚动很轻」。
+        let cpuPerStep = cpuSeconds * 1000 / Double(max(steps, 1))
+        let stallP95 = stats(samples).p95
+        if cpuPerStep > 4 && stallP95 < 4 {
+            NSLog(String(
+                format: "[Lumen][jank] 滚动：⚠️ 主线程停顿低（p95=%.2fms）但进程 CPU 高（%.2fms/步）"
+                    + "——重活在后台线程（PDFKit 分页光栅化），主线程停顿与本通道的 draw 计数都覆盖不到它。"
+                    + "「滚动不卡」不能由本段读数推出。",
+                stallP95, cpuPerStep
+            ))
+        }
 
         // 驱动自证：滚动事件真的把文档滚动了。偏移与页码都看——
         // 偏移是连续的，一个 300px 小步就动；页码要跨过一整页才变，量级太粗。
@@ -241,7 +324,7 @@ enum JankAudit {
     }
 
     /// PDFView 内部滚动视图的纵向偏移。拿它作滚动动没动的判据，比只看页码灵敏得多。
-    private static func scrollOffsetY(_ pdfView: PDFView) -> CGFloat? {
+    fileprivate static func scrollOffsetY(_ pdfView: PDFView) -> CGFloat? {
         firstScrollView(in: pdfView)?.contentView.bounds.origin.y
     }
 
@@ -253,7 +336,7 @@ enum JankAudit {
         return nil
     }
 
-    private static func fmt(_ value: CGFloat?) -> String {
+    fileprivate static func fmt(_ value: CGFloat?) -> String {
         value.map { String(format: "%.0f", $0) } ?? "?"
     }
 
@@ -305,7 +388,7 @@ enum JankAudit {
             + " hasVerticalScroller=\(sv?.hasVerticalScroller ?? false)")
     }
 
-    private static func currentPageIndex(_ pdfView: PDFView) -> Int? {
+    fileprivate static func currentPageIndex(_ pdfView: PDFView) -> Int? {
         guard let doc = pdfView.document, let page = pdfView.currentPage else { return nil }
         return doc.index(for: page)
     }
@@ -335,6 +418,7 @@ enum JankAudit {
         }
 
         JankTally.shared.reset()
+        let cpuBefore = processCPUSeconds()
         meter.start()
         setLiveWidth(from)
         await awaitFrame()
@@ -359,8 +443,9 @@ enum JankAudit {
         }
         let samples = meter.stop()
         let counts = JankTally.shared.snapshot()
+        let cpuSeconds = processCPUSeconds() - cpuBefore
 
-        report(phase: "拖动", samples: samples, counts: counts, steps: steps)
+        report(phase: "拖动", samples: samples, counts: counts, steps: steps, cpuSeconds: cpuSeconds)
         NSLog("[Lumen][jank] 拖动驱动自证：宽度 \(Int(widthBefore))pt → \(Int(from))…\(Int(to))pt，"
             + "每帧 \(pointerWritesPerFrame) 次指针写入（走的是与真实手势同一条 liveWidth 写入路径）")
     }
@@ -380,7 +465,8 @@ enum JankAudit {
         phase: String,
         samples: [Double],
         counts: [JankCounter: Int],
-        steps: Int
+        steps: Int,
+        cpuSeconds: Double
     ) {
         let s = stats(samples)
         let over = samples.filter { $0 > stallBudgetMs }.count
@@ -392,6 +478,13 @@ enum JankAudit {
               phase, stallBudgetMs, over, samples.count,
               samples.isEmpty ? 0 : Double(over) / Double(samples.count) * 100)
 
+        // 进程 CPU 时间增量（所有线程）：与主线程停顿互为旁证。
+        // 主线程停顿低 + CPU 增量也低 = 真的没干活；主线程停顿低但 CPU 增量高 = 活被丢到了后台线程。
+        NSLog(String(
+            format: "[Lumen][jank] %@：进程 CPU 时间增量 %.0fms（%.2fms/步，含所有线程）",
+            phase, cpuSeconds * 1000, cpuSeconds * 1000 / Double(max(steps, 1))
+        ))
+
         // 每步重活：把总次数除以步数，得到「一步发生几次」——比总数更能指认元凶。
         let perStep = JankCounter.allCases.map { counter -> String in
             let total = counts[counter] ?? 0
@@ -401,14 +494,14 @@ enum JankAudit {
         NSLog("[Lumen][jank] %@：每步重活（总次数 + 每步均次）  " + perStep.joined(separator: "  "), phase)
     }
 
-    private struct Stats {
+    fileprivate struct Stats {
         let p50: Double
         let p95: Double
         let max: Double
         let mean: Double
     }
 
-    private static func stats(_ samples: [Double]) -> Stats {
+    fileprivate static func stats(_ samples: [Double]) -> Stats {
         guard !samples.isEmpty else { return Stats(p50: 0, p95: 0, max: 0, mean: 0) }
         let sorted = samples.sorted()
         func percentile(_ p: Double) -> Double {
@@ -418,5 +511,160 @@ enum JankAudit {
         let mean = samples.reduce(0, +) / Double(samples.count)
         return Stats(p50: percentile(0.5), p95: percentile(0.95),
                      max: sorted.last ?? 0, mean: mean)
+    }
+}
+
+// MARK: - 被动监视（真机手势）
+
+/// `--jank-watch 1`：**不驱动任何东西**，正常启动、正常运行，只在后台把卡顿埋点
+/// 定期落成日志，交给用户用**真触控板**产生手势来复现。
+///
+/// 为什么需要它：合成事件（`CGEvent`）复现不了真实触控板的**连续惯性滚动**——
+/// 那是 AppKit 响应式滚动 + 后台光栅化的组合，进程内手搓不出来。与其硬凑，不如把
+/// 「产生手势」这件事交还给用户，我们只负责把「哪一段出现了停顿尖峰、那一段的重活计数」
+/// 记下来。
+///
+/// 开销纪律（否则埋点本身就成了被测对象）：
+/// - 计数走 `JankTally`（`NSLock` 自增），**热路径里不做字符串拼接、不碰 IO**；
+/// - 日志统一在**每 2 秒**的汇总时刻写一次文件（`FileHandle` 追加），不在绘制/布局路径里写；
+/// - 只读不写：配合 `suppressSave`，跑前跑后 `settings.json` 不变。
+@MainActor
+final class JankWatch {
+
+    static let shared = JankWatch()
+    static let logPath = "/tmp/lumen-jank-watch.log"
+
+    /// 每个汇总行覆盖的时长（秒）。
+    private let windowSeconds: Double = 2
+
+    private var timer: DispatchSourceTimer?
+    private var started = false
+
+    private var lastTick: DispatchTime = .now()
+    private var startTick: DispatchTime = .now()
+    private var samples: [Double] = []
+    private var tickCount = 0
+    private var windowTickTarget = 0
+
+    private var lastCounts: [JankCounter: Int] = [:]
+    private var lastCPUSeconds: Double = 0
+
+    private var surface: (() -> NSView?)?
+    private var handle: FileHandle?
+
+    func start(surface: @escaping () -> NSView?) {
+        guard !started else { return }
+        started = true
+        self.surface = surface
+        startTick = .now()
+        lastTick = .now()
+        lastCPUSeconds = JankAudit.processCPUSeconds()
+        lastCounts = JankTally.shared.snapshot()
+        windowTickTarget = max(1, Int((windowSeconds * 1000 / MainStallMeter.frameMs).rounded()))
+
+        openLog()
+        writeHeader()
+
+        let interval = MainStallMeter.frameMs / 1000.0
+        let source = DispatchSource.makeTimerSource(queue: .main)
+        source.schedule(deadline: .now() + interval, repeating: interval, leeway: .nanoseconds(0))
+        source.setEventHandler { [weak self] in
+            MainActor.assumeIsolated { self?.tick() }
+        }
+        source.resume()
+        timer = source
+    }
+
+    func stop() {
+        guard started else { return }
+        started = false
+        timer?.cancel()
+        timer = nil
+        try? handle?.close()
+        handle = nil
+    }
+
+    // MARK: 采样
+
+    private func tick() {
+        let now = DispatchTime.now()
+        let deltaMs = Double(now.uptimeNanoseconds - lastTick.uptimeNanoseconds) / 1_000_000
+        lastTick = now
+        samples.append(deltaMs - MainStallMeter.frameMs)
+
+        tickCount += 1
+        if tickCount >= windowTickTarget {
+            flush()
+            tickCount = 0
+            samples.removeAll(keepingCapacity: true)
+        }
+    }
+
+    private func flush() {
+        guard !samples.isEmpty else { return }
+        let s = JankAudit.stats(samples)
+        let over = samples.filter { $0 > JankAudit.stallBudgetMs }.count
+
+        let counts = JankTally.shared.snapshot()
+        let cpuSeconds = JankAudit.processCPUSeconds()
+        let cpuDeltaMs = (cpuSeconds - lastCPUSeconds) * 1000
+        lastCPUSeconds = cpuSeconds
+
+        let pdfView = surface?() as? PDFView
+        let page = pdfView.flatMap { JankAudit.currentPageIndex($0) }
+        let offset = pdfView.flatMap { JankAudit.scrollOffsetY($0) }
+
+        let perCounter = JankCounter.allCases.map { counter -> String in
+            let now = counts[counter] ?? 0
+            let before = lastCounts[counter] ?? 0
+            return "\(counter.short)=\(now - before)"
+        }.joined(separator: " ")
+        lastCounts = counts
+
+        let elapsed = Double(DispatchTime.now().uptimeNanoseconds - startTick.uptimeNanoseconds) / 1_000_000_000
+        let line = String(
+            format: "+%.1fs 停顿 p50=%.2f p95=%.2f max=%.2f >16.7ms=%d/%d(%.0f%%) | CPU +%.0fms | 页=%@ 偏移=%@ | %@",
+            elapsed, s.p50, s.p95, s.max, over, samples.count,
+            samples.isEmpty ? 0 : Double(over) / Double(samples.count) * 100,
+            cpuDeltaMs,
+            page.map(String.init) ?? "?",
+            JankAudit.fmt(offset),
+            perCounter
+        )
+        write(line)
+    }
+
+    // MARK: 文件
+
+    private func openLog() {
+        let path = Self.logPath
+        if !FileManager.default.fileExists(atPath: path) {
+            FileManager.default.createFile(atPath: path, contents: nil)
+        }
+        handle = FileHandle(forWritingAtPath: path)
+        handle?.seekToEndOfFile()
+    }
+
+    private func writeHeader() {
+        let stamp = ISO8601DateFormatter().string(from: Date())
+        let file = """
+        ========================================
+        jank watch 开始 @ \(stamp)
+        每 \(Int(windowSeconds))s 一行。读数含义：停顿=60Hz 定时器迟到量(ms)，>16.7ms 即掉帧；
+        计数器=该窗口内的增量（body/ai/side/thumbBody/update/layout/draw/thumbR/pos）；
+        CPU=该窗口内进程所有线程的 CPU 时间增量(ms)。
+        用法：正常上下滚动触控板 15–20s，再拖动右侧 AI 面板分隔线 15–20s，然后 ⌘Q 退出。
+        ========================================
+        """
+        write(file)
+        NSLog("[Lumen][jank] jank watch 已开启：日志 → \(Self.logPath)（正常交互即可，⌘Q 退出）")
+    }
+
+    private func write(_ line: String) {
+        if let data = (line + "\n").data(using: .utf8) {
+            handle?.write(data)
+        }
+        // 同时打一行到控制台，方便「确认它真的在跑」。
+        NSLog("[Lumen][jank][watch] " + line.replacingOccurrences(of: "\n", with: " / "))
     }
 }

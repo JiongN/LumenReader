@@ -272,11 +272,21 @@ struct ReaderContainerView: View {
             await ResizeAudit.run(state: state)
         }
 
+        // 被动监视（`--jank-watch`）：**不驱动任何东西**，只挂上埋点、每 2 秒把汇总落一行
+        // 到 `/tmp/lumen-jank-watch.log`，交给用户用真触控板产生手势复现。与 `--jank-report`
+        // 相反：这个是「用户产生手势、我们只记录」，专门用来复现合成事件搓不出来的连续惯性滚动。
+        if LaunchOptions.jankWatch {
+            // 闭包**惰性**读 bridge：本函数可能在子视图（PDFReaderView）把 provider 装上之前就跑，
+            // 此刻直接取 `bridge.jankScrollSurface` 会拿到 nil 并永久固化。
+            JankWatch.shared.start(surface: { bridge.jankScrollSurface?() })
+        }
+
         // 连续交互卡顿自检：驱动真实的滚动 / 拖动，量主线程停顿与每步重活（`--jank-report 1`）。
         // 挂在这里（文档装好、视图出现之后）——启动早期驱动测不到「装好之后的手感」。
         if LaunchOptions.jankReport {
             await JankAudit.run(
-                scrollSurface: bridge.jankScrollSurface ?? { nil },
+                // 惰性读：PDFView 由子视图持有、异步装好，直接取值可能拿到 nil。
+                scrollSurface: { bridge.jankScrollSurface?() },
                 setLiveWidth: { livePanelWidth.submit($0) },
                 committedWidth: aiPanelWidth,
                 range: aiPanelRange,

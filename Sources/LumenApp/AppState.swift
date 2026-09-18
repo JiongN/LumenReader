@@ -143,7 +143,9 @@ final class AppState: ObservableObject {
 
         // 自检用：卡顿自检会驱动真实的滚动/拖动，阅读位置与面板宽度都会高频变动。
         // 同样是「只改内存、不落盘」，保证跑完不覆盖用户的真实配置。
-        if LaunchOptions.jankReport {
+        // watch 模式（--jank-watch）是用户正常交互（含拖动分隔线会在松手时提交宽度），
+        // 也一并关掉落盘。
+        if LaunchOptions.jankReport || LaunchOptions.jankWatch {
             self.settingsStore.suppressSave = true
         }
 
