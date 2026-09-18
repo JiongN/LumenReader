@@ -33,14 +33,13 @@ enum PDFPerfAudit {
     /// 单页滚动光栅化耗时的目标上限（ms）。判据同 60Hz 一帧。
     static let frameBudgetMs: Double = 16.7
 
-    /// 连翻 N 页后进程常驻内存的允许增量（MB）。
+    /// 二次遍历常驻内存增量的**参考预算**（MB）。**仅用于对照打印，不作断言**。
     ///
-    /// 判据打在**第二次遍历**的增量上，而不是第一次。理由：第一次把 120 页都访问一遍时，
-    /// PDFKit 会为每页建立渲染缓存（首次渲染的 `phys_footprint` 实测涨了数十 MB），
-    /// 那是**一次性缓存填充**，不是「持续增长」——用户说的「内存持续增长」指的是
-    /// **反复看过的内容还要继续涨**。所以第二次遍历（同样的页、同样的顺序）的增量
-    /// 才是「会不会越用越大」的真正读数：接近 0 才说明没有泄漏。
-    /// 第一次遍历的增量照报（在日志里单独一行），只是不当断言。
+    /// 为什么降级成信息性读数：这个跨遍增量**不可复现**——同机多次实测落在
+    /// −21 / +30 / +68 / +1MB，它由 PDFKit 内部渲染缓存在两遍之间的建立与回收主导，
+    /// 不在我们这层、也压不稳。对一个时好时坏的读数下断言等于抛硬币：绿了不能证明
+    /// 没泄漏，红了也不能证明有泄漏——那比不打这个断言更糟（会误导）。
+    /// 「会不会持续增长」这件事改由**确定性**的 ④（缓存仍驻留的张数）来把关。
     static let footprintBudgetMB: Double = 24
 
     static func run(controller: PDFController) async {
@@ -310,12 +309,13 @@ enum PDFPerfAudit {
             s.p95 <= frameBudgetMs,
             String(format: "实测 p95=%.2fms", s.p95)
         )
-        // 断言打在**第二次遍历**上：它衡量的才是「反复浏览会不会越来越大」。
-        check(
-            String(format: "③ 二次遍历 %d 页的常驻内存增量 ≤ %.0fMB（无持续增长）", turns, footprintBudgetMB),
-            secondPassMB <= footprintBudgetMB,
-            String(format: "实测 %+.1fMB", secondPassMB)
-        )
+        // ③ 内存增量只报不断言。详见 `footprintBudgetMB` 的说明：这个跨遍增量由 PDFKit
+        // 内部缓存 churn 主导，同机多次跑到 −21…+68MB，不可复现；对它下断言等于抛硬币。
+        // 「会不会持续增长」交给**确定性**的 ④（仍驻留的张数）把关。
+        NSLog(String(
+            format: "[Lumen][perf] ③ 二次遍历增量 %+.1fMB（信息性读数；参考预算 ±%.0fMB，非断言）",
+            secondPassMB, footprintBudgetMB
+        ))
         if let capacity = thumbs.capacity {
             check(
                 "④ 缩略图缓存有上限：滚完全本后仍驻留 ≤ \(capacity) 张（内存不随页数增长）",
