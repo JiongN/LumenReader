@@ -284,10 +284,20 @@ struct ReaderContainerView: View {
         // 连续交互卡顿自检：驱动真实的滚动 / 拖动，量主线程停顿与每步重活（`--jank-report 1`）。
         // 挂在这里（文档装好、视图出现之后）——启动早期驱动测不到「装好之后的手感」。
         if LaunchOptions.jankReport {
+            // 拖动段的**环境自证**：拖动是「把即时宽度写成版面」的链路，只有 AI 面板在版面上
+            // 时它才成立。把此刻的三栏状态与可用区间打出来——否则同一份构建换文档/窗口后
+            // 读数突变时，无法判断是「时序」还是「面板根本没在版面上」（本轮踩过）。
+            NSLog("[Lumen][jank] 拖动环境：AI面板可见=\(state.isAIPanelVisible)"
+                + " 侧栏可见=\(state.isSidebarVisible) 沉浸=\(state.isImmersive)"
+                + " 容器宽=\(Int(containerWidth))pt AI面板实宽=\(Int(aiPanelWidth))pt"
+                + " 拖动区间=\(Int(aiPanelRange.lowerBound))…\(Int(aiPanelRange.upperBound))pt")
             await JankAudit.run(
                 // 惰性读：PDFView 由子视图持有、异步装好，直接取值可能拿到 nil。
                 scrollSurface: { bridge.jankScrollSurface?() },
-                setLiveWidth: { livePanelWidth.submit($0) },
+                // 把即时宽度这份**可观察对象**整体交给自检，而不是只给一个 `Set` 闭包：
+                // 自检要能读到「写入次数 / 实际应用次数 / 显示刷新回调次数」，用来把
+                // 「没写」「写了没应用」分开（否则拖动段计数恒 0 时无法判断是不是没等到刷新）。
+                liveWidth: livePanelWidth,
                 committedWidth: aiPanelWidth,
                 range: aiPanelRange,
                 steps: LaunchOptions.jankSteps

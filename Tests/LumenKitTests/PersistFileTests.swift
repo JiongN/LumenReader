@@ -260,6 +260,43 @@ struct CorruptStoreRecoveryTests {
                 "用户真的没配服务商（空数组）是合法状态，不该备份")
     }
 
+    /// 「备份失败之后，调用方还会不会 persist？会不会把原件盖掉？」
+    ///
+    /// 结论：**不会丢数据**——但这是「备份」与「写盘」共用**同目录 rename** 语义的**推论**，
+    /// 不是代码里的显式守卫。本条把这条推论钉成断言，免得将来有人把 `PersistFile.write`
+    /// 从 `.atomic` 换成非原子写（那时备份失败 + 直写成功就会真的覆盖原件，而没人拦）。
+    @Test("备份失败后紧接着一次保存：写盘被同一道权限拦下，损坏原件字节不被覆盖")
+    @MainActor
+    func saveAfterFailedBackupKeepsOriginal() throws {
+        guard getuid() != 0 else { return }
+
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("lumen-store-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let file = dir.appendingPathComponent("recent.json")
+        let original = "{ 坏但必须留住——备份与写盘都发生在同一目录里"
+        try original.write(to: file, atomically: true, encoding: .utf8)
+
+        // 目录只读（r-x）：改名备份与「临时文件 + rename」的原子写都要求目录写权限，
+        // 于是两者被**同一道权限**一起拦下。defer 恢复，否则临时目录清不掉。
+        try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: dir.path)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: dir.path) }
+
+        let store = RecentDocuments(fileURL: file)
+        #expect(store.entries.isEmpty, "坏文件解不出记录")
+        #expect(try backups(nearFile: file).isEmpty, "备份失败不该留下 .corrupt 残留")
+
+        // 用户随后随手打开一本书就会走到这里（record → persist）。
+        store.record(url: URL(fileURLWithPath: "/tmp/whatever.pdf"), kind: .pdf)
+
+        #expect(FileManager.default.fileExists(atPath: file.path))
+        #expect(try String(contentsOf: file, encoding: .utf8) == original,
+                """
+                备份失败时写盘必须同样失败（两者同目录 rename），损坏原件字节原样保留。\
+                这条一旦变红，说明写盘路径不再与备份共享权限语义——那才是真正的「丢了数据」。
+                """)
+    }
+
     @Test("键路径断言：编码后的服务商在 ai.providers（保配置守卫赖以成立的键名）")
     func encodedProvidersLiveAtAIDotProviders() throws {
         var settings = AppSettings()

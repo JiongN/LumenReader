@@ -126,6 +126,24 @@ final class MainStallMeter {
 
 // MARK: - 卡顿自检主体
 
+/// 拖动自检需要对「即时宽度」的两件事：写，以及**证明写真的变成了布局**。
+///
+/// 抽成协议而不是直接依赖 `LivePanelWidth`：自检只在自检模式下跑，
+/// 不该把具体的合并实现硬编进驱动里。
+@MainActor
+protocol LiveWidthApplying: AnyObject {
+    /// 指针写入（`nil` = 手势结束）。
+    func submit(_ value: Double?)
+    /// 立刻把待应用值落下来（不等下一次合并节拍）。自检收尾用它把最后一步坐实。
+    func flushNow()
+    /// 指针写入次数。
+    var submitCount: Int { get }
+    /// `value` **实际改变过**的次数——这才是「触发布局」的次数。
+    var appliedCount: Int { get }
+    /// 合并节拍回调被调用的次数。用来区分「节拍没触发」与「触发了但值没变」。
+    var tickCount: Int { get }
+}
+
 /// 连续交互（拖动分隔线 / 触控板滚动）的卡顿自检：`--jank-report 1`。
 ///
 /// 把「手感卡」拆成两个客观读数：
@@ -153,7 +171,7 @@ enum JankAudit {
 
     static func run(
         scrollSurface: @escaping () -> NSView?,
-        setLiveWidth: @escaping (Double?) -> Void,
+        liveWidth: (any LiveWidthApplying)?,
         committedWidth: Double,
         range: ClosedRange<Double>,
         steps: Int
@@ -175,7 +193,7 @@ enum JankAudit {
 
         // —— 阶段二：拖动分隔线 ——
         await measureDrag(
-            setLiveWidth: setLiveWidth,
+            liveWidth: liveWidth,
             committedWidth: committedWidth,
             range: range,
             meter: meter,
@@ -183,7 +201,10 @@ enum JankAudit {
         )
 
         // 收尾：把宽度释放回「不在拖」的状态（走与手势结束同一条路径）。
-        setLiveWidth(nil)
+        liveWidth?.submit(nil)
+        // 松手也是一次值变化，要让它真的进布局——等一帧，别让进程在布局落定前退出
+        // （退出前那次「值回 nil」若没被消费，下次读到的会是拖动残留态）。
+        await awaitFrame()
     }
 
     // MARK: 第一步：证伪「计数器 / 环境」是否可信
@@ -396,7 +417,7 @@ enum JankAudit {
     // MARK: 拖动
 
     private static func measureDrag(
-        setLiveWidth: @escaping (Double?) -> Void,
+        liveWidth: (any LiveWidthApplying)?,
         committedWidth: Double,
         range: ClosedRange<Double>,
         meter: MainStallMeter,
@@ -417,10 +438,15 @@ enum JankAudit {
                 + "——分隔线没有可拖动的余量，本段读数无效。请加大 --window-size 重跑。")
         }
 
+        // 计数器初值。`LivePanelWidth` 的计数是累计的，取增量才是「这一段拖动」的。
+        let submittedBefore = liveWidth?.submitCount ?? 0
+        let appliedBefore = liveWidth?.appliedCount ?? 0
+        let ticksBefore = liveWidth?.tickCount ?? 0
+
         JankTally.shared.reset()
         let cpuBefore = processCPUSeconds()
         meter.start()
-        setLiveWidth(from)
+        liveWidth?.submit(from)
         await awaitFrame()
         for step in 1...steps {
             let t = Double(step) / Double(steps)
@@ -434,29 +460,79 @@ enum JankAudit {
             // 若 3 次写入换来 3 次重排+重绘，合并就是实打实的 3→1。
             for write in 1...Self.pointerWritesPerFrame {
                 let fraction = Double(write) / Double(Self.pointerWritesPerFrame)
-                setLiveWidth(previous + (target - previous) * fraction)
+                liveWidth?.submit(previous + (target - previous) * fraction)
                 if write < Self.pointerWritesPerFrame {
                     await Task.yield()
                 }
             }
             await awaitFrame()
         }
+
+        // —— 收尾：把「待应用值」显式落下来，再等若干节拍，然后才取计数 ——
+        //
+        // 这一步是必须的，不是保险：合并把「写入」与「应用」解耦了——一次写入要等**下一次
+        // 合并节拍**才落到 `value` 上。驱动跑完后立刻读计数，读到的是「最后那步还没被取走」；
+        // 若整段拖动恰好一次节拍都没轮到，读数会全 0，看起来像「拖动一点都不卡」，
+        // 其实只是**没等到**（本轮踩过：同一份构建、换文档/窗口后 body 计数 67 → 0）。
+        // 所以：先 `flushNow()` 把 pending 坐实，再等 3 拍让这次应用真的走完布局，
+        // 最后才读计数。自证行会同时打出「写入次数 / 实际应用次数 / 合并节拍次数」，
+        // 把「没写」「写了没应用」「应用了但没观察者」三种 0 分开。
+        liveWidth?.flushNow()
+        for _ in 0..<3 { await awaitFrame() }
+
         let samples = meter.stop()
         let counts = JankTally.shared.snapshot()
         let cpuSeconds = processCPUSeconds() - cpuBefore
 
+        let submitted = (liveWidth?.submitCount ?? 0) - submittedBefore
+        let applied = (liveWidth?.appliedCount ?? 0) - appliedBefore
+        let ticks = (liveWidth?.tickCount ?? 0) - ticksBefore
+        let containerBody = counts[.containerBody] ?? 0
+
         report(phase: "拖动", samples: samples, counts: counts, steps: steps, cpuSeconds: cpuSeconds)
-        NSLog("[Lumen][jank] 拖动驱动自证：宽度 \(Int(widthBefore))pt → \(Int(from))…\(Int(to))pt，"
-            + "每帧 \(pointerWritesPerFrame) 次指针写入（走的是与真实手势同一条 liveWidth 写入路径）")
+
+        // 驱动自证（这是本轮重写的重点）：**不能只证明「写入发生了」，要证明「布局真的发生了」**。
+        //
+        // - `写入` 只说明指针事件到了；
+        // - `应用` 是 `value` **实际改变**的次数——只有它才触发一次布局失效；
+        // - `合并节拍` 说明合并链路到底有没有跑（区分「节拍没触发」与「触发了没应用」）；
+        // - `容器重算` 是 `ReaderContainerView.body` 真的被求值的次数——布局层观察到变化的**直接证据**。
+        //
+        // 判据分三层，任一层不过就明说「读数无效」，绝不让 0 冒充「很轻」：
+        // 1. `写入 == 0`  → 驱动没跑（指针写入一次都没有）；
+        // 2. `应用 == 0`  → 写了但一次也没落下来（合并链路断了）；
+        // 3. `容器重算 == 0` → 应用了却没有观察者（AI 面板不在版面上），拖动没落到版面。
+        let verdict: String
+        if submitted == 0 {
+            verdict = "❌ 一次指针写入都没有（驱动没跑）——本段读数无效"
+        } else if applied == 0 {
+            verdict = "❌ 写入 \(submitted) 次但一次都没应用（合并链路断了）——本段读数无效"
+        } else if containerBody == 0 {
+            verdict = "⚠️ 应用了 \(applied) 次但容器 body 未重算：AI 面板此刻不参与布局"
+                + "（被收起 / 沉浸 / 未装好），这次拖动没能落到版面上——本段读数无效"
+        } else if applied * 2 < steps {
+            verdict = "⚠️ 应用仅 \(applied) 次（< 步数一半）：合并节拍没跟上，拖动没真正连续——读数存疑"
+        } else {
+            verdict = "✅ 应用 \(applied) 次、容器重算 \(containerBody) 次——布局真的跟着动了"
+        }
+        NSLog("[Lumen][jank] 拖动驱动自证：宽度 \(Int(widthBefore))pt → \(Int(from))…\(Int(to))pt；"
+            + "每帧 \(pointerWritesPerFrame) 次指针写入（与真实手势同一条 liveWidth 写入路径）。"
+            + "写入 \(submitted) 次 → 实际应用 \(applied) 次（值真的变了）；"
+            + "合并节拍回调 \(ticks) 次；容器重算 \(containerBody) 次。\(verdict)")
     }
 
     // MARK: 让出一帧
 
     /// 让出到下一帧，让 SwiftUI 把这一步的布局真正做掉。
-    /// 用 16ms 睡眠而不是 `Task.yield()`：`yield` 只换调度点，不保证主 runloop
+    /// 用睡眠而不是 `Task.yield()`：`yield` 只换调度点，不保证主 runloop
     /// 跑完一次布局/绘制；睡一帧才能让「这一步的重活」落在两次采样之间被量到。
+    ///
+    /// 17ms 而不是整 16ms：`LivePanelWidth` 的合并节拍是 1/60s（≈16.7ms）。
+    /// 睡眠必须**略长于**节拍周期，否则会出现「某一步一拍都没轮到、下一步补两拍」的相位抖动，
+    /// 同一命令连跑两次的「每步均次」就会在 0.9–2.1 之间乱跳。17ms 让每一步稳定跨过一拍，
+    /// 读数收敛到 ~1/步——这正是「合并后每个显示帧只重排一次」该有的值。
     private static func awaitFrame() async {
-        try? await Task.sleep(nanoseconds: 16_000_000)
+        try? await Task.sleep(nanoseconds: 17_000_000)
     }
 
     // MARK: 报文
