@@ -3,7 +3,7 @@ import Foundation
 /// 应用数据目录规划。
 ///
 /// 设计原则：不做书库，所以没有数据库；只有少量 JSON 状态文件 + 按文档路径哈希
-/// 分目录的阅读状态。API Key 不落盘，只进 Keychain。
+/// 分目录的阅读状态。API Key 单独存入当前用户专用的 credentials 目录（目录 0700、文件 0600）。
 public enum AppPaths {
 
     public static let bundleIdentifier = "com.jn.lumen"
@@ -26,7 +26,11 @@ public enum AppPaths {
 
     /// ~/Library/Application Support/com.jn.lumen
     public static var supportRoot: URL {
-        ensureDirectory(applicationSupportBase.appendingPathComponent(bundleIdentifier, isDirectory: true))
+        if let directory = ProcessInfo.processInfo.environment["LUMEN_TEST_DATA"],
+           CommandLine.arguments.contains(where: { $0.hasSuffix("-report") || $0 == "--capture" }) {
+            return ensureDirectory(URL(fileURLWithPath: directory, isDirectory: true))
+        }
+        return ensureDirectory(applicationSupportBase.appendingPathComponent(bundleIdentifier, isDirectory: true))
     }
 
     /// ~/Library/Caches/com.jn.lumen（可随时安全删除）

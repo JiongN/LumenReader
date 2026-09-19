@@ -139,9 +139,10 @@ public struct ReaderSettings: Codable, Sendable, Equatable {
     public var flowMode: ReadingFlowMode = .continuous
     /// 是否显示缩略图侧栏（PDF）
     public var showThumbnails: Bool = false
-    /// PDF 画布亮度。1.0 = 原始；调低可减轻深色环境下白页的刺眼感。
-    /// PDF 是固定版式，无法真正反色（会让彩色插图变成负片），所以这里只调画布。
+    /// 页面外围画布亮度；纸张着色由 pdfOriginalColors 单独控制。
     public var pdfCanvasBrightness: Double = 1.0
+    public var pdfOriginalColors: Bool = false
+    public var epubDoubleColumn: Bool = false
     /// EPUB 滚动到章末时自动进入下一章
     public var autoAdvanceOnScrollEnd: Bool = true
 
@@ -166,6 +167,8 @@ public struct ReaderSettings: Codable, Sendable, Equatable {
         self.paragraphSpacing = (try? container.decode(Double.self, forKey: .paragraphSpacing)) ?? 0.6
         self.flowMode = (try? container.decode(ReadingFlowMode.self, forKey: .flowMode)) ?? .continuous
         self.showThumbnails = (try? container.decode(Bool.self, forKey: .showThumbnails)) ?? false
+        self.epubDoubleColumn = (try? container.decode(Bool.self, forKey: .epubDoubleColumn)) ?? false
+        self.pdfOriginalColors = (try? container.decode(Bool.self, forKey: .pdfOriginalColors)) ?? false
         self.pdfCanvasBrightness = (try? container.decode(Double.self, forKey: .pdfCanvasBrightness)) ?? 1.0
         self.autoAdvanceOnScrollEnd = (try? container.decode(Bool.self, forKey: .autoAdvanceOnScrollEnd)) ?? true
     }

@@ -108,7 +108,7 @@ public extension AIProviderConfig {
     var isConfigured: Bool {
         guard !selectedModel.trimmingCharacters(in: .whitespaces).isEmpty,
               !baseURL.trimmingCharacters(in: .whitespaces).isEmpty else { return false }
-        return isLocalEndpoint || AIKeychain.hasKey(account: keychainAccount)
+        return isLocalEndpoint || AICredentialStore.hasKey(account: keychainAccount)
     }
 }
 

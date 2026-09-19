@@ -278,7 +278,7 @@ public enum LumenAction: String, CaseIterable, Codable, Sendable, Identifiable {
         switch self {
         case .openDocument:   return "打开文档…"
         case .openMostRecent: return "打开最近阅读"
-        case .closeDocument:  return "关闭文档"
+        case .closeDocument:  return "关闭标签页"
         case .copyFullText:   return "复制全文为纯文本"
         case .copyFile:       return "复制文件"
         case .toggleSidebar:  return "显示 / 隐藏侧栏"
@@ -361,7 +361,7 @@ public enum LumenAction: String, CaseIterable, Codable, Sendable, Identifiable {
         switch self {
         case .openDocument:   return "open file 打开 文档"
         case .openMostRecent: return "recent last 最近 继续阅读"
-        case .closeDocument:  return "close 关闭"
+        case .closeDocument:  return "close tab 关闭 标签 标签页"
         case .copyFullText:   return "copy text all 复制 全文 纯文本"
         case .copyFile:       return "copy file 文件 复制"
         case .toggleSidebar:  return "sidebar 侧栏 边栏"
