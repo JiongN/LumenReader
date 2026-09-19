@@ -68,6 +68,9 @@ public enum DS {
         public static let m: CGFloat = 10
         public static let l: CGFloat = 14
         public static let xl: CGFloat = 20
+        /// 缩略图卡片圆角。参考样式里实测约 6.5pt（比 `s` 略大：卡片越大，
+        /// 角收得太紧会显出「方板 + 小圆角」的别扭）。
+        public static let thumbnail: CGFloat = 6.5
     }
 
     // MARK: 语义色
@@ -173,5 +176,18 @@ public enum DS {
         public static let aiPanelMin: CGFloat = 300
         public static let aiPanelIdeal: CGFloat = 380
         public static let aiPanelMax: CGFloat = 620
+
+        // MARK: 缩略图（数值按参考样式逐像素量出来，见 docs/VERIFY.md）
+
+        /// 卡片宽度。参考样式的侧栏 146pt、卡片 107.5pt，这里取 108。
+        /// 别再往大调：卡片一宽，一屏能放的数量就掉下去，「翻找」这个动作本身会变慢。
+        public static let thumbnailWidth: CGFloat = 108
+        /// 卡片底缘 → 页码。参考样式 9pt，这里 6：它的页码是紧贴着排的，
+        /// 我们的页码行还带着行高，留出 3pt 才不会看起来顶在一起。
+        public static let thumbnailLabelGap: CGFloat = 6
+        /// 页码 → 下一张卡片。参考样式约 11pt，扣掉页码行本身的行高后是 8。
+        public static let thumbnailGap: CGFloat = 8
+        /// 页码行的高度（含行高）。
+        public static let thumbnailLabelHeight: CGFloat = 12
     }
 }
