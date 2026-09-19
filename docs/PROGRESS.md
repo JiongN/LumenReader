@@ -33,6 +33,9 @@
 | 单元测试 | `swift test --disable-sandbox` | **23 项全绿**，新增套件「阅读布局与本地凭据回归」5 项 |
 | 编译 | `swift build --disable-sandbox` | 通过 |
 | 前后对比 | `docs/verification/20260919/{before,after}-{text,scan,large}-*.png`，三种文档各两次 | 本地留存**不入库**（12M PNG） |
+| **老功能回归**（AppState / RootView 基本重写，必须回跑） | `--keys-report` / `--annotate-report` / `--resize-report` / `--search-report` | 55 / 15 / 12 / 6 项，**失败 0** |
+| 新通道实跑 | `--shortcut-report 1` | 合成的 ⌘⌥S 被全局路由消费，侧栏 `true→false`，「通过 ✅」 |
+| 新通道实跑 | `--detach-after 4` + `--layout-report 1` | 「已拆出，当前窗口数 = 2」，窗口清单里两个 `NSWindow` 都 `visible=true`（原 1200×795、新 1340×795） |
 
 ### 这一批踩到的坑
 
