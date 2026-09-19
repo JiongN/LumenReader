@@ -63,6 +63,12 @@ final class ReaderBridge: ObservableObject {
     /// 正在识别的页号（nil 表示空闲），供状态条显示进度
     @Published var ocrRunningPage: Int?
 
+    /// EPUB 当前**实际生效**的栏数（1 或 2）。
+    ///
+    /// 与设置里的 `epubDoubleColumn`（请求值）是两个数：窗口窄于 760pt 时
+    /// 双栏会被排版脚本压回单栏。界面上的单/双栏文案必须按生效值写。
+    @Published var epubEffectiveColumns: Int = 1
+
     // MARK: 命令（外壳 → 视图）
 
     /// 缩略图提供者（PDF 专用）
@@ -157,6 +163,7 @@ final class ReaderBridge: ObservableObject {
         metadata = DocumentMetadata()
         isScannedDocument = false
         ocrRunningPage = nil
+        epubEffectiveColumns = 1
         thumbnailProvider = nil
         setPanelResizing = nil
         viewport.snapshot = .init()

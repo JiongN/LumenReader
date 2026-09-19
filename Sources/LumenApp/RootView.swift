@@ -31,8 +31,9 @@ struct RootView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            // 标签栏：有文档且非沉浸时才出现。欢迎页不需要，沉浸模式要「只剩正文」。
-            if state.activeSession != nil && !state.isImmersive {
+            // 标签栏：有标签（含主页标签）且非沉浸时才出现。
+            // 纯欢迎页（一个文档都没打开过）不需要它，沉浸模式要「只剩正文」。
+            if (!state.sessions.isEmpty || state.homeTabIsActive) && !state.isImmersive {
                 TabBar()
             }
 

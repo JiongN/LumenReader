@@ -61,12 +61,21 @@ enum EPUBLayoutScript {
         }
         requestAnimationFrame(() => { restoring = false; remember(); });
       };
+      let lastReportedColumns = -1;
       function apply() {
         const style = getComputedStyle(root);
         const usePages = style.getPropertyValue('--lm-paged').trim() === '1';
         const requested = Number(style.getPropertyValue('--lm-columns')) || 1;
-        root.style.setProperty('--lm-effective-columns', requested === 2 && innerWidth >= 760 ? '2' : '1');
+        // 生效栏数 ≠ 请求栏数：窄窗口下双栏会被压回单栏。
+        // 必须回传给 Swift —— 界面上的「切换为单/双栏」文案要按**看到的**状态写，
+        // 否则用户明明在看单栏，菜单却写着「切换为单栏」。
+        const effective = requested === 2 && innerWidth >= 760 ? 2 : 1;
+        root.style.setProperty('--lm-effective-columns', String(effective));
         root.classList.toggle('lumen-paged', usePages);
+        if (effective !== lastReportedColumns) {
+          lastReportedColumns = effective;
+          window.webkit.messageHandlers.lumen.postMessage({type:'columns', requested: requested, effective: effective});
+        }
         requestAnimationFrame(restore);
       }
       function turn(direction) {

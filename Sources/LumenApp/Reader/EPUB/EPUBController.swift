@@ -31,6 +31,14 @@ final class EPUBController: NSObject, ObservableObject {
     /// 点中正文里的批注高亮（<mark class="lumen-hl">）时回调，参数是批注条目 id。
     /// 与 PDF 侧的 onAnnotationTapped 对应：两侧 → 侧栏聚焦。
     var onHighlightTapped: ((String) -> Void)?
+    /// 实际生效的栏数（1 或 2）与请求栏数。窄窗口下请求的双栏会被压回单栏，
+    /// 界面文案要以「生效值」为准，否则会写出「已是单栏却提示切换为单栏」这种反话。
+    var onEffectiveColumns: ((_ effective: Int, _ requested: Int) -> Void)?
+    /// 一章 DOM 就绪（导航完成、样式与高亮都已重画）。
+    ///
+    /// 逐段翻译要挂在这上面：换章之后 DOM 是一份新的，之前插的译文块和下标
+    /// 标记全没了，必须按新 DOM 重来一遍。
+    var onChapterDidLoad: (() -> Void)?
 
     /// 取某一章的批注（id + 引文）。由阅读视图提供（批注存在应用数据目录里）。
     ///
@@ -211,6 +219,64 @@ final class EPUBController: NSObject, ObservableObject {
               var mark = document.querySelector('mark.lumen-hl[data-lumen-id="' + id + '"]');
               if (mark) { mark.scrollIntoView({ block: 'center' }); return true; }
               return false;
+            },
+            // ── 逐段翻译 ──
+            //
+            // 段落的身份用 `data-lm-p`（下标）标记，而不是每次按选择器重算：
+            // 插入的译文块本身也是块级元素，重算会把它算进去，下标就会漂移。
+            // 标记一次、之后按下标取，才对得上。
+            prepareParagraphs: function () {
+              var els = document.querySelectorAll('p, li, blockquote, dd, h1, h2, h3, h4');
+              var out = [];
+              for (var i = 0; i < els.length; i++) {
+                var el = els[i];
+                if (el.classList.contains('lm-tr')) { continue; }
+                var t = (el.innerText || el.textContent || '').trim();
+                // 太短的段落不值得花一次请求（空段、纯数字页码都会落在这里）
+                if (t.length < 2) { continue; }
+                el.setAttribute('data-lm-p', String(out.length));
+                out.push(t);
+              }
+              return out;
+            },
+            markLoading: function () {
+              var els = document.querySelectorAll('[data-lm-p]');
+              for (var i = 0; i < els.length; i++) {
+                var el = els[i];
+                if (!el.parentNode) { continue; }
+                var box = document.createElement('div');
+                box.className = 'lm-tr lm-tr-loading';
+                box.setAttribute('data-lm-for', el.getAttribute('data-lm-p') || '');
+                box.textContent = '翻译中…';
+                el.parentNode.insertBefore(box, el);
+              }
+              return els.length;
+            },
+            setTranslation: function (index, text, state) {
+              var el = document.querySelector('[data-lm-p="' + index + '"]');
+              if (!el || !el.parentNode) { return false; }
+              var box = el.previousElementSibling;
+              if (!box || !box.classList || !box.classList.contains('lm-tr')
+                  || box.getAttribute('data-lm-for') !== String(index)) {
+                box = document.createElement('div');
+                box.className = 'lm-tr';
+                box.setAttribute('data-lm-for', String(index));
+                el.parentNode.insertBefore(box, el);
+              }
+              box.textContent = text || '';
+              box.classList.toggle('lm-tr-loading', state === 'loading');
+              box.classList.toggle('lm-tr-failed', state === 'failed');
+              return true;
+            },
+            clearTranslations: function () {
+              var boxes = document.querySelectorAll('.lm-tr');
+              for (var i = boxes.length - 1; i >= 0; i--) {
+                var b = boxes[i];
+                if (b.parentNode) { b.parentNode.removeChild(b); }
+              }
+              var marked = document.querySelectorAll('[data-lm-p]');
+              for (var j = 0; j < marked.length; j++) { marked[j].removeAttribute('data-lm-p'); }
+              return true;
             }
           };
           window.addEventListener('scroll', function () {
@@ -339,6 +405,30 @@ final class EPUBController: NSObject, ObservableObject {
       max-width: 100% !important;
       width: auto !important;
     }
+    /* 逐段翻译的译文容器。挂在原段**上方**：对照阅读时视线自上而下是
+       「译文 → 原文」，和「先看译文再对原文」的顺序一致；挂在下方则会被
+       下一段顶开，读起来像是下一段的引言。左侧一道细竖条是它与正文的分界，
+       不吃掉段落本身的层级。 */
+    div.lm-tr {
+      margin: 0.3em 0 0.55em;
+      padding: 0.3em 0.6em;
+      border-left: 2px solid var(--lm-accent-soft);
+      border-radius: 0 4px 4px 0;
+      background: var(--lm-accent-soft);
+      font-size: 0.92em;
+      line-height: 1.55;
+      white-space: normal;
+    }
+    div.lm-tr-loading {
+      font-style: italic;
+      opacity: 0.5;
+    }
+    div.lm-tr-failed {
+      opacity: 0.6;
+      border-left-color: transparent;
+      background: transparent;
+      padding-left: 0.62em;
+    }
     img { border-radius: 3px; }
     """
 }
@@ -448,6 +538,72 @@ extension EPUBController {
     func scrollToHighlight(id: String) {
         webView.evaluateJavaScript("window.__lumen && window.__lumen.scrollToHighlight(\(Self.jsString(id)));")
     }
+
+    // MARK: - 逐段翻译
+
+    /// 收集当前章里值得翻译的段落（顺带给每段打上下标标记），返回原文数组。
+    func prepareParagraphs() async -> [String] {
+        await withCheckedContinuation { continuation in
+            webView.evaluateJavaScript("window.__lumen ? window.__lumen.prepareParagraphs() : []") { value, _ in
+                continuation.resume(returning: (value as? [String]) ?? [])
+            }
+        }
+    }
+
+    /// 给每段插一个「翻译中…」占位。一次 JS 调用铺完，不逐段往返——
+    /// 一章几十上百段，逐段 `evaluateJavaScript` 光 IPC 就要几百毫秒。
+    func markTranslationsLoading() {
+        webView.evaluateJavaScript("window.__lumen && window.__lumen.markLoading();")
+    }
+
+    /// 写入第 `index` 段的译文（或失败态）。
+    func setTranslation(index: Int, text: String, state: EPUBTranslationState) {
+        let js = "window.__lumen && window.__lumen.setTranslation(\(index), \(Self.jsString(text)), '\(state.rawValue)');"
+        webView.evaluateJavaScript(js)
+    }
+
+    /// 自检用（`--translate-report 1`）：回读页面里译文块的现状。
+    ///
+    /// 断言必须指向**外部可核对的产物**：数一数页面里到底有几个译文块、第一段译成了
+    /// 什么、它是不是真的挂在原文**上方**——这些都能在 Safari 里手动复核。
+    /// 只报「函数返回 true」的自检是自我安慰。
+    func translationReport() async -> String {
+        await withCheckedContinuation { continuation in
+            let js = """
+            (function () {
+              var boxes = document.querySelectorAll('.lm-tr');
+              var first = document.querySelector('[data-lm-p="0"]');
+              var prev = first ? first.previousElementSibling : null;
+              return {
+                boxes: boxes.length,
+                failed: document.querySelectorAll('.lm-tr-failed').length,
+                loading: document.querySelectorAll('.lm-tr-loading').length,
+                aboveOriginal: !!(prev && prev.classList && prev.classList.contains('lm-tr')),
+                sample: boxes.length ? String(boxes[0].textContent || '').slice(0, 60) : '',
+                original: first ? String(first.innerText || '').slice(0, 60) : ''
+              };
+            })()
+            """
+            webView.evaluateJavaScript(js) { value, _ in
+                guard let dict = value as? [String: Any] else {
+                    continuation.resume(returning: "（页面里读不到译文状态）")
+                    return
+                }
+                continuation.resume(returning:
+                    "译文块 \(dict["boxes"] ?? 0) 个 / 失败 \(dict["failed"] ?? 0) / 加载中 \(dict["loading"] ?? 0)"
+                    + " / 译文在原文上方=\(dict["aboveOriginal"] ?? false)"
+                    + " / 原文=「\(dict["original"] ?? "")」"
+                    + " 译文=「\(dict["sample"] ?? "")」"
+                )
+            }
+        }
+    }
+
+    /// 清掉全部译文与下标标记。切章节时 DOM 本来就会重建，
+    /// 但关掉开关、或在同一章里重译时必须显式清，否则会越叠越多。
+    func clearTranslations() {
+        webView.evaluateJavaScript("window.__lumen && window.__lumen.clearTranslations();")
+    }
 }
 
 // MARK: - WKNavigationDelegate
@@ -474,6 +630,8 @@ extension EPUBController: WKNavigationDelegate {
             }
         }
         onProgress?(currentChapterIndex, chapterCount, 0, false)
+        // 放在最后：翻译要按「已经上好样式、画好高亮」的 DOM 来取段落。
+        onChapterDidLoad?()
     }
 
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
@@ -581,6 +739,11 @@ extension EPUBController: WKScriptMessageHandler {
             if let id = body["id"] as? String, !id.isEmpty {
                 onHighlightTapped?(id)
             }
+
+        case "columns":
+            let effective = max(1, body["effective"] as? Int ?? 1)
+            let requested = max(1, body["requested"] as? Int ?? effective)
+            onEffectiveColumns?(effective, requested)
 
         default:
             break

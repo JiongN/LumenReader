@@ -143,6 +143,10 @@ public struct ReaderSettings: Codable, Sendable, Equatable {
     public var pdfCanvasBrightness: Double = 1.0
     public var pdfOriginalColors: Bool = false
     public var epubDoubleColumn: Bool = false
+    /// EPUB 逐段翻译开关。译文显示在每段原文上方。
+    public var epubTranslateEnabled: Bool = false
+    /// 逐段翻译的目标语言（必应语言标签）。默认 `zh-Hans`。
+    public var translationTargetLanguage: String = "zh-Hans"
     /// EPUB 滚动到章末时自动进入下一章
     public var autoAdvanceOnScrollEnd: Bool = true
 
@@ -171,6 +175,11 @@ public struct ReaderSettings: Codable, Sendable, Equatable {
         self.pdfOriginalColors = (try? container.decode(Bool.self, forKey: .pdfOriginalColors)) ?? false
         self.pdfCanvasBrightness = (try? container.decode(Double.self, forKey: .pdfCanvasBrightness)) ?? 1.0
         self.autoAdvanceOnScrollEnd = (try? container.decode(Bool.self, forKey: .autoAdvanceOnScrollEnd)) ?? true
+        self.epubTranslateEnabled = (try? container.decode(Bool.self, forKey: .epubTranslateEnabled)) ?? false
+        // 目标语言是字符串：解出来可能不是合法标签（手改过配置的人什么都写得进去），
+        // 空串也会让翻译请求白跑一趟，所以这里兜回默认。
+        let target = (try? container.decode(String.self, forKey: .translationTargetLanguage)) ?? "zh-Hans"
+        self.translationTargetLanguage = target.isEmpty ? "zh-Hans" : target
     }
 }
 

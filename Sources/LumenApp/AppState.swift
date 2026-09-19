@@ -60,6 +60,15 @@ final class AppState: ObservableObject {
         didSet { syncActiveSession() }
     }
 
+    /// 「主页标签」是否处于激活状态。
+    ///
+    /// 为什么不是往 `sessions` 里塞一个空会话：`ReaderSession` 的整个生命周期都
+    /// 建立在「有一份文档」之上（bridge / chat / 智能目录 / 元数据全是文档级的），
+    /// 造一个没有文档的会话等于让一半代码路径去判空。主页本来就是「当前没有会话」
+    /// 这一状态，只是它现在要能在**旁边还有别的标签**时也存在，所以单独立一个开关：
+    /// 打开时 `activeSession` 解析为 nil（正文落到欢迎页），标签栏照常在。
+    @Published var homeTabIsActive = false
+
     /// 当前标签。与 `activeSessionID` 保持同步（id 失效时回退第一个）。
     @Published private(set) var activeSession: ReaderSession?
 
@@ -192,12 +201,34 @@ final class AppState: ObservableObject {
 
     /// 新增标签并切过去。
     func add(_ session: ReaderSession) {
+        homeTabIsActive = false
         sessions.append(session)
         activate(session)
     }
 
+    /// 打开一个「主页」标签：正文回到欢迎页，已打开的文档标签原样保留在旁边。
+    ///
+    /// 没有已打开文档时不动作——那已经是主页了，再挂一个空标签只是多一枚点不掉的按钮。
+    func addHomeTab() {
+        guard !sessions.isEmpty else { return }
+        homeTabIsActive = true
+        syncActiveSession()
+    }
+
+    /// 关掉主页标签：回到最后一个文档标签（没有就回到纯欢迎页）。
+    func closeHomeTab() {
+        guard homeTabIsActive else { return }
+        homeTabIsActive = false
+        if let last = sessions.last {
+            activate(last)
+        } else {
+            syncActiveSession()
+        }
+    }
+
     /// 外部（独立窗口）直接放入一个已存在的会话。
     func adopt(_ session: ReaderSession) {
+        homeTabIsActive = false
         sessions = sessions + [session]
         loadedSessionIDs.insert(session.id)
         activeSessionID = session.id
@@ -226,6 +257,9 @@ final class AppState: ObservableObject {
             let wasActive = activeSessionID == session.id
             sessions.remove(at: index)
             session.busyCancel?()
+            // 最后一个文档标签也关掉时顺手收掉主页标签：没有文档标签却留着一枚
+            // 「主页」芯片，标签栏上就只剩一个点不掉也没处可去的按钮。
+            if sessions.isEmpty { homeTabIsActive = false }
             if wasActive {
                 let neighbor = min(index, sessions.count - 1)
                 if sessions.indices.contains(neighbor) {
@@ -280,7 +314,9 @@ final class AppState: ObservableObject {
 
     /// 保持 `activeSession` 与 id / 列表一致，并切换会话观察。
     private func syncActiveSession() {
-        let target = sessions.first { $0.id == activeSessionID } ?? sessions.first
+        let target = homeTabIsActive
+            ? nil
+            : (sessions.first { $0.id == activeSessionID } ?? sessions.first)
 
         // 当前标签被关闭 / 拆走后，id 会指向一个已不存在的会话。
         // 必须先把 id 校正到邻接标签（赋值会重新进入本方法），

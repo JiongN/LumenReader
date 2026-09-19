@@ -135,6 +135,16 @@ final class WindowManager: ObservableObject {
             )
             NSLog("[Lumen][tabs] startup 打开后会话数 = \(workspace.sessions.count)")
         }
+
+        // 自检用：`--home-tab 1` 走一次「点 + 建主页标签」。
+        // 判据不写「开关为 true」这种自证——看 `--layout-report` 里阅读区的探针
+        // 还在不在：主页标签激活时正文应当是欢迎页，readerSurface / sidebar 都不该再上报。
+        if LaunchOptions.homeTab {
+            workspace.addHomeTab()
+            NSLog("[Lumen][tabs] 自检：新建主页标签 → 会话数 = \(workspace.sessions.count)"
+                  + " / 主页激活 = \(workspace.activeSession == nil)"
+                  + " / 标签栏存在 = \(!workspace.sessions.isEmpty || workspace.homeTabIsActive)")
+        }
     }
 
     /// 没有任何窗口时（点 Dock 图标 / AppleScript reopen）补一个。

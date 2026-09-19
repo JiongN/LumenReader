@@ -35,7 +35,7 @@
 │   Document/    PDF·EPUB 的解析模型、定位符、元数据、全文抽取、批注  │
 │   Store/       设置 · 阅读进度 · 最近打开 · 快捷键 · 记忆 · 路径    │
 │   AI/          AIProvider 协议 · OpenAI 兼容客户端 · 提示词 · 目录  │
-│                · Agent 配置 · 联网文献检索                         │
+│                · Agent 配置 · 联网文献检索 · **微软免密钥翻译**     │
 │   OCR/         纯 Vision 框架的逐页识别                            │
 └───────────────────────────────────────────────────────────────────┘
 ```
@@ -60,6 +60,7 @@ ReaderBridge
 │   selection · positionLabel · progress · outline · searchResults
 │   currentUnitIndex · unitCount · metadata · sidebarTab
 │   isScannedDocument · ocrRunningPage · isLoading · loadError
+│   epubEffectiveColumns   EPUB **实际生效**的栏数（≠设置值：窗口窄于 760pt 会压回单栏）
 │
 └── 命令（外壳 → 视图），全部是可选闭包 —— 「这个格式不支持」用 nil 表达，不需要额外枚举
     thumbnailProvider      (Int, CGSize) -> NSImage?          仅 PDF

@@ -52,6 +52,11 @@ struct TabBar: View {
                         )
                     }
 
+                    // 主页标签排在最后：和浏览器「在末尾开新标签」的手感一致。
+                    if state.homeTabIsActive {
+                        HomeTabItem(onClose: { state.closeHomeTab() })
+                    }
+
                     addButton
                 }
                 .padding(.horizontal, DS.Space.s)
@@ -80,37 +85,7 @@ struct TabBar: View {
     @ViewBuilder
     private var toolbarActions: some View {
         HStack(spacing: DS.Space.s) {
-            Menu {
-                ForEach(ReadingTheme.all, id: \.id) { theme in
-                    Button(theme.id.displayName) { state.settingsStore.reader.themeID = theme.id }
-                }
-                Divider()
-                if state.document?.kind == .epub {
-                    Button(state.settingsStore.reader.epubDoubleColumn ? "切换为单栏" : "切换为双栏") {
-                        state.settingsStore.reader.epubDoubleColumn.toggle()
-                    }
-                    Button("连续滚动") {
-                        state.settingsStore.reader.epubDoubleColumn = false
-                        state.settingsStore.reader.flowMode = .continuous
-                    }
-                    Button("单页翻页") {
-                        state.settingsStore.reader.epubDoubleColumn = false
-                        state.settingsStore.reader.flowMode = .paged
-                    }
-                } else {
-                    Button(state.settingsStore.reader.pdfOriginalColors ? "使用阅读色调" : "保持 PDF 原色") {
-                        state.settingsStore.reader.pdfOriginalColors.toggle()
-                    }
-                }
-            } label: {
-                Image(systemName: "textformat.size")
-                    .font(DS.Typo.ui(size: 13))
-            }
-            .menuStyle(.borderlessButton)
-            .menuIndicator(.hidden)
-            .fixedSize()
-            .frame(width: 28, height: 28)
-            .help("阅读外观与排版")
+            AppearanceMenuButton()
             Menu {
                 Button("复制全文为纯文本") { state.copyFullText() }
                     .disabled(state.bridge.extractFullText == nil)
@@ -171,10 +146,13 @@ struct TabBar: View {
         return "\(label) (\(combo.display))"
     }
 
-    /// 标签栏末尾的「+」：打开文件并在当前窗口新建标签。
+    /// 标签栏末尾的「+」：新建标签页，正文回到主页（最近打开 / 打开按钮都在那儿）。
+    ///
+    /// 不再直接弹「打开文件」面板：那个动作已经有 ⌘O，而「+」在标签栏语境里的
+    /// 通行含义是「再来一个空标签」，弹文件选择器属于答非所问。
     private var addButton: some View {
         Button {
-            state.showOpenPanel()
+            state.addHomeTab()
         } label: {
             Image(systemName: "plus")
                 .font(DS.Typo.ui(size: 12, weight: .medium))
@@ -183,7 +161,66 @@ struct TabBar: View {
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .help("打开文档并新建标签（⌘O 可多选）")
+        .help("新建标签页（回到主页）")
+    }
+}
+
+/// 主页标签：没有文档的那一枚。
+///
+/// 视觉与文档标签同构（同样的高度、圆角、选中底色），
+/// 否则「新建标签页」在标签栏上会像一枚混进来的异形按钮。
+private struct HomeTabItem: View {
+
+    let onClose: () -> Void
+
+    @State private var isHovering = false
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "house")
+                .font(DS.Typo.ui(size: 11))
+                .foregroundStyle(DS.Palette.accent)
+
+            Text("主页")
+                .font(DS.Typo.ui(size: 12, weight: .semibold))
+                .foregroundStyle(DS.Palette.textPrimary)
+                .lineLimit(1)
+
+            Spacer(minLength: 0)
+
+            Button(action: onClose) {
+                ZStack {
+                    if isHovering {
+                        Circle()
+                            .fill(DS.Palette.textPrimary.opacity(0.12))
+                            .frame(width: 15, height: 15)
+                    }
+                    Image(systemName: "xmark")
+                        .font(.system(size: 7.5, weight: .bold))
+                        .foregroundStyle(DS.Palette.textSecondary)
+                }
+                .frame(width: 15, height: 15)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .opacity(isHovering ? 1 : 0)
+            .help("关闭标签页")
+        }
+        .padding(.horizontal, DS.Space.s)
+        .frame(width: 120, height: 26)
+        .background(
+            RoundedRectangle(cornerRadius: DS.Radius.s, style: .continuous)
+                .fill(DS.Palette.surfaceRaised)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: DS.Radius.s, style: .continuous)
+                .strokeBorder(DS.Palette.separator, lineWidth: 0.5)
+        )
+        .contentShape(Rectangle())
+        .onHover { hovering in
+            withAnimation(DS.Motion.hover) { isHovering = hovering }
+        }
+        .help("主页：最近打开的文档都在这里")
     }
 }
 

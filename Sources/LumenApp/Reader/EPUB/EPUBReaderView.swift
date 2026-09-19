@@ -22,6 +22,9 @@ struct EPUBReaderView: View {
     @EnvironmentObject private var bridge: ReaderBridge
 
     @StateObject private var controller: EPUBController
+    /// 逐段翻译的编排器。持有它而不是每次现造，是因为翻译是跨章节的长任务：
+    /// 请求在跑的时候章节可能已经换了，必须有一个能被取消的持有者。
+    @StateObject private var translation = EPUBTranslationController()
     @State private var store: ReadingStateStore?
     @State private var source: EPUBDocumentSource?
 
@@ -57,6 +60,10 @@ struct EPUBReaderView: View {
         .onChange(of: reader) { _, newValue in
             controller.applyTheme(newValue.theme, reader: newValue)
         }
+        // 翻译开关：开就翻当前章，关就撤掉全部译文（并取消在跑的请求）。
+        .onChange(of: reader.epubTranslateEnabled) { _, enabled in
+            enabled ? startTranslation() : stopTranslation()
+        }
         .onDisappear {
             store?.flush()
             state.recent.updateProgress(
@@ -70,6 +77,16 @@ struct EPUBReaderView: View {
 
     private func prepare() async {
         bridge.reset()
+
+        // 自检通道：`--translate-report 1` 直接把翻译开关打开跑一遍。
+        // 走 `suppressSave`，绝不把这次的开关状态写进用户的 settings.json。
+        if LaunchOptions.flag("--translate-report") {
+            state.settingsStore.suppressSave = true
+            state.settingsStore.reader.epubTranslateEnabled = true
+            if let target = LaunchOptions.translateTo {
+                state.settingsStore.reader.translationTargetLanguage = target
+            }
+        }
 
         do {
             let source = try await EPUBDocumentSource.open(url: document.url)
@@ -170,6 +187,23 @@ struct EPUBReaderView: View {
             bridge.selectionFromDrag = fromDrag
         }
 
+        // 生效栏数由排版脚本回传（窄窗口会把双栏压回单栏），外壳的文案据此写。
+        controller.onEffectiveColumns = { effective, _ in
+            bridge.epubEffectiveColumns = effective
+        }
+
+        // 换章之后 DOM 是新的：译文块与下标标记都没了，开着开关就重翻一遍。
+        controller.onChapterDidLoad = { self.refreshTranslationIfEnabled() }
+
+        translation.onFinish = { [weak state] failed in
+            if failed > 0 {
+                state?.showToast("有 \(failed) 段翻译失败，可关闭再打开重试", isError: true)
+            }
+            if LaunchOptions.flag("--translate-report") {
+                Task { await self.logTranslationReport() }
+            }
+        }
+
         // 搜索走解包后的纯文本，而不是让 WebKit 去 `window.find`：
         // 前者能跨章节一次搜完，并且在后台线程跑得动。
         bridge.performSearch = { query in
@@ -212,6 +246,40 @@ struct EPUBReaderView: View {
             return (text, .epub(chapterIndex: chapter, anchor: "", charOffset: 0))
         }
     }
+    // MARK: - 逐段翻译
+
+    /// 打开开关：翻译当前这一章。
+    private func startTranslation() {
+        guard state.settingsStore.reader.epubTranslateEnabled else { return }
+        let target = state.settingsStore.reader.translationTargetLanguage
+        translation.start(
+            target: target,
+            paragraphs: { [weak controller] in await controller?.prepareParagraphs() ?? [] },
+            markLoading: { [weak controller] in controller?.markTranslationsLoading() },
+            apply: { [weak controller] index, text, state in
+                controller?.setTranslation(index: index, text: text, state: state)
+            }
+        )
+    }
+
+    /// 关掉开关：先掐掉在跑的请求，再撤掉已经插进页面的译文。
+    ///
+    /// 顺序不能反——只清页面不取消任务的话，晚到的译文会往已经清空的新 DOM 里
+    /// 重新插一遍，表现是「关了开关译文又自己冒出来」。
+    private func stopTranslation() {
+        translation.stop()
+        controller.clearTranslations()
+    }
+
+    private func logTranslationReport() async {
+        NSLog("[Lumen][translate] %@", await controller.translationReport())
+    }
+
+    private func refreshTranslationIfEnabled() {
+        guard state.settingsStore.reader.epubTranslateEnabled else { return }
+        startTranslation()
+    }
+
     // MARK: - 批注
 
     /// EPUB 批注接的是应用数据目录，不是文件——EPUB 是一份压缩包，

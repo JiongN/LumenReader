@@ -111,6 +111,13 @@ enum LaunchOptions {
     /// 缩略图页是懒加载的，只有真正切过去才会渲染，不这样切就永远审不到。
     static var sidebarTab: String? { value(for: "--sidebar-tab") }
 
+    /// 自检用：`--home-tab 1` 启动后立刻走一次「新建主页标签」。
+    static var homeTab: Bool { flag("--home-tab") }
+
+    /// 自检用：`--translate-report 1` 时的目标语言（默认 `zh-Hans`）。
+    /// 拿中文书验翻译时必须给 `--translate-to en`——中译中「成功」等于什么都没验。
+    static var translateTo: String? { value(for: "--translate-to") }
+
     /// 自检用：打开文档后跳到第 N 个单元（**1-based**，与界面输入框一致）。
     ///
     /// 会打印「跳转前 → 请求 → 跳转后」三段，这样才能区分

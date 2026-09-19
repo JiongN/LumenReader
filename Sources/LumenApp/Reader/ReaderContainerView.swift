@@ -101,7 +101,8 @@ struct ReaderContainerView: View {
                     // AI 输入框的右半边和发送按钮，既看不见也点不到；划词条的居中位置也会
                     // 随 AI 面板的显隐漂移。浮层本来就是给阅读区用的（页码、缩放、划词），
                     // 锚在阅读区才是它的语义位置。
-                    .overlay(alignment: .bottom) { if !state.isImmersive { SelectionActionBarLayer() } }
+                    // 划词条在沉浸模式下同样保留：沉浸只是收起面板，不是收起「选中文字后能做的事」。
+                    .overlay(alignment: .bottom) { SelectionActionBarLayer() }
                     // 沉浸时收起状态条：页码已经在底部 HUD 上显示，再留一条属于重复信息，
                     // 而沉浸模式要的恰恰是「屏幕上只有正文」。
                     .overlay(alignment: .bottomTrailing) { ReaderStatusLayer() }
@@ -564,10 +565,9 @@ struct ReaderStatusLayer: View {
     @State private var isJumpHovering = false
 
     var body: some View {
-        // 沉浸时不显示：页码已由底部 HUD 承担，这里再来一条就是重复信息，
-        // 而沉浸模式要的正是「屏幕上只剩正文」。
-        if !state.isImmersive,
-           !bridge.isLoading, bridge.loadError == nil, !bridge.positionLabel.isEmpty {
+        // 沉浸模式下页码与缩放照常在场（右上角只有退出按钮，页码不重复），
+        // 只在文档没准备好 / 加载失败 / 还没有位置信息时收起。
+        if !bridge.isLoading, bridge.loadError == nil, !bridge.positionLabel.isEmpty {
             HStack(spacing: DS.Space.m) {
                 // 页码本身做成入口：用户想跳页时的第一反应就是「点那个页码」。
                 // 悬停变强调色，否则没人会想到它是能点的。
