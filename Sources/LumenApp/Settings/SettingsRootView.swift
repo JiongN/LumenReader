@@ -122,13 +122,9 @@ struct ReadingSettingsPane: View {
                     valueText: { String(format: "%.3f", $0) }
                 )
 
-                LabeledSlider(
-                    title: "正文宽度",
-                    value: $settings.reader.contentWidth,
-                    range: 480...1100,
-                    step: 20,
-                    valueText: { "\(Int($0)) pt" }
-                )
+                Text("正文宽度随阅读区域自动调整；双栏在窄窗口下自动显示为单栏。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
 
                 LabeledSlider(
                     title: "段间距",
@@ -138,8 +134,10 @@ struct ReadingSettingsPane: View {
                     valueText: { String(format: "%.1f em", $0) }
                 )
 
+                Toggle("PDF 保持原色", isOn: $settings.reader.pdfOriginalColors)
+                    .help("关闭后，PDF 纸张与缩略图跟随阅读主题；彩图也会随之着色。原文件不受影响。")
                 LabeledSlider(
-                    title: "PDF 背景亮度",
+                    title: "PDF 画布亮度",
                     value: $settings.reader.pdfCanvasBrightness,
                     range: 0.5...1.0,
                     step: 0.02,
@@ -149,7 +147,7 @@ struct ReadingSettingsPane: View {
                 Text("""
                 字体、字号、行高、字距、对齐**只对 EPUB 正文生效**。\
                 PDF 是固定版式，正文字体无法替换（那需要重写页面内容流），\
-                但 PDF 页面的背景亮度可以调。
+                PDF 可选择整页阅读色调或保持原色；下方画布亮度仅影响页面外围。
                 """)
                 .font(DS.Typo.ui(size: 11))
                 .foregroundStyle(DS.Palette.textTertiary)
@@ -157,6 +155,8 @@ struct ReadingSettingsPane: View {
             }
 
             Section("翻页") {
+                Toggle("EPUB 双栏阅读", isOn: $settings.reader.epubDoubleColumn)
+                    .help("双栏以左右两页排版；窄于 760 点时自动回到单栏。")
                 Picker("模式", selection: $settings.reader.flowMode) {
                     ForEach(ReadingFlowMode.allCases) { mode in
                         Text(mode.displayName).tag(mode)

@@ -34,7 +34,7 @@ struct SidebarColumn: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .background(.regularMaterial)
+        .background(DS.Palette.surfaceSunken)
     }
 
     // MARK: - 目录

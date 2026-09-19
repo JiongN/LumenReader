@@ -230,6 +230,7 @@ struct PanelResizeHandle: View {
     /// 松手（或双击复位）时的提交动作。走 `SettingsStore.commit*Width`，
     /// 与设置页、自检通道共用同一道钳制闸。
     let onCommit: (Double) -> Void
+    var onDragStateChange: (Bool) -> Void = { _ in }
 
     @State private var isHovering = false
     /// 按下那一刻的宽度。nil 表示当前没有在拖。
@@ -263,6 +264,8 @@ struct PanelResizeHandle: View {
                     .gesture(dragGesture)
                     .onTapGesture(count: 2, perform: resetToDefault)
             }
+            .onReceive(NotificationCenter.default.publisher(for: NSWindow.didResignKeyNotification)) { _ in cancelDrag() }
+            .onDisappear { cancelDrag(); handleHover(false) }
             .help("拖动调整宽度，双击复位")
             .accessibilityLabel(panelIsLeading ? "侧栏宽度" : "AI 面板宽度")
     }
@@ -274,25 +277,37 @@ struct PanelResizeHandle: View {
     }
 
     private var dragGesture: some Gesture {
-        DragGesture(minimumDistance: 1)
+        DragGesture(minimumDistance: 1, coordinateSpace: .global)
             .onChanged { value in
                 if widthAtDragStart == nil {
                     // 起点取**已提交值**而不是「设置里当前的宽度」：
                     // 后者在极端情况下（窗口刚被改小、上限刚收窄）可能与
                     // 正在显示的宽度不一致，接手那一帧就会跳一下。
-                    widthAtDragStart = liveWidth ?? committedWidth
+                    widthAtDragStart = committedWidth
+                    onDragStateChange(true)
                 }
                 guard let start = widthAtDragStart else { return }
                 let delta = panelIsLeading ? value.translation.width : -value.translation.width
                 // 钳制放在写入这一侧，而不是只依赖设置解码时的钳制：
                 // 拖到边界时要立刻停住，不能让中间态越界（越界期间阅读区会被压成负宽）。
-                liveWidth = min(max(start + delta, range.lowerBound), range.upperBound)
+                liveWidth = PanelDragGeometry.width(start: start, delta: delta, range: range)
             }
-            .onEnded { _ in
-                if let live = liveWidth { onCommit(live) }
+            .onEnded { value in
+                if let start = widthAtDragStart {
+                    let delta = panelIsLeading ? value.translation.width : -value.translation.width
+                    onCommit(PanelDragGeometry.width(start: start, delta: delta, range: range))
+                }
                 liveWidth = nil
                 widthAtDragStart = nil
+                onDragStateChange(false)
             }
+    }
+
+    private func cancelDrag() {
+        guard widthAtDragStart != nil else { return }
+        liveWidth = nil
+        widthAtDragStart = nil
+        onDragStateChange(false)
     }
 
     private func resetToDefault() {

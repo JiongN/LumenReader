@@ -11,6 +11,8 @@ struct AIPanelView: View {
     @EnvironmentObject private var state: AppState
     @EnvironmentObject private var bridge: ReaderBridge
     @EnvironmentObject private var chat: AIChatModel
+    /// 本面板所属标签的会话：划词请求按标签投递，不能读当前活动标签的代理。
+    @EnvironmentObject private var session: ReaderSession
     @Environment(\.openSettings) private var openSettings
 
     /// 是否跟随最新内容自动滚到底部
@@ -31,11 +33,11 @@ struct AIPanelView: View {
             divider
             composer
         }
-        .background(.regularMaterial)
-        .onChange(of: state.pendingAIRequest) { _, request in
+        .background(DS.Palette.surfaceSunken)
+        .onChange(of: session.pendingAIRequest) { _, request in
             guard let request else { return }
             consume(request)
-            state.pendingAIRequest = nil
+            session.pendingAIRequest = nil
         }
         .sheet(isPresented: $isTemplateEditorVisible) {
             PromptTemplateEditor()
@@ -89,7 +91,8 @@ struct AIPanelView: View {
             // 面板默认宽 380pt、用户还能调到 300pt，标题 + 两个 chip 会把整行挤爆；
             // 而 sparkles 图标本身已经说明了这是 AI 面板，标题是纯冗余。
             //
-            // 顺序（用户定的）：sparkles → globe（联网开关）→ 模板 → Agent → ⋯ → 收起。
+            // 顺序（用户定的）：globe（联网开关）→ 模板 → Agent → ⋯。
+            // 面板的收起 / 展开统一由主窗口工具栏最右侧的开关承担，头部不再放入口。
             // globe 从输入框左槽搬到这里、模型 chip 从头部搬到输入框左槽——两者换了位置：
             // 「这一次要不要联网」属于发起的动作，和输入框放一起更顺手；
             // 「用哪个模型」是长期设定，放在头部与模板 / Agent 并列更合逻辑。
@@ -99,13 +102,9 @@ struct AIPanelView: View {
 
             Spacer(minLength: 0)
 
-            // 行尾这两枚按「谁都不许被挤走」排序：⋯ 其次、收起最高。
-            // 收起按钮是这个面板唯一的鼠标出口（工具栏那枚重复入口已删），
-            // 它一旦被左侧挤出可视区，就等于「点掉就再也收不回来」。
+            // ⋯ 菜单钉在行尾，不许被左侧的 chip 挤出可视区。
             moreMenu
                 .layoutPriority(1)
-            collapseButton
-                .layoutPriority(2)
         }
         .padding(.horizontal, Self.contentInset)
         .frame(height: DS.Size.toolbarHeight)
@@ -145,31 +144,6 @@ struct AIPanelView: View {
         .frame(width: 22)
         .help("更多")
         .layoutProbe("aiMoreMenu")
-    }
-
-    /// 面板右上角的收起入口——**这是收起面板唯一的鼠标出口**。
-    ///
-    /// 此前收起 AI 面板只有两个鼠标入口：工具栏那枚 AI 按钮、以及菜单项
-    /// 「显示 → 显示/隐藏 AI 面板」。用户在面板里读完一段回答、想把阅读区让出来时，
-    /// 眼睛和手都在面板上，却得跑去工具栏找——这就是「右侧边栏无法收起」的可用性根因。
-    ///
-    /// 工具栏那枚已删（同一个动作的第二个入口），所以这一枚必须**钉死在右上角**：
-    /// 它在 header 行里拿最高 layoutPriority，且行内可压缩的 chip 都给了下限宽度，
-    /// 300pt 下限下也不会被顶出面板右边界。收起后的唤回走工具栏那枚「仅收起时出现」
-    /// 的小入口 + 快捷键，不会「点掉就再也找不到」。
-    private var collapseButton: some View {
-        Button {
-            withAnimation(DS.Motion.panel) { state.isAIPanelVisible = false }
-        } label: {
-            Image(systemName: "sidebar.trailing")
-                .font(DS.Typo.ui(size: 13))
-                .foregroundStyle(DS.Palette.textSecondary)
-        }
-        .buttonStyle(.plain)
-        .frame(width: 22, height: DS.Size.toolbarHeight, alignment: .center)
-        .help("收起 AI 面板 (\(state.keyBindings.combo(for: .toggleAIPanel)?.display ?? "—"))")
-        .accessibilityLabel("收起 AI 面板")
-        .layoutProbe("aiCollapse")
     }
 
     // MARK: - 服务商与提示词

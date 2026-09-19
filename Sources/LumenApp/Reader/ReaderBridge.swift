@@ -66,6 +66,8 @@ final class ReaderBridge: ObservableObject {
     // MARK: 命令（外壳 → 视图）
 
     /// 缩略图提供者（PDF 专用）
+    let viewport = PDFViewportState()
+    var setPanelResizing: ((Bool) -> Void)?
     var thumbnailProvider: ((Int, CGSize) -> NSImage?)?
     /// 卡顿自检（`--jank-report`）用：真正被滚动的那个视图（PDF 侧是 `PDFView`）。
     ///
@@ -156,6 +158,9 @@ final class ReaderBridge: ObservableObject {
         isScannedDocument = false
         ocrRunningPage = nil
         thumbnailProvider = nil
+        setPanelResizing = nil
+        viewport.snapshot = .init()
+        viewport.pageAspects = []
         jankScrollSurface = nil
         retrieveProvider = nil
         slicesProvider = nil

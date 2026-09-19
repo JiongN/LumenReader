@@ -18,6 +18,7 @@ final class EPUBController: NSObject, ObservableObject {
     /// 待跳转的锚点。导航是异步的，所以要在发起加载时记下来，等 didFinish 再执行。
     private var pendingAnchor: String = ""
 
+    var onLoadError: ((String) -> Void)?
     var onSelection: ((ReaderSelection?) -> Void)?
     /// 选区的来源是否为「拖动划选」（false = 单击）。
     ///
@@ -56,9 +57,10 @@ final class EPUBController: NSObject, ObservableObject {
 
         super.init()
 
-        controller.add(self, name: Self.messageHandlerName)
+        controller.add(WeakEPUBMessageHandler(self), name: Self.messageHandlerName)
         configureWebView()
         installBaseScript()
+        webView.configuration.userContentController.addUserScript(WKUserScript(source: EPUBLayoutScript.javascript, injectionTime: .atDocumentEnd, forMainFrameOnly: true))
     }
 
     private static let messageHandlerName = "lumen"
@@ -104,6 +106,7 @@ final class EPUBController: NSObject, ObservableObject {
           }
           window.__lumen = {
             setVars: function (vars, dark) {
+              if (window.__lumenLayout) window.__lumenLayout.remember();
               var root = document.documentElement;
               for (var key in vars) { root.style.setProperty(key, vars[key]); }
               root.style.backgroundColor = vars['--lm-bg'] || root.style.backgroundColor;
@@ -112,6 +115,7 @@ final class EPUBController: NSObject, ObservableObject {
               if (body) {
                 body.style.backgroundColor = vars['--lm-bg'] || '';
               }
+              if (window.__lumenLayout) window.__lumenLayout.apply();
             },
             text: function () { return document.body ? document.body.innerText : ''; },
             scrollToAnchor: function (anchor) {
@@ -214,10 +218,12 @@ final class EPUBController: NSObject, ObservableObject {
             window.__lumenRaf = requestAnimationFrame(function () {
               window.__lumenRaf = 0;
               var d = document.documentElement;
-              var max = d.scrollHeight - d.clientHeight;
-              var progress = max > 0 ? d.scrollTop / max : 1;
+              var paged = d.classList.contains('lumen-paged');
+              var max = paged ? d.scrollWidth - d.clientWidth : d.scrollHeight - d.clientHeight;
+              var position = paged ? d.scrollLeft : d.scrollTop;
+              var progress = max > 0 ? position / max : 1;
               window.webkit.messageHandlers.\(Self.messageHandlerName).postMessage({
-                type: 'scroll', progress: progress, atEnd: max > 0 && d.scrollTop >= max - 28
+                type: 'scroll', progress: progress, atEnd: !paged && max > 0 && position >= max - 28
               });
             });
           }, { passive: true });
@@ -293,6 +299,7 @@ final class EPUBController: NSObject, ObservableObject {
             + ReadingTheme.readerStylesheet
             + "\n"
             + extras
+            + "\n" + EPUBLayoutScript.css
     }
 
     /// EPUB 特有的覆盖层。
@@ -403,18 +410,7 @@ extension EPUBController {
     /// 之所以不在 Swift 侧直接拼 JSON，是因为 CSS 变量表本身已经有一份定义，
     /// 复制一份到 Swift 会形成两个真相源，改主题时容易只改一处。
     private static func variableDictionary(theme: ReadingTheme, reader: ReaderSettings) -> [String: String] {
-        var result: [String: String] = [:]
-        let block = theme.cssVariables(reader: reader)
-        for line in block.split(separator: "\n") {
-            let trimmed = line.trimmingCharacters(in: .whitespaces)
-            guard trimmed.hasPrefix("--"), trimmed.hasSuffix(";") else { continue }
-            let body = trimmed.dropFirst().dropLast()
-            guard let separator = body.firstIndex(of: ":") else { continue }
-            let key = "--" + body[body.startIndex..<separator].trimmingCharacters(in: .whitespaces)
-            let value = body[body.index(after: separator)...].trimmingCharacters(in: .whitespaces)
-            result[key] = value
-        }
-        return result
+        CSSCustomProperties.parse(theme.cssVariables(reader: reader))
     }
 
     /// 当前章节的纯文本，供 AI 使用。
@@ -460,6 +456,7 @@ extension EPUBController: WKNavigationDelegate {
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         isLoadingChapter = false
+        applyTheme(theme, reader: reader)
         if !pendingAnchor.isEmpty {
             let anchor = pendingAnchor
             pendingAnchor = ""
@@ -469,15 +466,33 @@ extension EPUBController: WKNavigationDelegate {
         }
         // 章节是新 DOM，批注高亮必须重画一遍（上一次包裹的 <mark> 已随旧文档消失）
         applyHighlights()
+        if LaunchOptions.flag("--epub-layout-report") {
+            Task { @MainActor [weak self] in
+                try? await Task.sleep(nanoseconds: 800_000_000)
+                guard let self else { return }
+                await EPUBLayoutAudit.run(webView: self.webView)
+            }
+        }
         onProgress?(currentChapterIndex, chapterCount, 0, false)
     }
 
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
-        isLoadingChapter = false
+        reportLoadFailure(error)
     }
 
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+        reportLoadFailure(error)
+    }
+
+    private func reportLoadFailure(_ error: Error) {
+        guard (error as NSError).code != NSURLErrorCancelled else { return }
         isLoadingChapter = false
+        onLoadError?(error.localizedDescription)
+    }
+
+    func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+        isLoadingChapter = false
+        onLoadError?("阅读进程已停止，请重新打开当前章节。")
     }
 
     /// 正文里的链接默认在应用内处理：同一本书内的锚点跳转继续在阅读区内完成，
@@ -552,6 +567,11 @@ extension EPUBController: WKScriptMessageHandler {
                 followingContext: body["following"] as? String ?? ""
             ))
 
+        case "turnChapter":
+            guard !isLoadingChapter else { return }
+            if (body["direction"] as? Int ?? 1) > 0 { goToNextChapter() }
+            else { goToPreviousChapter() }
+
         case "scroll":
             let progress = body["progress"] as? Double ?? 0
             let atEnd = body["atEnd"] as? Bool ?? false
@@ -565,5 +585,14 @@ extension EPUBController: WKScriptMessageHandler {
         default:
             break
         }
+    }
+}
+
+/// WKUserContentController retains handlers; the proxy breaks its cycle with EPUBController.
+private final class WeakEPUBMessageHandler: NSObject, WKScriptMessageHandler {
+    weak var target: EPUBController?
+    init(_ target: EPUBController) { self.target = target }
+    func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+        target?.userContentController(userContentController, didReceive: message)
     }
 }

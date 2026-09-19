@@ -148,22 +148,22 @@ struct AISettingsPane: View {
 
                     Button("保存") {
                         let trimmed = keyInput.trimmingCharacters(in: .whitespacesAndNewlines)
-                        let ok = AIKeychain.save(trimmed, account: binding.wrappedValue.keychainAccount)
+                        let ok = AICredentialStore.save(trimmed, account: binding.wrappedValue.keychainAccount)
                         if ok {
                             keyInput = ""
                             refreshKeyState()
-                            feedback = Feedback(level: .success, message: "密钥已存入系统钥匙串。")
+                            feedback = Feedback(level: .success, message: "API Key 已保存在本机，下次无需重新输入。")
                         } else {
-                            feedback = Feedback(level: .failure, message: "写入钥匙串失败。可能被系统权限拦下了，请重试。")
+                            feedback = Feedback(level: .failure, message: "无法保存 API Key，请检查应用数据目录的写入权限。")
                         }
                     }
                     .disabled(keyInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
 
                     if hasStoredKey {
                         Button("清除") {
-                            AIKeychain.delete(account: binding.wrappedValue.keychainAccount)
+                            AICredentialStore.delete(account: binding.wrappedValue.keychainAccount)
                             refreshKeyState()
-                            feedback = Feedback(level: .info, message: "已从钥匙串移除密钥。")
+                            feedback = Feedback(level: .info, message: "已移除本机保存的 API Key。")
                         }
                     }
                 }
@@ -189,7 +189,7 @@ struct AISettingsPane: View {
                 .disabled(isTesting)
             }
 
-            Text("密钥只写入 macOS 钥匙串（服务名 com.jn.lumen.ai），不会出现在 settings.json、日志或任何网络请求的正文里。")
+            Text("API Key 保存在本机应用数据目录的 credentials 文件夹，仅当前系统用户可读写，不使用钥匙串、不弹系统授权框。文件未加密，不会包含在设置导出中。旧钥匙串中的配置需在此保存一次。")
                 .font(DS.Typo.ui(size: 10.5))
                 .foregroundStyle(DS.Palette.textTertiary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -451,13 +451,13 @@ struct AISettingsPane: View {
             hasStoredKey = false
             return
         }
-        hasStoredKey = AIKeychain.hasKey(account: config.keychainAccount)
+        hasStoredKey = AICredentialStore.hasKey(account: config.keychainAccount)
         feedback = nil
     }
 
     private func effectiveKey(for config: AIProviderConfig) -> String {
         let typed = keyInput.trimmingCharacters(in: .whitespacesAndNewlines)
-        return typed.isEmpty ? (AIKeychain.read(account: config.keychainAccount) ?? "") : typed
+        return typed.isEmpty ? (AICredentialStore.read(account: config.keychainAccount) ?? "") : typed
     }
 
     /// 真刀真枪发一次最小请求。

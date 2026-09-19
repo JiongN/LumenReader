@@ -2,164 +2,143 @@ import SwiftUI
 import AppKit
 import LumenKit
 
-/// 页面缩略图侧栏（PDF 专用）。
-///
-/// 缩略图是**真渲染**——`PDFPage.thumbnail(of:for:)` 会完整走一遍 PDF 绘制管线，
-/// 不是取一张现成的小图。所以这里必须同时成立两件事：
-/// 只为真的要看的页渲染，以及**别让已经滚过去的页继续占着资源渲染**。
-/// 后者是滚动卡顿的真正来源：快速拖过 300 页，等于排了 300 次真实绘制。
 struct ThumbnailPane: View {
-
     @EnvironmentObject private var bridge: ReaderBridge
     @EnvironmentObject private var state: AppState
+    @EnvironmentObject private var session: ReaderSession
+    var body: some View {
+        ThumbnailList(viewport: bridge.viewport, bridge: bridge, documentID: session.document.id,
+                      theme: state.settingsStore.reader.theme,
+                      originalColors: state.settingsStore.reader.pdfOriginalColors)
+    }
+}
 
-    @State private var cache = ThumbnailCache(
-        capacity: LaunchOptions.perfThumbnailUnbounded ? nil : ThumbnailCache.defaultCapacity
-    )
+private struct ThumbnailList: View {
+    @ObservedObject var viewport: PDFViewportState
+    let bridge: ReaderBridge
+    let documentID: String?
+    let theme: ReadingTheme
+    let originalColors: Bool
+    @State private var cache = ThumbnailCache(capacity: ThumbnailCache.defaultCapacity)
     @State private var pending: Set<Int> = []
-    /// 当前真正落在可视区里的页。修掉卡顿靠的就是它。
+    @State private var generation = UUID()
     @State private var visible = VisibleTracker()
-
-    private let thumbnailWidth: CGFloat = 132
-    /// 缩略图比例。略高于 A4（1.414）留出边距，页与页之间的观感更齐。
-    private let thumbnailAspect: CGFloat = 1.34
-
-    /// 串行队列渲染。
-    ///
-    /// 刻意不用并发：缩略图渲染是 CPU/GPU 密集操作，几路并发只会互相抢资源，
-    /// 还会和主线程的画面合成争带宽——表现就是滚动时掉帧。
-    /// 「串行 + 不可见就跳过」的实际吞吐反而更高。
+    @State private var scrollPosition = ScrollPosition(y: 0)
+    @State private var viewportHeight: CGFloat = 0
+    @State private var manuallyScrolling = false
+    private let width: CGFloat = 132
     private static let renderQueue = DispatchQueue(label: "com.jn.lumen.thumbnail", qos: .utility)
 
-    var body: some View {
-        // 卡顿自检：body 每次求值都记一次（不能做成 ViewModifier——见 JankAudit 注释）。
-        let _ = Jank.tick(.thumbnailPaneBody)
-        Group {
-            if bridge.unitCount == 0 {
-                SidebarEmptyState(
-                    icon: "square.grid.2x2",
-                    title: "没有可显示的页面",
-                    message: "文档尚未解析完成。"
-                )
-            } else {
-                ScrollViewReader { proxy in
-                    ScrollView {
-                        LazyVStack(spacing: DS.Space.m) {
-                            ForEach(0..<bridge.unitCount, id: \.self) { index in
-                                ThumbnailRow(
-                                    index: index,
-                                    image: cache[index],
-                                    isCurrent: index == bridge.currentUnitIndex,
-                                    width: thumbnailWidth,
-                                    aspect: thumbnailAspect
-                                ) {
-                                    bridge.goTo?(.pdf(page: index, charOffset: 0))
-                                }
-                                .id(index)
-                                .onAppear {
-                                    visible.insert(index)
-                                    request(index: index)
-                                }
-                                // 滚出可视区就登记移除：这正是让「路过的页」能被跳过、
-                                // 也让 cache 之外的内存不会被无限占住的依据。
-                                .onDisappear { visible.remove(index) }
-                            }
-                        }
-                        .padding(.vertical, DS.Space.m)
-                    }
-                    .onChange(of: bridge.currentUnitIndex) { oldIndex, newIndex in
-                        // 联动的节奏要分两档：
-                        // 连续滚动时每页都会触发一次 here，若每跳都带动画，
-                        // 快速滑过 50 页就是 50 段互相打断的弹簧——侧栏看起来在「追」；
-                        // 跳幅大（快速滚动 / 跳页）时直接吸附，只有小幅翻页才用动画。
-                        if abs(newIndex - oldIndex) > 2 {
-                            var transaction = Transaction()
-                            transaction.disablesAnimations = true
-                            withTransaction(transaction) {
-                                proxy.scrollTo(newIndex, anchor: .center)
-                            }
-                        } else {
-                            withAnimation(DS.Motion.quick) {
-                                proxy.scrollTo(newIndex, anchor: .center)
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        .onChange(of: state.document?.id) { _, _ in
-            // 换文档必须清空。索引一样但内容完全不同，
-            // 留着旧缓存会出现「第 3 页的缩略图是上一本书的内容」这种灵异现象。
-            cache.removeAll()
-            pending.removeAll()
-        }
+    private func aspect(_ index: Int) -> CGFloat {
+        viewport.pageAspects.indices.contains(index) ? viewport.pageAspects[index] : 1.4
     }
 
-    /// 为某一页排队渲染缩略图。
-    private func request(index: Int) {
-        guard cache[index] == nil, !pending.contains(index) else { return }
-        guard let provider = bridge.thumbnailProvider else { return }
-        pending.insert(index)
-
-        // 2 倍尺寸喂进去，Retina 下才不会糊
-        let size = CGSize(width: thumbnailWidth * 2, height: thumbnailWidth * thumbnailAspect * 2)
-
-        Self.renderQueue.async {
-            // 排到队时这一页很可能早就滚过去了。这里必须再确认一次可见性：
-            // 少了这一步，用户快速滑过 300 页就会实打实地渲染 300 张缩略图，
-            // 队列被一堆没人看的图占满，新进入视口的页反而要排很久——越滚越卡。
-            guard visible.contains(index) else {
-                if LaunchOptions.thumbnailReport {
-                    NSLog("[Lumen][thumb] 跳过第 \(index + 1) 页（排队期间已滚出可视区）")
+    var body: some View {
+        let _ = Jank.tick(.thumbnailPaneBody)
+        ScrollView {
+            LazyVStack(spacing: 12) {
+                ForEach(0..<bridge.unitCount, id: \.self) { index in
+                    ThumbnailRow(index: index, image: cache[index], isCurrent: index == viewport.snapshot.centerPage,
+                                 width: width, aspect: aspect(index), visibleRect: viewport.snapshot.pageRects[index],
+                                 theme: theme, originalColors: originalColors) {
+                        manuallyScrolling = false
+                        bridge.goTo?(.pdf(page: index, charOffset: 0))
+                    }
+                    .id(index)
+                    .onAppear { visible.insert(index); request(index) }
+                    .onDisappear { visible.remove(index) }
                 }
-                DispatchQueue.main.async { pending.remove(index) }
+            }
+            .padding(.vertical, 12)
+        }
+        .scrollPosition($scrollPosition)
+        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { viewportHeight = $0 }
+        .onScrollPhaseChange { _, phase in
+            manuallyScrolling = phase == .tracking || phase == .interacting || phase == .decelerating
+        }
+        .onChange(of: viewport.snapshot) { _, snapshot in
+            guard !manuallyScrolling else { return }
+            follow(snapshot)
+        }
+        .onChange(of: documentID) { _, _ in reset() }
+        .onChange(of: viewport.snapshot.documentID) { _, _ in reset() }
+        .onChange(of: bridge.annotationRevision) { _, _ in reset() }
+        .onAppear { follow(viewport.snapshot) }
+    }
+
+    private func follow(_ snapshot: PDFViewportState.Snapshot) {
+        let page = min(max(0, snapshot.centerPage), max(0, bridge.unitCount - 1))
+        let preceding = (0..<page).reduce(CGFloat(12)) { $0 + width * aspect($1) + 36 }
+        let target = max(0, preceding + width * aspect(page) * snapshot.centerProgress - viewportHeight / 2)
+        var transaction = Transaction()
+        transaction.disablesAnimations = true
+        withTransaction(transaction) { scrollPosition.scrollTo(y: target) }
+    }
+
+    private func reset() {
+        generation = UUID()
+        cache.removeAll()
+        pending.removeAll()
+        for index in visible.snapshot() { request(index) }
+    }
+
+    private func request(_ index: Int) {
+        guard cache[index] == nil, !pending.contains(index), let provider = bridge.thumbnailProvider else { return }
+        pending.insert(index)
+        let requestGeneration = generation
+        let tracker = visible
+        let size = CGSize(width: width * 2, height: width * aspect(index) * 2)
+        Self.renderQueue.async {
+            guard tracker.contains(index) else {
+                DispatchQueue.main.async {
+                    if generation == requestGeneration { pending.remove(index) }
+                }
                 return
             }
-
-            if LaunchOptions.thumbnailReport {
-                NSLog("[Lumen][thumb] 渲染第 \(index + 1) 页")
-            }
-            // 卡顿自检：记一次「真的渲染了一张缩略图」（滚动时若它每步都在涨，说明侧栏在重渲）。
             Jank.tick(.thumbnailRender)
             let image = provider(index, size)
             DispatchQueue.main.async {
+                guard generation == requestGeneration else { return }
                 pending.remove(index)
-                // 存入时带上「当前页」，超出上限就按「离当前页远近」淘汰最远的那些。
-                // 这一步是「大文档滚完全本内存不再线性增长」的落点：缓存张数被封顶。
-                if let image { cache.store(image, at: index, current: bridge.currentUnitIndex) }
+                if let image { cache.store(image, at: index, current: viewport.snapshot.centerPage) }
             }
         }
     }
 }
 
-// MARK: - 可视区登记
-
-/// 记录「此刻哪些页真的在可视区里」。
-///
-/// 用 class + `NSLock` 而不是 `@State var visible: Set<Int>`：读取它的是后台渲染队列，
-/// 后台线程直接读 SwiftUI 的 `@State` 既拿不到最新快照，也是实打实的数据竞争。
 private final class VisibleTracker: @unchecked Sendable {
-
     private let lock = NSLock()
     private var indices: Set<Int> = []
-
-    func insert(_ index: Int) {
-        lock.lock(); defer { lock.unlock() }
-        indices.insert(index)
-    }
-
-    func remove(_ index: Int) {
-        lock.lock(); defer { lock.unlock() }
-        indices.remove(index)
-    }
-
-    func contains(_ index: Int) -> Bool {
-        lock.lock(); defer { lock.unlock() }
-        return indices.contains(index)
-    }
+    func insert(_ index: Int) { lock.lock(); defer { lock.unlock() }; indices.insert(index) }
+    func remove(_ index: Int) { lock.lock(); defer { lock.unlock() }; indices.remove(index) }
+    func contains(_ index: Int) -> Bool { lock.lock(); defer { lock.unlock() }; return indices.contains(index) }
+    func snapshot() -> Set<Int> { lock.lock(); defer { lock.unlock() }; return indices }
 }
 
-// MARK: - 单行
+private struct ThemedThumbnailImage: NSViewRepresentable {
+    let image: NSImage
+    let theme: ReadingTheme
+    let original: Bool
+    final class Coordinator {
+        var theme: ReadingTheme?
+        var original: Bool?
+    }
+    func makeCoordinator() -> Coordinator { Coordinator() }
+    func makeNSView(context: Context) -> NSImageView {
+        let view = NSImageView()
+        view.imageScaling = .scaleProportionallyUpOrDown
+        view.wantsLayer = true
+        return view
+    }
+    func updateNSView(_ view: NSImageView, context: Context) {
+        if view.image !== image { view.image = image }
+        if context.coordinator.theme != theme || context.coordinator.original != original {
+            context.coordinator.theme = theme
+            context.coordinator.original = original
+            view.contentFilters = original ? [] : PDFReadingAppearance.filter(theme: theme).map { [$0] } ?? []
+        }
+    }
+}
 
 private struct ThumbnailRow: View {
 
@@ -168,6 +147,9 @@ private struct ThumbnailRow: View {
     let isCurrent: Bool
     let width: CGFloat
     let aspect: CGFloat
+    let visibleRect: CGRect?
+    let theme: ReadingTheme
+    let originalColors: Bool
     let onTap: () -> Void
 
     @State private var isHovering = false
@@ -178,7 +160,7 @@ private struct ThumbnailRow: View {
                 thumbnail
                     .frame(width: width, height: width * aspect)
 
-                pageNumber
+                pageNumber.frame(height: 18)
             }
             .frame(maxWidth: .infinity)
             .contentShape(Rectangle())
@@ -191,7 +173,7 @@ private struct ThumbnailRow: View {
         // 图片由 nil 变有值的那一刻做淡入；选中态单独用更快的节奏，
         // 两者用同一个 value 会让翻页时的选中反馈被图片加载拖慢。
         .animation(DS.Motion.content, value: image == nil)
-        .animation(DS.Motion.quick, value: isCurrent)
+        .transaction { $0.animation = nil }
     }
 
     // MARK: 缩略图主体
@@ -205,15 +187,27 @@ private struct ThumbnailRow: View {
                 .fill(DS.Palette.surfaceRaised)
 
             if let image {
-                Image(nsImage: image)
-                    .resizable()
-                    .aspectRatio(contentMode: .fit)
+                ThemedThumbnailImage(image: image, theme: theme, original: originalColors)
                     .padding(2)
                     // 淡入而不是硬闪：缩略图是逐个渲染出来的，
                     // 硬切会让侧栏看起来一直在"跳"。
                     .transition(.opacity)
             } else {
                 skeleton
+            }
+        }
+        .overlay {
+            if let rect = visibleRect {
+                GeometryReader { proxy in
+                    Rectangle()
+                        .fill(theme.accent.opacity(0.08))
+                        .overlay(Rectangle().stroke(theme.accent, lineWidth: 1))
+                        .frame(width: max(0, proxy.size.width - 4) * rect.width,
+                               height: max(0, proxy.size.height - 4) * rect.height)
+                        .offset(x: 2 + (proxy.size.width - 4) * rect.minX,
+                                y: 2 + (proxy.size.height - 4) * rect.minY)
+                }
+                .allowsHitTesting(false)
             }
         }
         .overlay(
@@ -226,8 +220,8 @@ private struct ThumbnailRow: View {
                 .padding(-5)
         )
         .shadow(
-            color: .black.opacity(isCurrent ? 0.16 : 0.08),
-            radius: isCurrent ? 6 : 3,
+            color: .black.opacity(0.06),
+            radius: 2,
             y: 1
         )
     }
@@ -242,7 +236,7 @@ private struct ThumbnailRow: View {
         if isCurrent {
             Text("\(index + 1)")
                 .font(DS.Typo.ui(size: 10, weight: .semibold))
-                .foregroundStyle(Color.white)
+                .foregroundStyle(theme.isDark ? theme.background : Color.white)
                 .padding(.horizontal, 8)
                 .padding(.vertical, 2.5)
                 .background(

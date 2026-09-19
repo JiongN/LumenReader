@@ -221,6 +221,8 @@ enum JankAudit {
             NSLog("[Lumen][jank] 滚动：等不到 PDFView（可能是 EPUB 或文档未装好），跳过")
         }
 
+        if LaunchOptions.flag("--jank-scroll-only") { return }
+
         // —— 阶段二：拖动分隔线 ——
         await measureDrag(
             liveWidth: liveWidth,

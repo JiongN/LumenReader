@@ -115,6 +115,11 @@ struct EPUBReaderView: View {
         let progressThrottle = ProgressThrottle()
         let autoAdvanceGate = AutoAdvanceGate()
 
+        controller.onLoadError = { [weak bridge] message in
+            bridge?.isLoading = false
+            bridge?.loadError = message
+        }
+
         controller.onProgress = { [weak controller] chapter, count, chapterProgress, atEnd in
             guard count > 0 else { return }
 
@@ -142,8 +147,11 @@ struct EPUBReaderView: View {
             } else if autoAdvanceGate.shouldAdvance(),
                       state.settingsStore.reader.autoAdvanceOnScrollEnd,
                       chapter + 1 < count {
+                let generation = autoAdvanceGate.generation
                 Task { @MainActor in
                     try? await Task.sleep(nanoseconds: 650_000_000)
+                    guard autoAdvanceGate.isPending, autoAdvanceGate.generation == generation,
+                          state.settingsStore.reader.autoAdvanceOnScrollEnd, controller?.currentChapter == chapter else { return }
                     controller?.goToNextChapter()
                 }
             }
@@ -429,6 +437,8 @@ struct EPUBReaderView: View {
 @MainActor
 private final class AutoAdvanceGate {
     private var armed = true
+    private(set) var generation = 0
+    var isPending: Bool { !armed }
 
     func shouldAdvance() -> Bool {
         guard armed else { return false }
@@ -437,6 +447,7 @@ private final class AutoAdvanceGate {
     }
 
     func rearm() {
+        generation &+= 1
         armed = true
     }
 }

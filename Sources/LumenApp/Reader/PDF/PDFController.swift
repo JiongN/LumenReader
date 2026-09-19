@@ -17,6 +17,97 @@ final class PDFController: NSObject, ObservableObject {
     private(set) var pageCount = 0
     private var observers: [NSObjectProtocol] = []
     private var suppressCallbacks = false
+    private var lastPublishedPage: Int?
+    private weak var viewportState: PDFViewportState?
+    private var viewportObserver: NSObjectProtocol?
+    private var viewportWork: DispatchWorkItem?
+    private var viewportDocumentID = UUID()
+    private var appearanceTheme = ReadingTheme.paper
+    private var originalColors = false
+    private var resizeAnchor: (PDFPage, CGPoint, Bool)?
+
+    func connectViewport(_ state: PDFViewportState) {
+        viewportState = state
+        viewportDocumentID = UUID()
+        state.pageAspects = (0..<pageCount).map { index in
+            guard let page = document?.page(at: index) else { return 1.4 }
+            let bounds = page.bounds(for: .cropBox)
+            let rotated = abs(page.rotation % 180) == 90
+            return rotated ? bounds.width / max(1, bounds.height) : bounds.height / max(1, bounds.width)
+        }
+        if let old = viewportObserver { NotificationCenter.default.removeObserver(old) }
+        if let clip = view.documentView?.enclosingScrollView?.contentView {
+            clip.postsBoundsChangedNotifications = true
+            viewportObserver = NotificationCenter.default.addObserver(forName: NSView.boundsDidChangeNotification, object: clip, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.scheduleViewport() }
+            }
+        }
+        applyPageFilter()
+        publishViewport()
+    }
+
+    private func scheduleViewport() {
+        guard viewportWork == nil else { return }
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.viewportWork = nil
+            self.publishViewport()
+        }
+        viewportWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0 / 60.0, execute: work)
+    }
+
+    private func publishViewport() {
+        guard let state = viewportState, let doc = document else { return }
+        var snapshot = PDFViewportState.Snapshot(documentID: viewportDocumentID)
+        let visible = view.bounds
+        for page in view.visiblePages {
+            let rect = view.convert(page.bounds(for: .cropBox), from: page)
+            if let normalized = ReadingViewportGeometry.normalized(page: rect, visible: visible, flipped: view.isFlipped) {
+                snapshot.pageRects[doc.index(for: page)] = normalized
+            }
+        }
+        if let page = view.page(for: CGPoint(x: visible.midX, y: visible.midY), nearest: true) {
+            snapshot.centerPage = doc.index(for: page)
+            let rect = view.convert(page.bounds(for: .cropBox), from: page)
+            let fraction = view.isFlipped ? (visible.midY - rect.minY) / max(1, rect.height) : (rect.maxY - visible.midY) / max(1, rect.height)
+            snapshot.centerProgress = min(1, max(0, fraction))
+        }
+        if state.snapshot != snapshot { state.snapshot = snapshot }
+    }
+
+    func setPanelResizing(_ active: Bool) {
+        if active {
+            guard resizeAnchor == nil,
+                  let page = view.page(for: CGPoint(x: view.bounds.midX, y: view.bounds.midY), nearest: true) else { return }
+            let point = view.convert(CGPoint(x: view.bounds.midX, y: view.bounds.midY), to: page)
+            resizeAnchor = (page, point, view.autoScales)
+            view.autoScales = false
+        } else {
+            guard let (page, point, automatic) = resizeAnchor else { return }
+            resizeAnchor = nil
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.resizeAnchor == nil else { return }
+                self.view.autoScales = automatic
+                if automatic { self.view.scaleFactor = self.view.scaleFactorForSizeToFit }
+                self.view.layoutDocumentView()
+                if let scroll = self.view.documentView?.enclosingScrollView, let documentView = self.view.documentView {
+                    let target = documentView.convert(self.view.convert(point, from: page), from: self.view)
+                    let clip = scroll.contentView
+                    clip.scroll(to: CGPoint(x: target.x - clip.bounds.width / 2, y: target.y - clip.bounds.height / 2))
+                    scroll.reflectScrolledClipView(clip)
+                }
+                self.scheduleViewport()
+            }
+        }
+    }
+
+    private func applyPageFilter() {
+        guard let content = view.documentView else { return }
+        content.wantsLayer = true
+        content.contentFilters = originalColors ? [] : PDFReadingAppearance.filter(theme: appearanceTheme).map { [$0] } ?? []
+    }
+
 
     /// OCR 结果缓存。按页存，识别过一次就不再重复花钱——
     /// 同一页在 AI 上下文、复制、整书总结这几条路径上会被反复取用。
@@ -62,6 +153,8 @@ final class PDFController: NSObject, ObservableObject {
     }
 
     deinit {
+        if let viewportObserver { NotificationCenter.default.removeObserver(viewportObserver) }
+        viewportWork?.cancel()
         for observer in observers {
             NotificationCenter.default.removeObserver(observer)
         }
@@ -94,12 +187,13 @@ final class PDFController: NSObject, ObservableObject {
             + (tuning.isBaseline ? "（默认·与改造前一致）" : "（非默认：被开关覆盖，见 --pdf-render-slim / --pdf-page-*）"))
     }
 
-    func applyAppearance(theme: ReadingTheme, brightness: Double) {
-        let base = NSColor(hex: theme.isDark ? theme.surfaceHex : 0xE8E8EC)
+    func applyAppearance(theme: ReadingTheme, brightness: Double, original: Bool = false) {
+        appearanceTheme = theme
+        originalColors = original
+        let base = NSColor(hex: theme.surfaceHex)
         let clamped = min(max(brightness, 0.4), 1.0)
-        view.backgroundColor = clamped >= 0.999
-            ? base
-            : (base.blended(withFraction: 1 - clamped, of: .black) ?? base)
+        view.backgroundColor = base.blended(withFraction: 1 - clamped, of: .black) ?? base
+        applyPageFilter()
     }
 
     func apply(flowMode: ReadingFlowMode) {
@@ -155,6 +249,7 @@ final class PDFController: NSObject, ObservableObject {
         ) { [weak self] _ in
             MainActor.assumeIsolated {
                 guard let self else { return }
+                self.scheduleViewport()
                 self.objectWillChange.send()
             }
         })
@@ -166,6 +261,7 @@ final class PDFController: NSObject, ObservableObject {
     func load(url: URL) -> PDFDocument? {
         guard let doc = PDFDocument(url: url) else { return nil }
         suppressCallbacks = true
+        lastPublishedPage = nil
         document = doc
         documentURL = url
         pageCount = doc.pageCount
@@ -195,6 +291,9 @@ final class PDFController: NSObject, ObservableObject {
     private func publishPosition() {
         guard let doc = document, let page = view.currentPage else { return }
         let index = doc.index(for: page)
+        scheduleViewport()
+        guard lastPublishedPage != index else { return }
+        lastPublishedPage = index
         onPositionChange?(index, pageCount)
     }
 

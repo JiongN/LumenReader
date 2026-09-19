@@ -8,14 +8,10 @@ import LumenKit
 /// NavigationSplitView 会强加系统材质与自带的侧栏开关，反而更难收敛视觉。
 struct ReaderContainerView: View {
 
-    let document: OpenDocument
+    /// 这个阅读界面所属的标签会话（文档 + bridge + chat + 智能目录）。
+    @ObservedObject var session: ReaderSession
 
-    /// 沉浸模式下正文的最大宽度。
-    ///
-    /// 880 是个折中：纯文字排版讲舒适行长，660 左右更好读，但 PDF 是**整页渲染**，
-    /// 限到 660 会让 A4 页面缩得字迹发虚。880 在两者之间——PDF 仍能看清，
-    /// EPUB 的行长也比全屏时舒服得多。
-    private static let immersiveMaxWidth: CGFloat = 880
+    private var document: OpenDocument { session.document }
 
     @EnvironmentObject private var state: AppState
     /// 宽度直接观察 `SettingsStore` 而不是经由 `AppState` 间接读：
@@ -45,9 +41,10 @@ struct ReaderContainerView: View {
     /// 容器（窗口内容区）的可用宽度。面板上限要按它动态收窄。
     @State private var containerWidth: CGFloat = 0
 
-    /// 通道与对话模型都挂在 AppState 上（菜单栏、命令面板也要用），这里只是取用
-    private var bridge: ReaderBridge { state.bridge }
-    private var chat: AIChatModel { state.chat }
+    /// 通道与对话模型都属于**当前标签的会话**：多标签并存时，
+    /// A 标签的阅读视图不能把回调接到 B 标签的 bridge 上。
+    private var bridge: ReaderBridge { session.bridge }
+    private var chat: AIChatModel { session.chat }
 
     var body: some View {
         // 卡顿自检：三栏整棵树每次重排都会走到这里。必须写在 body 里而不是做成 ViewModifier——
@@ -64,7 +61,7 @@ struct ReaderContainerView: View {
                 )
                 .frame(width: LeftRail.width)
                 .layoutProbe("sidebarRail")
-                .background(.regularMaterial)
+                .background(DS.Palette.surfaceSunken)
                 .transition(.opacity.combined(with: .offset(x: -10)))
             }
 
@@ -75,7 +72,7 @@ struct ReaderContainerView: View {
                     // 宽度该由版式决定；用户想腾出阅读区空间，收起整块面板即可。
                     .frame(width: sidebarWidth)
                     .layoutProbe("sidebar")
-                    .background(.regularMaterial)
+                    .background(DS.Palette.surfaceSunken)
                     // 淡入 + 10pt 位移，而不是 `.move(edge: .leading)`：
                     // 整宽滑入会让阅读区看起来被「推」了一下，三栏同时在场时尤其晃眼。
                     .transition(.opacity.combined(with: .offset(x: -10)))
@@ -90,11 +87,11 @@ struct ReaderContainerView: View {
             // 限宽对两种文档都成立：PDF 的 PDFView 会自动按新宽度缩放（这正是「舒适行宽」），
             // EPUB 的 WebView 则重新排版，行长更短、更易读。
             HStack(spacing: 0) {
-                if state.isImmersive { Spacer(minLength: 0) }
+
 
                 readerSurface
                     .frame(
-                        maxWidth: state.isImmersive ? Self.immersiveMaxWidth : .infinity,
+                        maxWidth: .infinity,
                         maxHeight: .infinity
                     )
                     .layoutProbe("readerSurface")
@@ -104,12 +101,12 @@ struct ReaderContainerView: View {
                     // AI 输入框的右半边和发送按钮，既看不见也点不到；划词条的居中位置也会
                     // 随 AI 面板的显隐漂移。浮层本来就是给阅读区用的（页码、缩放、划词），
                     // 锚在阅读区才是它的语义位置。
-                    .overlay(alignment: .bottom) { SelectionActionBarLayer() }
+                    .overlay(alignment: .bottom) { if !state.isImmersive { SelectionActionBarLayer() } }
                     // 沉浸时收起状态条：页码已经在底部 HUD 上显示，再留一条属于重复信息，
                     // 而沉浸模式要的恰恰是「屏幕上只有正文」。
                     .overlay(alignment: .bottomTrailing) { ReaderStatusLayer() }
 
-                if state.isImmersive { Spacer(minLength: 0) }
+
             }
 
             if state.isAIPanelVisible && !state.isImmersive {
@@ -121,16 +118,18 @@ struct ReaderContainerView: View {
                     panelIsLeading: false,
                     onCommit: { value in
                         settings.commitAIPanelWidth(value, maxWidth: aiPanelCap)
-                    }
+                    },
+                    onDragStateChange: { bridge.setPanelResizing?($0) }
                 )
 
                 AIPanelView()
                     .frame(width: aiPanelWidth)
                     .layoutProbe("aiPanel")
-                    .background(.regularMaterial)
+                    .background(DS.Palette.surfaceSunken)
                     .transition(.opacity.combined(with: .offset(x: 10)))
             }
         }
+        .layoutProbe("readerHStack")
         // 量窗口内容区宽度。用 background 而不是把 HStack 包进 GeometryReader：
         // GeometryReader 会参与布局并把「谁决定宽度」这件事搅进来，
         // 而这里只是想读一个数，不该反过来影响布局。
@@ -143,22 +142,25 @@ struct ReaderContainerView: View {
         }
         // environmentObject 必须放在所有 overlay 之后：overlay 会把内容包在修饰过的视图
         // 之外，先注入的话 overlay 里的视图看不到这个环境对象，运行时直接 fatalError。
+        // 这里统一注入**本会话**的对象（SessionHostView 也注了一份，这里再注保证
+        // overlay 子树同样拿到的是本标签而不是当前活动标签的通道）。
+        .environmentObject(session)
         .environmentObject(bridge)
         .environmentObject(chat)
-        .environmentObject(state.smartOutline)
+        .environmentObject(session.smartOutline)
         .onChange(of: bridge.metadata) { _, newValue in
-            state.documentMetadata = newValue
+            session.documentMetadata = newValue
         }
         // 单元数由阅读视图异步报上来（PDF 要等文档解析完）。智能目录拿它判定
         // 缓存是否还对得上当前文档——一本被替换过的书必须先把旧目录清掉，
         // 否则用户看到的是一份指向错误页码的目录，比没有更糟。
         .onChange(of: bridge.unitCount) { _, newValue in
-            state.smartOutline.syncUnitCount(newValue, unitName: state.unitName)
+            session.smartOutline.syncUnitCount(newValue, unitName: state.unitName)
         }
         .task(id: document.id) {
             chat.bind(to: document)
-            state.smartOutline.bind(to: document, unitName: state.unitName)
-            state.documentMetadata = bridge.metadata
+            session.smartOutline.bind(to: document, unitName: state.unitName)
+            session.documentMetadata = bridge.metadata
             await applyLaunchDiagnostics()
         }
     }
@@ -251,6 +253,10 @@ struct ReaderContainerView: View {
     /// 必须等文档真的装好之后再动手——阅读视图在 `prepare()` 里会调 `bridge.reset()`，
     /// 早于它插入的状态会被清掉，自检就会得到「浮层没出现」这种假结论。
     private func applyLaunchDiagnostics() async {
+        // 多标签 / 多窗口下，每个标签挂载都会跑到这里；自检在一个进程里只允许跑一次，
+        // 否则后开的标签会重复注入假选区、重复跑智能目录与卡顿自检。
+        guard ReaderContainerDiagnostics.beginOnce() else { return }
+
         // 侧栏页签**先**钉住，再跑后面的自检。
         //
         // 顺序很重要：卡顿自检的滚动阶段要量的正是「位置回调每帧重建缩略图/批注侧栏」
@@ -306,7 +312,7 @@ struct ReaderContainerView: View {
 
         // 「重新生成」自检：需要文档装好（上下文来自 bridge），所以挂在这里
         if LaunchOptions.rerunReport {
-            await RerunAudit.run(state: state)
+            await RerunAudit.run(session: session, state: state)
         }
 
         let needsWork = LaunchOptions.sidebarTab != nil
@@ -345,7 +351,7 @@ struct ReaderContainerView: View {
         if LaunchOptions.injectsDemoAnswer {
             // 长文本排版自检：注入一条含长 URL / 长代码行 / 长标识符的假回答。
             // 注入后等一拍再截图，让「跟随到底部」的滚动落定。
-            state.chat.seedDemoAnswer()
+            session.chat.seedDemoAnswer()
             try? await Task.sleep(nanoseconds: 600_000_000)
         }
 
@@ -410,17 +416,22 @@ struct ReaderContainerView: View {
             + " 缓存记录单元数=\(loaded?.sourceUnitCount ?? -1)"
             + " 与当前文档匹配=\(loaded.map { $0.isValid(forUnitCount: bridge.unitCount) } ?? false)")
 
-        state.generateSmartOutline()
+        state.revealSidebar(tab: .smartOutline)
+        session.smartOutline.generate(
+            bridge: bridge,
+            metadata: bridge.metadata,
+            config: state.settingsStore.activeProvider
+        )
 
         // 轮询到不再「正在跑」。首次生成要走一次真实的模型请求，给足时间但不要无限等。
         let deadline = Date().addingTimeInterval(180)
-        while state.smartOutline.phase.isWorking, Date() < deadline {
+        while session.smartOutline.phase.isWorking, Date() < deadline {
             try? await Task.sleep(nanoseconds: 300_000_000)
         }
         // 让出一点时间给落盘与界面动画落定
         try? await Task.sleep(nanoseconds: 500_000_000)
 
-        switch state.smartOutline.phase {
+        switch session.smartOutline.phase {
         case .failed(let message):
             NSLog("[Lumen][outline] 生成失败：\(message)")
         case .working:
@@ -429,7 +440,7 @@ struct ReaderContainerView: View {
             break
         }
 
-        guard let outline = state.smartOutline.outline else {
+        guard let outline = session.smartOutline.outline else {
             NSLog("[Lumen][outline] 没有产出目录，自检结束")
             return
         }
@@ -467,7 +478,7 @@ struct ReaderContainerView: View {
            number >= 1, outline.entries.indices.contains(number - 1) {
             let entry = outline.entries[number - 1]
             NSLog("[Lumen][outline] 请求第 \(number) 条的摘要：「\(entry.title)」")
-            state.smartOutline.summarize(
+            session.smartOutline.summarize(
                 entry: entry,
                 bridge: bridge,
                 metadata: bridge.metadata,
@@ -478,15 +489,15 @@ struct ReaderContainerView: View {
             // 等的是 `summarizing` 而不是 `phase`：摘要是逐条并行的，
             // 它不参与「骨架生成」那条 phase 状态机。等错了对象会立刻退出循环，
             // 然后在请求还在飞的时候读到一个空摘要——那看起来就像功能坏了。
-            while state.smartOutline.summarizing.contains(entry.id), Date() < summaryDeadline {
+            while session.smartOutline.summarizing.contains(entry.id), Date() < summaryDeadline {
                 try? await Task.sleep(nanoseconds: 300_000_000)
             }
             try? await Task.sleep(nanoseconds: 400_000_000)
 
-            if case .failed(let message) = state.smartOutline.phase {
+            if case .failed(let message) = session.smartOutline.phase {
                 NSLog("[Lumen][outline] 摘要失败：\(message)")
             }
-            let after = state.smartOutline.outline?.entries.first(where: { $0.id == entry.id })
+            let after = session.smartOutline.outline?.entries.first(where: { $0.id == entry.id })
             NSLog("[Lumen][outline] 摘要结果 字数=\(after?.summary?.count ?? 0)"
                 + " 内容=\(after?.summary?.replacingOccurrences(of: "\n", with: "⏎").prefix(200).description ?? "nil")")
         }
@@ -545,6 +556,7 @@ struct ReaderStatusLayer: View {
 
     @EnvironmentObject private var bridge: ReaderBridge
     @EnvironmentObject private var state: AppState
+    @EnvironmentObject private var session: ReaderSession
 
     @State private var isHovering = false
     /// 页码那块的悬停态。与整条状态条的 `isHovering` 分开：
@@ -620,7 +632,7 @@ struct ReaderStatusLayer: View {
     }
 
     private var documentIsPDF: Bool {
-        state.document?.kind == .pdf
+        session.document.kind == .pdf
     }
 }
 
@@ -676,6 +688,7 @@ struct SelectionActionBar: View {
 
     @EnvironmentObject private var bridge: ReaderBridge
     @EnvironmentObject private var state: AppState
+    @EnvironmentObject private var session: ReaderSession
 
     /// 批注输入态。做成同一条浮层里就地展开，而不是弹出一个 sheet：
     /// 手刚划完词，视线在原文上，弹窗把注意力拉走会让「批的是哪句」这件事变模糊。
@@ -785,7 +798,7 @@ struct SelectionActionBar: View {
         if !state.isAIPanelVisible {
             withAnimation(DS.Motion.panel) { state.isAIPanelVisible = true }
         }
-        state.pendingAIRequest = AIRequest(kind: kind, selection: selection)
+        session.pendingAIRequest = AIRequest(kind: kind, selection: selection)
     }
 
     private func actionButton(_ title: String, icon: String, action: @escaping () -> Void) -> some View {
@@ -808,5 +821,20 @@ struct SelectionBarButtonStyle: ButtonStyle {
                 RoundedRectangle(cornerRadius: DS.Radius.s, style: .continuous)
                     .fill(configuration.isPressed ? DS.Palette.accentSoft : .clear)
             )
+    }
+}
+
+
+/// 阅读视图自检的进程级闸门：多标签 / 多窗口下每个标签挂载都会跑
+/// `applyLaunchDiagnostics`，自检只允许在首个标签上跑一次。
+@MainActor
+enum ReaderContainerDiagnostics {
+    private static var didRun = false
+
+    /// 返回是否允许本次执行（首个调用者拿到 true，之后全部 false）。
+    static func beginOnce() -> Bool {
+        if didRun { return false }
+        didRun = true
+        return true
     }
 }

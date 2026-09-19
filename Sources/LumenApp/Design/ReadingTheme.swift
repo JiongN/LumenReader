@@ -26,28 +26,28 @@ public struct ReadingTheme: Sendable, Equatable {
     // MARK: - 预设
 
     public static let paper = ReadingTheme(
-        id: .paper, backgroundHex: 0xFFFFFF, surfaceHex: 0xFAFAFA,
-        textHex: 0x1F1F21, secondaryTextHex: 0x6E6E73, accentHex: 0x2F5BEA, isDark: false
+        id: .paper, backgroundHex: 0xF5F4EF, surfaceHex: 0xEAECE8,
+        textHex: 0x292D30, secondaryTextHex: 0x62686A, accentHex: 0x38657B, isDark: false
     )
 
     public static let warm = ReadingTheme(
-        id: .warm, backgroundHex: 0xF7EFDD, surfaceHex: 0xFBF6EA,
-        textHex: 0x352B1C, secondaryTextHex: 0x7A6C55, accentHex: 0xB4762A, isDark: false
+        id: .warm, backgroundHex: 0xF3EBDD, surfaceHex: 0xE8DFCF,
+        textHex: 0x393229, secondaryTextHex: 0x71634F, accentHex: 0x806344, isDark: false
     )
 
     public static let sage = ReadingTheme(
-        id: .sage, backgroundHex: 0xE6EDE4, surfaceHex: 0xEFF4EE,
-        textHex: 0x22302A, secondaryTextHex: 0x5E6F66, accentHex: 0x3B7A5A, isDark: false
+        id: .sage, backgroundHex: 0xE8ECE3, surfaceHex: 0xDDE3D7,
+        textHex: 0x2E3730, secondaryTextHex: 0x5C685A, accentHex: 0x596C53, isDark: false
     )
 
     public static let dusk = ReadingTheme(
-        id: .dusk, backgroundHex: 0x1E2430, surfaceHex: 0x252C3A,
-        textHex: 0xD8DFE9, secondaryTextHex: 0x8F9AAB, accentHex: 0x6D9BFF, isDark: true
+        id: .dusk, backgroundHex: 0x252E36, surfaceHex: 0x2E3841,
+        textHex: 0xDBE2E5, secondaryTextHex: 0xAFBBC2, accentHex: 0x91AFC0, isDark: true
     )
 
     public static let midnight = ReadingTheme(
-        id: .midnight, backgroundHex: 0x16181D, surfaceHex: 0x1E2127,
-        textHex: 0xCCD3DD, secondaryTextHex: 0x848C99, accentHex: 0x7AA2FF, isDark: true
+        id: .midnight, backgroundHex: 0x202326, surfaceHex: 0x292D30,
+        textHex: 0xD5D8D6, secondaryTextHex: 0xAFB8B2, accentHex: 0x9BAEAA, isDark: true
     )
 
     /// 可选主题列表。
@@ -129,6 +129,8 @@ public struct ReadingTheme: Sendable, Equatable {
           --lm-text-align: \(reader.textAlign.cssValue);
           --lm-para-spacing: \(String(format: "%.2f", reader.paragraphSpacing))em;
           --lm-content-width: \(Int(reader.contentWidth))px;
+          --lm-columns: \(reader.epubDoubleColumn ? 2 : 1);
+          --lm-paged: \(reader.epubDoubleColumn || reader.flowMode == .paged ? 1 : 0);
           --lm-selection: \(cssHex(accentHex))\(isDark ? "4D" : "33");
         }
         """
@@ -155,9 +157,13 @@ public struct ReadingTheme: Sendable, Equatable {
       line-height: var(--lm-line-height) !important;
       letter-spacing: var(--lm-letter-spacing) !important;
       margin: 0;
-      padding: 0 6vw calc(var(--lm-font-size) * 4) 6vw;
-      max-width: var(--lm-content-width);
-      margin-inline: auto;
+      box-sizing: border-box !important;
+      width: 100% !important;
+      min-width: 0 !important;
+      max-width: none !important;
+      padding: 28px clamp(24px, 5vw, 72px) 64px !important;
+      margin: 0 !important;
+      overflow-wrap: anywhere;
       /* 中文排版：两端对齐 + 行内避头尾 + 标点悬挂 */
       text-align: var(--lm-text-align);
       text-justify: inter-ideograph;

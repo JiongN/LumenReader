@@ -62,6 +62,7 @@ struct PDFReaderView: View {
         }
         .task(id: document.id) { await prepare() }
         .onChange(of: theme.id) { _, _ in applyAppearance() }
+        .onChange(of: reader.pdfOriginalColors) { _, _ in applyAppearance() }
         .onChange(of: reader.pdfCanvasBrightness) { _, _ in applyAppearance() }
         .onChange(of: reader.flowMode) { _, newValue in controller.apply(flowMode: newValue) }
         .onChange(of: isOCRRunning) { _, running in
@@ -179,7 +180,7 @@ struct PDFReaderView: View {
     }
 
     private func applyAppearance() {
-        controller.applyAppearance(theme: theme, brightness: reader.pdfCanvasBrightness)
+        controller.applyAppearance(theme: theme, brightness: reader.pdfCanvasBrightness, original: reader.pdfOriginalColors)
     }
 
     // MARK: - 载入
@@ -401,8 +402,15 @@ struct PDFReaderView: View {
 
         // 只报告失败：成功那句由具体动作来说（「已写入原 PDF 文件」比
         // 「已保存到原文件」更能说明改的是哪本书），两条 toast 叠着看只会打架。
-        controller.onFileSaved = { [weak state] ok, message in
+        let thumbnailURL = document.url
+        controller.onFileSaved = { [weak state, weak bridge] ok, message in
             if !ok { state?.showToast(message, isError: true) }
+            else if let bridge {
+                // A new independently opened document observes the saved annotation revision.
+                let renderer = PDFThumbnailRenderer(url: thumbnailURL)
+                bridge.thumbnailProvider = { index, size in renderer.render(index: index, size: size) }
+                bridge.annotationRevision += 1
+            }
         }
         bridge.addHighlight = { [weak controller] note in
             guard let controller else { return }
@@ -535,9 +543,10 @@ struct PDFReaderView: View {
 
         // 缩略图侧栏的数据源。这里只暴露一个取图闭包，缓存与懒加载策略留在
         // ThumbnailPane，因为它才是实际可见性的知情者。
-        bridge.thumbnailProvider = { [weak controller] index, size in
-            controller?.document?.page(at: index)?.thumbnail(of: size, for: .mediaBox)
-        }
+        let renderer = PDFThumbnailRenderer(url: document.url)
+        bridge.thumbnailProvider = { index, size in renderer.render(index: index, size: size) }
+        bridge.setPanelResizing = { [weak controller] active in controller?.setPanelResizing(active) }
+        controller.connectViewport(bridge.viewport)
     }
 }
 

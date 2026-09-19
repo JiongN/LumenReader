@@ -51,6 +51,9 @@ enum LaunchOptions {
     }
 
     static var openPath: String? { value(for: "--open") }
+    /// 自检：启动 N 秒后把当前标签拆到独立窗口（验证「在独立窗口打开」）。
+    static var detachAfter: Double? { Double(value(for: "--detach-after") ?? "") }
+
     static var capturePath: String? { value(for: "--capture") }
     static var captureDelay: Double { Double(value(for: "--capture-delay") ?? "") ?? 2.5 }
     /// 启动后自动发起一次提问。用于端到端自检 AI 链路。
@@ -142,6 +145,14 @@ enum LaunchOptions {
 
     /// 自检用：启动后直接进入沉浸模式，核对「面板全收 + 正文居中限宽」。
     static var startsImmersive: Bool { flag("--immersive") }
+
+    /// 自检用：沉浸模式下强制翻出底部控制条：`--hud-reveal 1`。
+    ///
+    /// 那条控制条平时只在鼠标压进底部 90pt 感应带时才浮现，无头截图碰不到它；
+    /// 而它是全应用读 `@EnvironmentObject` 最多的视图（state / bridge / keyBindings
+    /// 三个都读），缺任何一个都会当场崩溃。历史上「沉浸条一浮现就闪退」的崩溃
+    /// 就发生在这里——不强制翻出来，这条路径在自检里永远是盲区。
+    static var hudRevealed: Bool { flag("--hud-reveal") }
 
     /// 打印缩略图的渲染/跳过明细：`--thumb-report 1`。
     ///
@@ -386,6 +397,9 @@ enum LaunchOptions {
 
     /// 打印快捷键表并实跑一遍改绑规则：`--keys-report 1`。
     static var keysReport: Bool { flag("--keys-report") }
+
+    /// 合成一条组合键事件喂给全局路由，证明按键真的能被路由消费：`--shortcut-report 1`。
+    static var shortcutReport: Bool { flag("--shortcut-report") }
 
     /// 连同标题栏与工具栏一起截：`--capture-chrome 1`。
     ///

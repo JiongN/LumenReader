@@ -528,7 +528,7 @@ final class AIChatModel: ObservableObject {
     private func makeProvider(_ config: AIProviderConfig) -> OpenAICompatibleProvider {
         OpenAICompatibleProvider(
             config: config,
-            apiKey: AIKeychain.read(account: config.keychainAccount) ?? ""
+            apiKey: AICredentialStore.read(account: config.keychainAccount) ?? ""
         )
     }
 

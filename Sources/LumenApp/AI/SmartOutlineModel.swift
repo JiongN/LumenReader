@@ -138,7 +138,7 @@ final class SmartOutlineModel: ObservableObject {
             do {
                 let provider = OpenAICompatibleProvider(
                     config: config,
-                    apiKey: AIKeychain.read(account: config.keychainAccount) ?? ""
+                    apiKey: AICredentialStore.read(account: config.keychainAccount) ?? ""
                 )
                 let raw = try await provider.completeText(messages: messages)
                 guard !Task.isCancelled else { return }
@@ -228,7 +228,7 @@ final class SmartOutlineModel: ObservableObject {
             do {
                 let provider = OpenAICompatibleProvider(
                     config: config,
-                    apiKey: AIKeychain.read(account: config.keychainAccount) ?? ""
+                    apiKey: AICredentialStore.read(account: config.keychainAccount) ?? ""
                 )
                 let summary = try await provider.completeText(messages: messages)
                 guard !Task.isCancelled else { return }

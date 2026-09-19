@@ -18,7 +18,7 @@ enum RerunAudit {
     /// 桩服务转储请求体的路径，见 `tools/mock_openai_server.py`
     private static let requestDumpPath = "/tmp/lumen-mock-requests.jsonl"
 
-    static func run(state: AppState) async {
+    static func run(session: ReaderSession, state: AppState) async {
         var passed = 0
         var failures: [String] = []
         func check(_ name: String, _ ok: Bool, _ detail: String = "") {
@@ -27,8 +27,8 @@ enum RerunAudit {
                   + (ok || detail.isEmpty ? "" : " —— \(detail)"))
         }
 
-        let chat = state.chat
-        let bridge = state.bridge
+        let chat = session.chat
+        let bridge = session.bridge
 
         guard let config = state.settingsStore.activeProvider, config.isConfigured else {
             NSLog("[Lumen][rerun] ❌ 没有可用的 AI 服务商。这条自检要配合 --mock-ai 1 跑")

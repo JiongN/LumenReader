@@ -1,5 +1,13 @@
 import SwiftUI
 import AppKit
+import Observation
+
+@Observable
+final class ThemePalette {
+    static let shared = ThemePalette()
+    var theme = ReadingTheme.paper
+}
+
 
 // MARK: - 动态色工具
 
@@ -65,49 +73,14 @@ public enum DS {
     // MARK: 语义色
 
     public enum Palette {
-        /// 主强调色：低饱和的蓝紫灰。整个界面唯一的「彩色」来源，
-        /// 饱和度刻意压低（对比旧版 #2F5BEA）——阅读器里，UI 的任何颜色
-        /// 都是内容的竞争对手，强调色只需要「指路」，不需要「抢眼」。
-        public static let accent = Color.dual(
-            light: NSColor(hex: 0x56639F),
-            dark: NSColor(hex: 0x8E9BD1)
-        )
-
-        public static let accentSoft = Color.dual(
-            light: NSColor(hex: 0x56639F, alpha: 0.10),
-            dark: NSColor(hex: 0x8E9BD1, alpha: 0.16)
-        )
-
-        /// 正文主色（UI 区域，不是阅读区）
-        public static let textPrimary = Color.dual(
-            light: NSColor(hex: 0x1C1C1E),
-            dark: NSColor(hex: 0xF2F2F7)
-        )
-
-        public static let textSecondary = Color.dual(
-            light: NSColor(hex: 0x6C6C70),
-            dark: NSColor(hex: 0x9A9AA0)
-        )
-
-        public static let textTertiary = Color.dual(
-            light: NSColor(hex: 0x9A9AA0),
-            dark: NSColor(hex: 0x6C6C70)
-        )
-
-        public static let separator = Color.dual(
-            light: NSColor(hex: 0x000000, alpha: 0.08),
-            dark: NSColor(hex: 0xFFFFFF, alpha: 0.10)
-        )
-
-        public static let surfaceRaised = Color.dual(
-            light: NSColor(hex: 0xFFFFFF),
-            dark: NSColor(hex: 0x1E1E20)
-        )
-
-        public static let surfaceSunken = Color.dual(
-            light: NSColor(hex: 0xF5F5F7),
-            dark: NSColor(hex: 0x141416)
-        )
+        public static var accent: Color { ThemePalette.shared.theme.accent }
+        public static var accentSoft: Color { accent.opacity(ThemePalette.shared.theme.isDark ? 0.18 : 0.10) }
+        public static var textPrimary: Color { ThemePalette.shared.theme.text }
+        public static var textSecondary: Color { ThemePalette.shared.theme.secondaryText }
+        public static var textTertiary: Color { ThemePalette.shared.theme.secondaryText }
+        public static var separator: Color { textPrimary.opacity(0.10) }
+        public static var surfaceRaised: Color { ThemePalette.shared.theme.background }
+        public static var surfaceSunken: Color { ThemePalette.shared.theme.surface }
 
         /// 状态色
         public static let success = Color.dual(light: NSColor(hex: 0x1DA05A), dark: NSColor(hex: 0x37D07A))
