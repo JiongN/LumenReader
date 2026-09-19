@@ -10,16 +10,23 @@
 
 ```
 ┌───────────────────────────────────────────────────────────────────┐
-│  LumenApp（界面层，SwiftUI）                                       │
+│  LumenApp（界面层，SwiftUI + 少量 AppKit）                        │
 │                                                                   │
-│   RootView ── 窗口外壳：工具栏 / 命令面板 / 跳页 / 沉浸 HUD        │
-│     └─ ReaderContainerView ── 三栏布局 + 可拖拽分隔线              │
-│          ├─ LeftRail             常驻纵向图标栏（页签入口）        │
-│          ├─ SidebarColumn        目录 · 智能 · 搜索 · 批注 · 页面   │
-│          ├─ PDFReaderView / EPUBReaderView                        │
-│          └─ AIPanelView                                           │
+│   WindowManager ── 窗口的唯一裁决者（NSWindow 显式创建）           │
+│     ├─ AppServices ── 进程级单例：设置 / 最近打开 / 快捷键 / 记忆   │
+│     └─ 每个窗口一个 AppState（工作区）                             │
+│          ├─ TabBar ── 自定义标签栏（一个窗口多份文档）             │
+│          ├─ ReaderSession[] ── 每份文档一个会话（保活叠层）        │
+│          └─ RootView ── 窗口外壳：工具栏 / 命令面板 / 跳页 / HUD   │
+│               └─ ReaderContainerView ── 三栏布局 + 可拖拽分隔线    │
+│                    ├─ LeftRail             常驻纵向图标栏（页签）  │
+│                    ├─ SidebarColumn        目录·智能·搜索·批注·页面 │
+│                    ├─ PDFReaderView / EPUBReaderView              │
+│                    └─ AIPanelView                                 │
 │                                                                   │
-│   AppState ── 全局状态与动作（菜单栏、命令面板、侧栏共用）         │
+│   AppState ── 窗口级状态与动作（标签集合、面板显隐、沉浸、         │
+│              菜单栏、命令面板）；文档级状态用同名计算属性代理到    │
+│              当前标签的 ReaderSession                              │
 └───────────────────────────┬───────────────────────────────────────┘
                             │  ReaderBridge（唯一通道）
 ┌───────────────────────────┴───────────────────────────────────────┐
@@ -88,24 +95,36 @@ ReaderBridge
 
 ## 3. 三条主要数据流
 
-### 3.1 打开文档
+### 3.1 打开文档（进标签，不进新窗口）
 
 ```
+外部事件（访达打开方式 / Dock / open -a）
+  └─ AppDelegate.application(_:open:) → WindowManager.openExternally(urls:)
+       └─ 路由到最前面窗口的工作区（没有窗口就先建一个）
+
 AppState.open(url:)
-  └─ 校验存在性 → 判定 DocumentKind → RecentDocuments.record → 发布 OpenDocument
-       └─ ReaderContainerView 的 .task(id: document.id) 触发
-            ├─ chat.bind(to:)           载入这本书的对话存档
-            ├─ smartOutline.bind(to:)   载入这本书的智能目录缓存
-            └─ PDFReaderView / EPUBReaderView 的 prepare()
-                 ├─ bridge.reset()      清掉上一本的残留（否则会串台）
-                 ├─ 解析文档、建目录、检测是否扫描件
-                 ├─ wireCallbacks()     注册命令闭包
-                 └─ wireDocumentWideProviders()  注册整本书级的数据通道
+  └─ 校验存在性 → 判定 DocumentKind → RecentDocuments.record
+       ├─ 同一路径已在任意窗口打开？→ 切到那个标签并把窗口置前（去重）
+       └─ 否则新建 ReaderSession(document:) 加进 sessions 并激活
+            └─ SessionHostView 懒挂载（首次切到才挂载，挂过就保活）
+                 └─ ReaderContainerView 的 .task(id: document.id) 触发
+                      ├─ chat.bind(to:)           载入这本书的对话存档
+                      ├─ smartOutline.bind(to:)   载入这本书的智能目录缓存
+                      └─ PDFReaderView / EPUBReaderView 的 prepare()
+                           ├─ bridge.reset()      清掉上一本的残留（否则会串台）
+                           ├─ 解析文档、建目录、检测是否扫描件
+                           ├─ wireCallbacks()     注册命令闭包
+                           └─ wireDocumentWideProviders()  全书级数据通道
 ```
 
 **顺序有个坑**：`prepare()` 里会调 `bridge.reset()`，早于它插入的状态会被清掉。
 所以自检通道（`applyLaunchDiagnostics`）必须等文档真的装好之后再动手——
 否则会得到「浮层没出现」这种假结论。
+
+**冷启动竞态**：从访达带文件冷启动时，odoc 事件可能早于
+`applicationDidFinishLaunching` 送达，事件处理会先把窗口建好。
+所以 `WindowManager.startup()` 必须先检查「是否已有事件建好的窗口」，
+无条件再建一个就会得到「文档窗口 + 空白欢迎窗口」两个窗口。
 
 ### 3.2 一次 AI 请求
 
@@ -358,6 +377,52 @@ onDisappear                 → LayoutAuditLog.remove(name)     ← 缺这一句
 可证伪：注释掉 `onDisappear` 后重跑 `--run-action toggleAIPanel --layout-report 1`，
 dump 里立刻重新出现那帧越界的 `aiPanel`。
 
+### 3.10 窗口与标签：一个窗口多份文档，标签可拆成独立窗口
+
+**窗口由 AppKit 显式创建，不走 SwiftUI `WindowGroup`。** 原因很硬：
+`WindowGroup` 对外部文件打开事件的默认处理就是「每份文件开一个新窗口」，
+而且没有公开 API 把它改成「进当前窗口的新标签」。改造后 SwiftUI 只保留
+`Settings` 一个场景；阅读器窗口是 `NSWindow` + `NSHostingController(RootView)`，
+由 `WindowManager` 统一生灭，并把系统原生窗口标签化关掉
+（`tabbingMode = .disallowed`，否则窗口菜单会冒出与自定义标签冲突的项）。
+
+状态按三层切开：
+
+```
+进程级（AppServices，单例）  设置 / 最近打开 / 快捷键 / 记忆
+窗口级（AppState，每窗口一份）标签集合、当前标签、面板显隐、沉浸、alert/toast、命令面板
+文档级（ReaderSession，每标签一份） OpenDocument / ReaderBridge / AIChatModel
+                              / SmartOutlineModel / 元数据 / pendingAIRequest / busy
+```
+
+`AppState` 保留了 `document` / `bridge` / `chat` / `smartOutline` / `busy`
+等同名计算属性，一律解析到当前标签的会话——菜单栏、命令面板、浮层这些窗口级
+代码因此不用知道标签的存在，60 多个调用点原样工作。
+
+**标签内容保活**：已访问过的标签在 `ZStack` 里叠放，非当前标签
+`opacity(0) + allowsHitTesting(false)`，不销毁。切回标签不重新解析 PDF /
+重载 WebView，滚动位置、划词、流式回答都还在；代价是后台标签占内存，
+标签关闭时视图走 `onDisappear`（阅读进度在这里落盘）。
+
+**当前标签指针必须自洽**。`activeSessionID` 是视图层判断显隐 / 透明度的依据；
+标签被关闭或拆走后，若只更新 `activeSession` 而不校正 id，剩下的标签会永远
+停在 `opacity(0)`——界面只剩标签栏、正文一片空白。`syncActiveSession()`
+负责把失效 id 校正到邻接标签（优先右侧），这是这类「叠层标签」最容易踩的坑。
+
+**「在独立窗口打开」是会话整体迁移**：`WindowManager.detach` 把
+`ReaderSession` 从原工作区摘走、交给新窗口的新工作区。对话、智能目录跟着走；
+但 PDFView / WKWebView 由 SwiftUI 持有、无法跨窗口搬运，新窗口会重新解析文档，
+阅读位置由 `ReadingStateStore` 落盘后自动恢复（实测可恢复到原页 / 原章）。
+
+**外部打开去重**：同一路径已经在任意窗口打开时，不重复开第二份，
+直接切到那个标签并把窗口置前。
+
+工具栏上两块面板的开关是对称的一对：左侧 `sidebar.leading`、右侧
+`sidebar.trailing`，都始终存在（无文档时禁用）。AI 面板头部不再放第二个
+收起按钮——同一个动作在窗口右侧留两个相距不到 30pt 的入口是重复设计。
+
+---
+
 ## 4. 存储布局
 
 `~/Library/Application Support/com.jn.lumen/`
@@ -422,6 +487,11 @@ docs/<路径哈希>/
 | **右键菜单的判定抽成纯函数**（`PDFContextMenuPlanner.items`） | 右键菜单无法自动化（无辅助功能权限），把「该出现哪些项 / 叫什么文案 / 该不该禁用」抽成纯函数，用表驱动断言验它，视图层只做翻译 |
 | **快捷键记录物理键，不记输入法产物** | 录制器拿的是 `charactersIgnoringModifiers`，中文输入法下按 `]` 会得到全角 `】`（U+3011），存进去物理上按不出来——用户「AI 面板快捷键不生效」的根因。录制时全角→半角归一化并拒绝非可键入字符；载入时对旧的坏绑定做一次性迁移 |
 | **不可键入的绑定载入时丢弃并回落默认，且打日志** | 静默丢弃会让用户以为是自己改错了却找不到原因。丢弃 / 迁移都要 `NSLog` 说明是哪一个动作 |
+| **阅读器窗口用 AppKit 显式创建，不用 `WindowGroup`** | 用户要求「默认一个窗口多标签」，而 `WindowGroup` 对外部打开事件只会开新窗口、且无公开 API 改成进标签。显式 `NSWindow` + `NSHostingController` 后，`application(_:open:)` 统一路由到 `WindowManager`，行为才完全可控；SwiftUI 只留设置场景 |
+| **文档级状态抽成 `ReaderSession`，窗口级状态留在 `AppState`** | 多标签的隔离单位是文档：bridge/chat/智能目录必须各走各的，否则后台标签会串对话；而面板显隐、沉浸、命令面板是窗口的事。`AppState` 用同名计算属性代理到当前标签，旧调用点零改动 |
+| **标签用 ZStack 保活，而不是切走就销毁** | 重新解析 PDF / 重建 WebView 既慢又丢状态（滚动、划词、流式回答）。叠层隐藏的代价只是内存，且未访问过的标签仍懒挂载、关闭即 `onDisappear` 落盘 |
+| **右键菜单提供「在独立窗口打开」，默认不开新窗口** | 多标签是默认形态；独立窗口是用户显式表达「我要并排看两本」时的例外。迁移的单位是整个会话，PDFView 不能跨窗口搬运，位置靠阅读进度存储恢复 |
+| **AI 面板开关只留工具栏最右一枚（`sidebar.trailing`）** | 与左侧栏开关对称、始终在固定位置；面板头部再放一枚收起按钮，等于同一动作在窗口右侧留两个入口 |
 
 ---
 
@@ -444,3 +514,9 @@ docs/<路径哈希>/
   距离（与 PDF 同一套 4px 阈值），所以走的是真实手势门，不是长度退化。
   但 EPUB 走 WebKit，阅读容器出现比 PDF 晚，自检要留 `--capture-delay 8`。
 - OCR 走纯 Vision 框架，没有引入第三方识别库；扫描件的识别质量取决于源图质量。
+- **标签右键菜单与菜单条目没有逐条做 GUI 自动化**（无辅助功能权限）。
+  窗口路由、多标签、拆独立窗口走的是真实 LaunchServices 打开事件 +
+  `--detach-after` 自检通道（截图验证：两份文件进同一窗口、拆出后两个窗口
+  各自正确渲染、会话状态随标签迁移）；右键菜单本身的弹出与点击未程序化验证。
+- **后台保活标签占内存**：每份打开过的文档的 PDFView / WebView 都留在叠层里。
+  关闭标签即释放；目前没有「超过 N 个标签自动卸载后台标签」的策略。

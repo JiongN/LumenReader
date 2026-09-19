@@ -65,6 +65,8 @@
 | `--immersive 1` | 启动即进沉浸模式，走真实入口 `setImmersive` |
 | `--demo-selection 1` | 塞一段**拖动来源**的假选区（正常要鼠标划词才能触发，没有辅助功能权限）。浮条应当出现 |
 | `--demo-click 1` | 塞一段**单击来源**的假选区（内容与上一条完全相同，只把来源标成单击）。用于证伪「划词条只在拖动时出现」——此时 `selectionBar` 探针应当**缺席** |
+| `--epub-columns 1\|2` | 启动期的 EPUB 栏数（等价于设置项「EPUB 双栏阅读」）。`2` 会同时打开分页模式 |
+| `--epub-layout-report 1` | **EPUB 布局自检**：直接问真实 WebKit 文档「几栏 / 是不是分页 / 翻页翻了多远 / 能不能到底 / 能不能回退」。见第四节同名小节 |
 
 ### 行为
 
@@ -96,6 +98,8 @@
 | `--rerun-report 1` | 「重新生成」自检：需配合 `--mock-ai 1`；断言气泡被替换、history 未叠加 |
 | `--resize-report 1` | 面板宽度自检（12 项）。**新语义**：写入组 7 项（AI 面板宽度写入后布局跟随、越界钳制、下限钳回、逐帧写入不越界 / 终值 / 布局一致、**侧栏宽度是常量不受设置影响**）+ 窗口缩放组 5 项（最挤时阅读区 ≥ 320pt、图标栏完整在窗内、AI 面板不越右缘、拉宽后回到落库偏好、极窄容器不超出预算）。**窗口尺寸由自检自己控制**，并走一遍「宽 → 最挤 → 再拉宽」 |
 | `--ask "问题"` | 启动后自动发起一次提问（端到端跑 AI 链路） |
+| `--detach-after <秒>` | 启动 N 秒后把**当前标签拆成独立窗口**（验会话迁移：对话与智能目录跟走、阅读位置靠进度存储恢复） |
+| `--hud-reveal 1` | 在沉浸模式下**强制翻出**底部控制条。那条控制条平时只在鼠标压进底部 90pt 感应带时才浮现，无头截图碰不到它；而它是全应用读 `@EnvironmentObject` 最多的视图，缺一个就崩——历史上「沉浸条一浮现就闪退」就在那里 |
 
 ### AI 与桩服务
 
@@ -111,6 +115,7 @@
 | 开关 | 用途 |
 | --- | --- |
 | `--keys-report 1` | 打印快捷键表 + 撞车检查 + 实跑一遍改绑规则（含全角→半角归一化表、载入期迁移、不可键入绑定被丢弃；共 55 项） |
+| `--shortcut-report 1` | 合成一条组合键事件喂给全局路由，证明按键**真的能被路由消费**（`--keys-report` 只验规则表，不验事件能不能走到动作） |
 | `--ocr-menu-report 1` | OCR 右键菜单自检：表驱动断言「该出现哪些项 / 叫什么文案 / 该不该禁用」（纯函数 `PDFContextMenuPlanner.items`，16 项） |
 | `--keychain-report 1` | 打印钥匙串访问成本与缓存状态（**只读**，不写不删用户钥匙串） |
 | `--font-report 1` | 打印字体目录统计与断言 |
@@ -478,6 +483,52 @@ dist/Lumen.app/Contents/MacOS/Lumen --open /tmp/lumen-test/large.pdf \
 dist/Lumen.app/Contents/MacOS/Lumen --ocr-menu-report 1 --capture /tmp/d.png --capture-delay 3
 #   日志： [Lumen][ocr-menu] 自检：通过 16 项，失败 0 项 ✅
 ```
+
+### 验证 EPUB 双栏与翻页：`--epub-layout-report 1`
+
+EPUB 走 WebKit，布局是 CSS 算出来的，Swift 侧**看不见**。要验就只能去问 DOM。
+这条通道把断言打在真实文档上，而不是「模拟计数器」上。
+
+```bash
+BOOK="长一点的 epub 路径"
+
+# 双栏（分页）
+dist/Lumen.app/Contents/MacOS/Lumen --open "$BOOK" --window-size 1400x900 --sidebar 0 --ai 0 \
+  --jump-to 9 --epub-columns 2 --epub-layout-report 1 --capture /tmp/e2.png --capture-delay 12
+# 单栏（连续流）
+dist/Lumen.app/Contents/MacOS/Lumen --open "$BOOK" --window-size 1400x900 --sidebar 0 --ai 0 \
+  --jump-to 9 --epub-columns 1 --epub-layout-report 1 --capture /tmp/e1.png --capture-delay 12
+```
+
+日志一行 JSON，`pass` 是总判。实测（1400×900 内容区 1348pt，真实外文书第 9 章）：
+
+| 字段 | 双栏 | 单栏 | 意思 |
+| --- | --- | --- | --- |
+| `columns` / `expectedColumns` | 2 / 2 | 1（`auto`）/ 1 | **设置与渲染是否对得上** |
+| `paged` / `pagedWanted` | true / true | false / false | 分页模式是否跟上栏数 |
+| `oneViewport` | `forwardX=1348` ✓ | — | 一次翻页正好一个视口宽，不是「动了一下」 |
+| `endReached` / `endStops` | ✓ / ✓ | — | 末页残留能翻到底；到底之后**不许再翻** |
+| `backwardMoved` | ✓ | `forwardY=645` ✓ | 能往回翻 |
+| `noSideways` | — | `horizontal=0` ✓ | 连续流不许横向溢出 |
+| `fillsWidth` | 1292 = 1348−56（28pt 页边距×2） | 1348 | 正文铺满可视宽 |
+
+**两个坑，都是踩出来的**：
+
+1. **不许并发跑**。`didFinish` 会为同一份 DOM 触发多次（`--jump-to` 先落第一章再跳章），
+   两轮自检同时改 `--lm-paged` / `--lm-columns` 会互相覆盖——实测表现是
+   「一次翻页跳了两个视口宽」（2696 = 2×1348）和 `continuous=false` 这种与设置矛盾的读数。
+   现在有互斥锁，重复的触发会打「跳过：上一轮仍在跑 / 已取得充分读数」。
+2. **撑不满一屏就是无效读数**。短文档 `maxScroll=0`，翻页分支整段被跳过。
+   早期版本照样报 `pass:true`——典型的「0 冒充通过」。现在明确报
+   `insufficient:true` 且 `pass:false`，**必须换一份撑得满的长文档重跑**。
+
+**这条通道的证伪对照**（证明它真会亮红灯，不是只会点头）：
+
+- 对照 A：拿 `typography.epub`（一屏装得下）跑 → 应报 `insufficient:true, pass:false`。
+- 对照 B：把 `EPUBLayoutAudit.swift` 里 `innerWidth >= 760` 的门槛临时改成 `99999`
+  （期望 1 栏、应用渲染 2 栏）→ 应报 `matchesSetting:false, pass:false`。改完记得改回来。
+
+---
 
 ### 自检会留下什么（副作用清单）
 
