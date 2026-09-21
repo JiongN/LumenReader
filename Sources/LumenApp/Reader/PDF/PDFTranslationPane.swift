@@ -16,9 +16,12 @@ struct PDFTranslationPane: View {
     @State private var localError: String?
 
     private var reader: ReaderSettings { settings.reader }
-    private var pageIndex: Int { bridge.currentUnitIndex }
-    private var pageParagraphs: [PDFParagraph] {
-        controller.paragraphs.filter { $0.fragment(on: pageIndex) != nil }
+
+    /// 全篇段落按页分节。`controller.paragraphs` 已按「页号升序 → 页内阅读顺序」排好，
+    /// 这里只负责分组、保持每页内部顺序不变。跨页续段按自己的起始页归入一节（只出现一次）。
+    private var pageSections: [(page: Int, paragraphs: [PDFParagraph])] {
+        let grouped = Dictionary(grouping: controller.paragraphs) { $0.pageIndex }
+        return grouped.keys.sorted().map { (page: $0, paragraphs: grouped[$0] ?? []) }
     }
     private var targetName: String {
         TranslationLanguage.target(for: reader.translationTargetLanguage).displayName
@@ -211,27 +214,34 @@ struct PDFTranslationPane: View {
 
     @ViewBuilder
     private var content: some View {
-        if controller.phase == .preparing || (pageParagraphs.isEmpty && controller.phase.isBusy) {
+        if controller.phase == .preparing || (controller.paragraphs.isEmpty && controller.phase.isBusy) {
             sidebarState("正在分析段落…", icon: "text.magnifyingglass", showsProgress: true)
         } else if case .recognizing(let progress) = controller.phase {
             sidebarState("正在 OCR · \(progress.completed)/\(progress.total)",
                          icon: "text.viewfinder", showsProgress: true)
         } else if case .failed(let reason) = controller.phase {
             sidebarState(reason, icon: "exclamationmark.triangle", showsProgress: false)
-        } else if pageParagraphs.isEmpty {
-            sidebarState("第 \(pageIndex + 1) 页没有可翻译正文", icon: "checkmark.circle", showsProgress: false)
+        } else if controller.paragraphs.isEmpty {
+            sidebarState("这篇文档抽不出可翻译段落", icon: "checkmark.circle", showsProgress: false)
         } else {
             ScrollView {
-                LazyVStack(alignment: .leading, spacing: DS.Space.s) {
+                LazyVStack(alignment: .leading, spacing: DS.Space.m) {
                     HStack {
-                        Text("第 \(pageIndex + 1) 页")
+                        Text("全篇译文 · 上下滚动查看")
                             .font(DS.Typo.ui(size: 11.5, weight: .semibold))
                         Spacer()
                         Text("点击译文定位原文")
                             .font(DS.Typo.ui(size: 10))
                             .foregroundStyle(DS.Palette.textTertiary)
                     }
-                    ForEach(pageParagraphs) { paragraph in translationRow(paragraph) }
+                    ForEach(pageSections, id: \.page) { section in
+                        VStack(alignment: .leading, spacing: DS.Space.s) {
+                            Text("第 \(section.page + 1) 页")
+                                .font(DS.Typo.ui(size: 10.5, weight: .semibold))
+                                .foregroundStyle(DS.Palette.textTertiary)
+                            ForEach(section.paragraphs) { paragraph in translationRow(paragraph) }
+                        }
+                    }
                 }
                 .padding(DS.Space.m)
             }
@@ -240,7 +250,10 @@ struct PDFTranslationPane: View {
 
     private func translationRow(_ paragraph: PDFParagraph) -> some View {
         Button {
-            bridge.revealTranslationParagraph?(paragraph, pageIndex)
+            // 定位到该段自己的页（起始片段页），而不是当前主文档停在哪一页。
+            // 全篇译文可上下滚动，行内不再有「当前页」的概念，必须按段定位。
+            let page = paragraph.fragments.first?.pageIndex ?? paragraph.pageIndex
+            bridge.revealTranslationParagraph?(paragraph, page)
         } label: {
             VStack(alignment: .leading, spacing: DS.Space.xs) {
                 if paragraph.spansPages {

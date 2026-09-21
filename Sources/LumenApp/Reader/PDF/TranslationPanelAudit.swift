@@ -127,6 +127,13 @@ enum TranslationPanelAudit {
         check("prepare 能抽出段落", !controller.paragraphs.isEmpty,
               "段数=\(controller.paragraphs.count)")
 
+        // 全篇译文可上下滚动查看 —— 前提是这段文档的段落**跨了多页**，否则「取消翻页
+        // 限制」无从谈起。多页段数 >0 才证明面板不挂在「当前页」这一格上。
+        let pagesInParagraphs = Set(controller.paragraphs.map(\.pageIndex))
+        check("段落跨多页（全篇滚动不是单页占位）",
+              pagesInParagraphs.count > 1,
+              "覆盖页数=\(pagesInParagraphs.count)")
+
         guard let paragraph = controller.paragraphs.first else {
             check("取到至少一段用于定位", false)
             return
