@@ -195,7 +195,7 @@ struct ReadingSettingsPane: View {
                 Toggle("EPUB 逐段翻译", isOn: $settings.reader.epubTranslateEnabled)
                     .help("译文显示在每段原文上方，可随时关闭。")
 
-                Text("EPUB 译文显示在原文上方；PDF 在阅读区右上角开启段落对照翻译。"
+                Text("PDF 和 EPUB 都从阅读区左侧工具栏开启段落对照翻译；EPUB 译文显示在原文上方。"
                      + "Apple 系统翻译首次使用某个语言对时可能需要下载语言包。")
                     .font(DS.Typo.ui(size: 11))
                     .foregroundStyle(DS.Palette.textTertiary)

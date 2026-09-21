@@ -2,6 +2,14 @@ import SwiftUI
 import WebKit
 import LumenKit
 
+enum EPUBTranslationError: LocalizedError {
+    case pageNotReady
+
+    var errorDescription: String? {
+        "章节正文尚未完成载入，请稍后重试。"
+    }
+}
+
 /// EPUB 的 WebKit 外壳。
 ///
 /// 章节 XHTML 由 `loadFileURL` 直接加载，图片 / 内嵌字体 / 自带 CSS 交给 WebKit 原生解析；
@@ -226,11 +234,16 @@ final class EPUBController: NSObject, ObservableObject {
             // 插入的译文块本身也是块级元素，重算会把它算进去，下标就会漂移。
             // 标记一次、之后按下标取，才对得上。
             prepareParagraphs: function () {
-              var els = document.querySelectorAll('p, li, blockquote, dd, h1, h2, h3, h4');
+              // 只取语义块的叶节点。`li` 内常常还有 `p`，父子同时入队会让同一句
+              // 被翻两次；表格、图注和 h5/h6 也属于正文，不能无故漏掉。
+              var selector = 'p, blockquote, dd, figcaption, td, th, h1, h2, h3, h4, h5, h6, li';
+              var els = document.querySelectorAll(selector);
               var out = [];
               for (var i = 0; i < els.length; i++) {
                 var el = els[i];
                 if (el.classList.contains('lm-tr')) { continue; }
+                if (el.matches('li') && el.querySelector('p, blockquote, dl, ol, ul, table')) { continue; }
+                if (el.closest('nav, [hidden], [aria-hidden="true"]')) { continue; }
                 var t = (el.innerText || el.textContent || '').trim();
                 // 太短的段落不值得花一次请求（空段、纯数字页码都会落在这里）
                 if (t.length < 2) { continue; }
@@ -239,10 +252,11 @@ final class EPUBController: NSObject, ObservableObject {
               }
               return out;
             },
-            markLoading: function () {
-              var els = document.querySelectorAll('[data-lm-p]');
-              for (var i = 0; i < els.length; i++) {
-                var el = els[i];
+            markLoading: function (indices) {
+              indices = Array.isArray(indices) ? indices : [];
+              for (var i = 0; i < indices.length; i++) {
+                var el = document.querySelector('[data-lm-p="' + indices[i] + '"]');
+                if (!el) { continue; }
                 if (!el.parentNode) { continue; }
                 var box = document.createElement('div');
                 box.className = 'lm-tr lm-tr-loading';
@@ -250,7 +264,7 @@ final class EPUBController: NSObject, ObservableObject {
                 box.textContent = '翻译中…';
                 el.parentNode.insertBefore(box, el);
               }
-              return els.length;
+              return indices.length;
             },
             setTranslation: function (index, text, state) {
               var el = document.querySelector('[data-lm-p="' + index + '"]');
@@ -478,9 +492,7 @@ extension EPUBController {
         // 允许访问整个解包目录，这样 ../images/ 这类相对资源才能被加载
         webView.loadFileURL(chapter.fileURL, allowingReadAccessTo: source.rootURL)
 
-        if !anchor.isEmpty {
-            pendingAnchor = anchor
-        }
+        pendingAnchor = anchor
     }
 
     func applyTheme(_ theme: ReadingTheme, reader: ReaderSettings) {
@@ -542,18 +554,28 @@ extension EPUBController {
     // MARK: - 逐段翻译
 
     /// 收集当前章里值得翻译的段落（顺带给每段打上下标标记），返回原文数组。
-    func prepareParagraphs() async -> [String] {
-        await withCheckedContinuation { continuation in
-            webView.evaluateJavaScript("window.__lumen ? window.__lumen.prepareParagraphs() : []") { value, _ in
-                continuation.resume(returning: (value as? [String]) ?? [])
+    func prepareParagraphs() async throws -> [String] {
+        try await withCheckedThrowingContinuation { continuation in
+            webView.evaluateJavaScript("window.__lumen ? window.__lumen.prepareParagraphs() : null") { value, error in
+                if let error {
+                    continuation.resume(throwing: error)
+                    return
+                }
+                guard let raw = value as? [Any] else {
+                    continuation.resume(throwing: EPUBTranslationError.pageNotReady)
+                    return
+                }
+                continuation.resume(returning: raw.compactMap { $0 as? String })
             }
         }
     }
 
     /// 给每段插一个「翻译中…」占位。一次 JS 调用铺完，不逐段往返——
     /// 一章几十上百段，逐段 `evaluateJavaScript` 光 IPC 就要几百毫秒。
-    func markTranslationsLoading() {
-        webView.evaluateJavaScript("window.__lumen && window.__lumen.markLoading();")
+    func markTranslationsLoading(indices: [Int]) {
+        guard let data = try? JSONSerialization.data(withJSONObject: indices),
+              let json = String(data: data, encoding: .utf8) else { return }
+        webView.evaluateJavaScript("window.__lumen && window.__lumen.markLoading(\(json));")
     }
 
     /// 写入第 `index` 段的译文（或失败态）。
@@ -666,8 +688,24 @@ extension EPUBController: WKNavigationDelegate {
         }
 
         if url.isFileURL {
-            if navigationAction.navigationType == .linkActivated, let fragment = url.fragment {
-                webView.evaluateJavaScript("window.__lumen && window.__lumen.scrollToAnchor(\(Self.jsString(fragment)));")
+            guard let source,
+                  url.standardizedFileURL.resolvingSymlinksInPath().path.hasPrefix(
+                    source.rootURL.standardizedFileURL.resolvingSymlinksInPath().path + "/"
+                  ) else {
+                decisionHandler(.cancel)
+                return
+            }
+            if navigationAction.navigationType == .linkActivated {
+                // Cross-chapter links must update chapter state before scrolling to their anchor.
+                let path = url.standardizedFileURL.resolvingSymlinksInPath().path
+                if let chapter = source.chapters.first(where: { $0.fileURL.path == path }) {
+                    let anchor = url.fragment?.removingPercentEncoding ?? url.fragment ?? ""
+                    if chapter.index != currentChapterIndex {
+                        loadCurrentChapter(index: chapter.index, anchor: anchor)
+                    } else if !anchor.isEmpty {
+                        webView.evaluateJavaScript("window.__lumen && window.__lumen.scrollToAnchor(\(Self.jsString(anchor)));")
+                    }
+                }
                 decisionHandler(.cancel)
                 return
             }
@@ -675,13 +713,11 @@ extension EPUBController: WKNavigationDelegate {
             return
         }
 
-        if navigationAction.navigationType == .linkActivated {
+        if navigationAction.navigationType == .linkActivated,
+           ["https", "http", "mailto"].contains(url.scheme?.lowercased() ?? "") {
             NSWorkspace.shared.open(url)
-            decisionHandler(.cancel)
-            return
         }
-
-        decisionHandler(.allow)
+        decisionHandler(.cancel)
     }
 
     private static func jsString(_ value: String) -> String {

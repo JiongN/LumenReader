@@ -5,6 +5,7 @@ public enum EPUBError: LocalizedError {
     case missingContainer
     case missingPackage
     case emptySpine
+    case unsafePath(String)
 
     public var errorDescription: String? {
         switch self {
@@ -14,6 +15,8 @@ public enum EPUBError: LocalizedError {
             return "这不是有效的 EPUB：缺少 META-INF/container.xml。"
         case .missingPackage:
             return "这不是有效的 EPUB：找不到 OPF 包文档，或它无法解析。"
+        case .unsafePath(let path):
+            return "EPUB 包含越界资源路径：\(path)"
         case .emptySpine:
             return "EPUB 的 spine 为空，没有任何可阅读的章节。"
         }
@@ -59,22 +62,38 @@ public final class EPUBDocumentSource: DocumentSource {
 
     public static func open(url: URL) async throws -> EPUBDocumentSource {
         let source = url.standardizedFileURL
-        let destination = AppPaths.epubExtractionDirectory(forPath: source.path)
-
-        try await Task.detached(priority: .userInitiated) {
+        let task = Task.detached(priority: .userInitiated) {
+            try Task.checkCancellation()
+            let attributes = try FileManager.default.attributesOfItem(atPath: source.path)
+            let revision = "\(attributes[.size] ?? 0)-\(attributes[.modificationDate] ?? Date.distantPast)"
+            let destination = AppPaths.epubExtractionDirectory(forPath: source.path + "|" + revision)
             try extract(epub: source, to: destination)
-        }.value
-
-        return try EPUBDocumentSource(rootURL: destination)
+            try Task.checkCancellation()
+            return try EPUBDocumentSource(rootURL: destination)
+        }
+        return try await withTaskCancellationHandler {
+            let result = try await task.value
+            try Task.checkCancellation()
+            return result
+        } onCancel: {
+            task.cancel()
+        }
     }
 
-    /// 用 `ditto -x -k` 解包。已解包过就跳过（EPUB 是不变文件，内容不会中途改变）。
+    private static let extractionLock = NSLock()
+
+    /// 同一进程内串行解包；以文件大小和修改时间区分缓存版本，避免覆盖仍在阅读的目录。
     private static func extract(epub: URL, to directory: URL) throws {
+        extractionLock.lock()
+        defer { extractionLock.unlock() }
+        try Task.checkCancellation()
         let container = directory.appendingPathComponent("META-INF/container.xml")
-        if FileManager.default.fileExists(atPath: container.path) {
+        let ready = directory.appendingPathComponent(".lumen-extracted")
+        if FileManager.default.fileExists(atPath: ready.path) {
             return
         }
 
+        try EPUBArchiveSafety.validate(epub)
         let manager = FileManager.default
         try? manager.removeItem(at: directory)
         try manager.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -85,7 +104,7 @@ public final class EPUBDocumentSource: DocumentSource {
 
         let errorPipe = Pipe()
         process.standardError = errorPipe
-        process.standardOutput = Pipe()
+        process.standardOutput = FileHandle.nullDevice
 
         try process.run()
         let errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
@@ -100,6 +119,26 @@ public final class EPUBDocumentSource: DocumentSource {
         guard manager.fileExists(atPath: container.path) else {
             throw EPUBError.missingContainer
         }
+        _ = try EPUBDocumentSource(rootURL: directory)
+        try Data().write(to: ready, options: .atomic)
+    }
+
+    /// Resolve encoded relative paths and symlinks before reading any package resource.
+    static func resourceURL(_ path: String, relativeTo base: URL, root: URL) throws -> URL {
+        let decoded = path.removingPercentEncoding ?? path
+        guard !decoded.hasPrefix("/"), !decoded.contains(":") else { throw EPUBError.unsafePath(path) }
+        let candidate = base.appendingPathComponent(decoded).standardizedFileURL
+        var ancestor = candidate
+        while ancestor.path != root.standardizedFileURL.path && ancestor.path != "/" {
+            if (try? FileManager.default.destinationOfSymbolicLink(atPath: ancestor.path)) != nil {
+                throw EPUBError.unsafePath(path)
+            }
+            ancestor.deleteLastPathComponent()
+        }
+        let url = candidate.resolvingSymlinksInPath()
+        let boundary = root.standardizedFileURL.resolvingSymlinksInPath().path + "/"
+        guard url.path.hasPrefix(boundary) else { throw EPUBError.unsafePath(path) }
+        return url
     }
 
     // MARK: - 解析
@@ -109,18 +148,18 @@ public final class EPUBDocumentSource: DocumentSource {
 
         // 1. container.xml → OPF 路径
         let containerURL = rootURL.appendingPathComponent("META-INF/container.xml")
-        guard let container = try? XMLDocument(contentsOf: containerURL, options: []),
+        guard let container = try? XMLDocument(contentsOf: containerURL, options: [.nodeLoadExternalEntitiesNever]),
               let rootfile = try? container.nodes(forXPath: "//*[local-name()='rootfile']").first as? XMLElement,
               let opfRelativePath = rootfile.attr("full-path")
         else {
             throw EPUBError.missingContainer
         }
 
-        let opfURL = rootURL.appendingPathComponent(opfRelativePath.removingPercentEncoding ?? opfRelativePath)
+        let opfURL = try Self.resourceURL(opfRelativePath, relativeTo: rootURL, root: rootURL)
         self.opfURL = opfURL
         let opfDirectory = opfURL.deletingLastPathComponent()
 
-        guard let package = try? XMLDocument(contentsOf: opfURL, options: []) else {
+        guard let package = try? XMLDocument(contentsOf: opfURL, options: [.nodeLoadExternalEntitiesNever]) else {
             throw EPUBError.missingPackage
         }
 
@@ -135,7 +174,7 @@ public final class EPUBDocumentSource: DocumentSource {
         for case let item as XMLElement in items {
             guard let id = item.attr("id"), let href = item.attr("href") else { continue }
             manifest[id] = (
-                href: href.removingPercentEncoding ?? href,
+                href: href,
                 mediaType: item.attr("media-type") ?? "",
                 properties: item.attr("properties") ?? ""
             )
@@ -151,7 +190,7 @@ public final class EPUBDocumentSource: DocumentSource {
                   entry.mediaType.contains("html") || entry.mediaType.isEmpty
             else { continue }
 
-            let fileURL = opfDirectory.appendingPathComponent(entry.href)
+            let fileURL = try Self.resourceURL(entry.href, relativeTo: opfDirectory, root: rootURL)
             guard FileManager.default.fileExists(atPath: fileURL.path) else { continue }
 
             chapters.append(EPUBChapter(
@@ -174,12 +213,12 @@ public final class EPUBDocumentSource: DocumentSource {
         var rawOutline: [(title: String, href: String, depth: Int)] = []
 
         if let navHref {
-            let navURL = opfDirectory.appendingPathComponent(navHref)
-            (rawOutline, titleMap) = Self.parseNav(navURL)
+            let navURL = try Self.resourceURL(navHref, relativeTo: opfDirectory, root: rootURL)
+            (rawOutline, titleMap) = Self.parseNav(navURL, relativeTo: opfDirectory)
         }
         if rawOutline.isEmpty, let ncxHref {
-            let ncxURL = opfDirectory.appendingPathComponent(ncxHref)
-            (rawOutline, titleMap) = Self.parseNCX(ncxURL)
+            let ncxURL = try Self.resourceURL(ncxHref, relativeTo: opfDirectory, root: rootURL)
+            (rawOutline, titleMap) = Self.parseNCX(ncxURL, relativeTo: opfDirectory)
         }
 
         // 把拿到的标题补回章节
@@ -215,8 +254,16 @@ public final class EPUBDocumentSource: DocumentSource {
 
     // MARK: - 目录解析
 
-    private static func parseNav(_ url: URL) -> ([(String, String, Int)], [String: String]) {
-        guard let document = try? XMLDocument(contentsOf: url, options: []) else { return ([], [:]) }
+    static func navigationHref(_ href: String, from document: URL, relativeTo base: URL) -> String {
+        guard let resolved = URL(string: href, relativeTo: document)?.absoluteURL else { return href }
+        let prefix = base.standardizedFileURL.path + "/"
+        let path = resolved.standardizedFileURL.path
+        guard path.hasPrefix(prefix) else { return href }
+        return String(path.dropFirst(prefix.count)) + (resolved.fragment.map { "#" + $0 } ?? "")
+    }
+
+    private static func parseNav(_ url: URL, relativeTo base: URL) -> ([(String, String, Int)], [String: String]) {
+        guard let document = try? XMLDocument(contentsOf: url, options: [.nodeLoadExternalEntitiesNever]) else { return ([], [:]) }
 
         // 优先取 epub:type="toc" 的 nav，没有就取第一个 nav
         let navs = (try? document.nodes(forXPath: "//*[local-name()='nav']")) ?? []
@@ -236,8 +283,9 @@ public final class EPUBDocumentSource: DocumentSource {
                 if let anchor = (try? li.nodes(forXPath: "*[local-name()='a']").first) as? XMLElement,
                    let href = anchor.attr("href") {
                     let title = (anchor.stringValue ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-                    entries.append((title, href, depth))
-                    let path = normalizePath(href.components(separatedBy: "#").first ?? href)
+                    let resolved = navigationHref(href, from: url, relativeTo: base)
+                    entries.append((title, resolved, depth))
+                    let path = normalizePath(resolved.components(separatedBy: "#").first ?? resolved)
                     if !title.isEmpty { titleMap[path] = title }
                 }
                 if let nested = (try? li.nodes(forXPath: "*[local-name()='ol']").first) as? XMLElement {
@@ -253,8 +301,8 @@ public final class EPUBDocumentSource: DocumentSource {
         return (entries, titleMap)
     }
 
-    private static func parseNCX(_ url: URL) -> ([(String, String, Int)], [String: String]) {
-        guard let document = try? XMLDocument(contentsOf: url, options: []) else { return ([], [:]) }
+    private static func parseNCX(_ url: URL, relativeTo base: URL) -> ([(String, String, Int)], [String: String]) {
+        guard let document = try? XMLDocument(contentsOf: url, options: [.nodeLoadExternalEntitiesNever]) else { return ([], [:]) }
 
         var entries: [(String, String, Int)] = []
         var titleMap: [String: String] = [:]
@@ -267,8 +315,9 @@ public final class EPUBDocumentSource: DocumentSource {
                     .stringValue?
                     .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
                 if let src = ((try? point.nodes(forXPath: "*[local-name()='content']").first) as? XMLElement)?.attr("src") {
-                    entries.append((title, src, depth))
-                    let path = normalizePath(src.components(separatedBy: "#").first ?? src)
+                    let resolved = navigationHref(src, from: url, relativeTo: base)
+                    entries.append((title, resolved, depth))
+                    let path = normalizePath(resolved.components(separatedBy: "#").first ?? resolved)
                     if !title.isEmpty { titleMap[path] = title }
                 }
                 walk(point, depth: depth + 1)
@@ -333,22 +382,19 @@ public final class EPUBDocumentSource: DocumentSource {
             let pieces = entry.href.components(separatedBy: "#")
             let pathPart = pieces.first ?? entry.href
             let anchor = pieces.count > 1 ? pieces[1] : ""
-            let chapterIndex = indexByPath[normalizePath(pathPart)] ?? 0
+            let children = buildTree(raw: raw, cursor: &cursor,
+                                     depth: entry.depth + 1, indexByPath: indexByPath)
+            guard let chapterIndex = indexByPath[normalizePath(pathPart)] else {
+                nodes.append(contentsOf: children)
+                continue
+            }
             let title = entry.title.isEmpty ? "第 \(chapterIndex + 1) 章" : entry.title
-
-            var node = OutlineNode(
+            nodes.append(OutlineNode(
                 title: title,
-                locator: .epub(chapterIndex: chapterIndex, anchor: anchor, charOffset: 0),
-                children: [],
-                depth: depth
-            )
-            node.children = buildTree(
-                raw: raw,
-                cursor: &cursor,
-                depth: entry.depth + 1,
-                indexByPath: indexByPath
-            )
-            nodes.append(node)
+                locator: .epub(chapterIndex: chapterIndex,
+                               anchor: anchor.removingPercentEncoding ?? anchor, charOffset: 0),
+                children: children, depth: depth
+            ))
         }
 
         return nodes

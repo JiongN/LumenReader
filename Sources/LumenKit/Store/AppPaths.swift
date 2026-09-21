@@ -46,7 +46,11 @@ public enum AppPaths {
 
     /// ~/Library/Caches/com.jn.lumen（可随时安全删除）
     public static var cacheRoot: URL {
-        ensureDirectory(cachesBase.appendingPathComponent(bundleIdentifier, isDirectory: true))
+        if ProcessInfo.processInfo.environment["LUMEN_TEST_DATA"] != nil,
+           CommandLine.arguments.contains(where: { $0.hasSuffix("-report") || $0 == "--capture" }) {
+            return ensureDirectory(supportRoot.appendingPathComponent("cache", isDirectory: true))
+        }
+        return ensureDirectory(cachesBase.appendingPathComponent(bundleIdentifier, isDirectory: true))
     }
 
     public static var settingsFile: URL { supportRoot.appendingPathComponent("settings.json") }

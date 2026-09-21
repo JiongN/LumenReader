@@ -300,7 +300,7 @@ struct ReaderContainerView: View {
             // 拖动段的**环境自证**：拖动是「把即时宽度写成版面」的链路，只有 AI 面板在版面上
             // 时它才成立。把此刻的三栏状态与可用区间打出来——否则同一份构建换文档/窗口后
             // 读数突变时，无法判断是「时序」还是「面板根本没在版面上」（本轮踩过）。
-            NSLog("[Lumen][jank] 拖动环境：AI面板可见=\(state.isAIPanelVisible)"
+            NSLog("%@", "[Lumen][jank] 拖动环境：AI面板可见=\(state.isAIPanelVisible)"
                 + " 侧栏可见=\(state.isSidebarVisible) 沉浸=\(state.isImmersive)"
                 + " 容器宽=\(Int(containerWidth))pt AI面板实宽=\(Int(aiPanelWidth))pt"
                 + " 拖动区间=\(Int(aiPanelRange.lowerBound))…\(Int(aiPanelRange.upperBound))pt")
@@ -437,12 +437,12 @@ struct ReaderContainerView: View {
         var failures: [String] = []
         func check(_ name: String, _ ok: Bool, _ detail: String = "") {
             if ok { passed += 1 } else { failures.append(name) }
-            NSLog("[Lumen][sidebar-tab] \(ok ? "✅" : "❌") \(name)"
+            NSLog("%@", "[Lumen][sidebar-tab] \(ok ? "✅" : "❌") \(name)"
                   + (ok || detail.isEmpty ? "" : " —— \(detail)"))
         }
 
         let tabs = SidebarTab.available(for: document.kind)
-        NSLog("[Lumen][sidebar-tab] 本文档可用页签：\(tabs.map(\.rawValue).joined(separator: ", "))"
+        NSLog("%@", "[Lumen][sidebar-tab] 本文档可用页签：\(tabs.map(\.rawValue).joined(separator: ", "))"
               + "；当前 bridge.sidebarTab=\(bridge.sidebarTab.rawValue)"
               + "；侧栏可见=\(state.isSidebarVisible)")
 
@@ -515,7 +515,7 @@ struct ReaderContainerView: View {
         let homeTabShowsNilSession = state.activeSession == nil
         state.activate(session)
         try? await Task.sleep(nanoseconds: 700_000_000)
-        NSLog("[Lumen][sidebar-tab] 主页标签往返：homeTabIsActive \(homeWasActive) → \(state.homeTabIsActive)"
+        NSLog("%@", "[Lumen][sidebar-tab] 主页标签往返：homeTabIsActive \(homeWasActive) → \(state.homeTabIsActive)"
               + "；主页期间 activeSession 是否为 nil=\(homeTabShowsNilSession)"
               + "；回来后 state.bridge 与 session.bridge 同源=\(state.bridge === bridge)")
         check("从主页标签切回文档标签后 homeTabIsActive 被清掉",
@@ -550,7 +550,7 @@ struct ReaderContainerView: View {
         bridge.sidebarTab = target
         try? await Task.sleep(nanoseconds: 450_000_000)
         let afterWrite = JankTally.shared.snapshot()[.sidebarRailBody] ?? 0
-        NSLog("[Lumen][sidebar-tab] 图标栏 body 求值：空闲基线 \(idleEnd)"
+        NSLog("%@", "[Lumen][sidebar-tab] 图标栏 body 求值：空闲基线 \(idleEnd)"
               + "（此前 300ms 自然增量 \(idleEnd - idleStart)）"
               + " → 只写 bridge.sidebarTab=\(target.rawValue) 之后 \(afterWrite)"
               + "（增量 \(afterWrite - idleEnd)）")
@@ -559,7 +559,7 @@ struct ReaderContainerView: View {
               "图标栏没有跟着 bridge 重绘 —— 它的选中态读的是 bridge.sidebarTab，"
                   + "却不观察 bridge，于是「内容换页签、图标不跟帖」")
 
-        NSLog("[Lumen][sidebar-tab] 自检：通过 \(passed) 项，失败 \(failures.count) 项"
+        NSLog("%@", "[Lumen][sidebar-tab] 自检：通过 \(passed) 项，失败 \(failures.count) 项"
               + (failures.isEmpty ? " ✅" : " ❌ " + failures.joined(separator: "；")))
     }
 
@@ -575,7 +575,7 @@ struct ReaderContainerView: View {
     private func runImmersiveExitAudit(after delay: Double) async {
         try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
 
-        NSLog("[Lumen][immersive] 模拟前：isImmersive=\(state.isImmersive)"
+        NSLog("%@", "[Lumen][immersive] 模拟前：isImmersive=\(state.isImmersive)"
             + " 侧栏=\(state.isSidebarVisible) AI面板=\(state.isAIPanelVisible)")
 
         state.simulateSystemExitFullScreen()
@@ -583,7 +583,7 @@ struct ReaderContainerView: View {
         // 等系统退出全屏的动画跑完、通知送达（跨 Space 动画约 0.5s，留足余量）
         try? await Task.sleep(nanoseconds: 1_500_000_000)
 
-        NSLog("[Lumen][immersive] 模拟后：isImmersive=\(state.isImmersive)"
+        NSLog("%@", "[Lumen][immersive] 模拟后：isImmersive=\(state.isImmersive)"
             + " 侧栏=\(state.isSidebarVisible) AI面板=\(state.isAIPanelVisible)")
     }
 
@@ -596,14 +596,14 @@ struct ReaderContainerView: View {
         let path = document.url.standardizedFileURL.path
         let cacheFile = AppPaths.smartOutlineFile(forPath: path)
 
-        NSLog("[Lumen][outline] 生成前：缓存文件存在=\(FileManager.default.fileExists(atPath: cacheFile.path))"
+        NSLog("%@", "[Lumen][outline] 生成前：缓存文件存在=\(FileManager.default.fileExists(atPath: cacheFile.path))"
             + " 单元数=\(bridge.unitCount) 单元名=\(state.unitName)")
 
         // 绑定时从磁盘载入了什么，是「缓存复用」这条链路的唯一证据。
         // 不记这一条的话，「复用成功」和「每次都重新生成」在日志上长得一模一样，
         // 而后者意味着用户每开一次书就被扣一次钱。
         let loaded = state.smartOutline.outline
-        NSLog("[Lumen][outline] 绑定后（尚未生成）：缓存条目数=\(loaded?.entries.count ?? -1)"
+        NSLog("%@", "[Lumen][outline] 绑定后（尚未生成）：缓存条目数=\(loaded?.entries.count ?? -1)"
             + " 缓存记录单元数=\(loaded?.sourceUnitCount ?? -1)"
             + " 与当前文档匹配=\(loaded.map { $0.isValid(forUnitCount: bridge.unitCount) } ?? false)")
 
@@ -624,7 +624,7 @@ struct ReaderContainerView: View {
 
         switch session.smartOutline.phase {
         case .failed(let message):
-            NSLog("[Lumen][outline] 生成失败：\(message)")
+            NSLog("%@", "[Lumen][outline] 生成失败：\(message)")
         case .working:
             NSLog("[Lumen][outline] 生成超时（180s）")
         case .idle:
@@ -636,16 +636,16 @@ struct ReaderContainerView: View {
             return
         }
 
-        NSLog("[Lumen][outline] 条目数=\(outline.entries.count) 记录单元数=\(outline.sourceUnitCount)"
+        NSLog("%@", "[Lumen][outline] 条目数=\(outline.entries.count) 记录单元数=\(outline.sourceUnitCount)"
             + " 模型=\(outline.modelName)")
         for entry in outline.entries.prefix(15) {
             let indent = String(repeating: "·", count: max(0, entry.depth))
-            NSLog("[Lumen][outline]   \(indent)「\(entry.title)」→ 单元 \(entry.unitIndex + 1)"
+            NSLog("%@", "[Lumen][outline]   \(indent)「\(entry.title)」→ 单元 \(entry.unitIndex + 1)"
                 + " 摘要字数=\(entry.summary?.count ?? 0)")
         }
 
         let size = (try? FileManager.default.attributesOfItem(atPath: cacheFile.path))?[.size] as? Int
-        NSLog("[Lumen][outline] 缓存文件 \(cacheFile.path) 大小=\(size.map(String.init) ?? "无")")
+        NSLog("%@", "[Lumen][outline] 缓存文件 \(cacheFile.path) 大小=\(size.map(String.init) ?? "无")")
 
         // 点击条目的闭环：跳到一条**离当前位置最远**的条目，核对确实落到了它指向的位置。
         //
@@ -656,10 +656,10 @@ struct ReaderContainerView: View {
         if let target = outline.entries.max(by: {
             abs($0.unitIndex - current) < abs($1.unitIndex - current)
         }) {
-            NSLog("[Lumen][outline] 跳转前：\(bridge.positionLabel)（当前单元 \(current)）")
+            NSLog("%@", "[Lumen][outline] 跳转前：\(bridge.positionLabel)（当前单元 \(current)）")
             let landed = state.jump(toUnit: target.unitIndex)
             try? await Task.sleep(nanoseconds: 1_200_000_000)
-            NSLog("[Lumen][outline] 点「\(target.title)」（目标单元 \(target.unitIndex + 1)）"
+            NSLog("%@", "[Lumen][outline] 点「\(target.title)」（目标单元 \(target.unitIndex + 1)）"
                 + "→ 解析为 0-based \(landed.map(String.init) ?? "nil")"
                 + "，跳转后：\(bridge.positionLabel)")
         }
@@ -668,7 +668,7 @@ struct ReaderContainerView: View {
         if let number = LaunchOptions.smartOutlineSummaryIndex,
            number >= 1, outline.entries.indices.contains(number - 1) {
             let entry = outline.entries[number - 1]
-            NSLog("[Lumen][outline] 请求第 \(number) 条的摘要：「\(entry.title)」")
+            NSLog("%@", "[Lumen][outline] 请求第 \(number) 条的摘要：「\(entry.title)」")
             session.smartOutline.summarize(
                 entry: entry,
                 bridge: bridge,
@@ -686,10 +686,10 @@ struct ReaderContainerView: View {
             try? await Task.sleep(nanoseconds: 400_000_000)
 
             if case .failed(let message) = session.smartOutline.phase {
-                NSLog("[Lumen][outline] 摘要失败：\(message)")
+                NSLog("%@", "[Lumen][outline] 摘要失败：\(message)")
             }
             let after = session.smartOutline.outline?.entries.first(where: { $0.id == entry.id })
-            NSLog("[Lumen][outline] 摘要结果 字数=\(after?.summary?.count ?? 0)"
+            NSLog("%@", "[Lumen][outline] 摘要结果 字数=\(after?.summary?.count ?? 0)"
                 + " 内容=\(after?.summary?.replacingOccurrences(of: "\n", with: "⏎").prefix(200).description ?? "nil")")
         }
     }
@@ -700,7 +700,7 @@ struct ReaderContainerView: View {
     /// 只打最后一段的话，「跳成功了」和「本来就在这一页」输出完全相同，
     /// 等于没验。
     private func runLaunchJump(_ target: Int) async {
-        NSLog("[Lumen][jump] 跳转前：\(bridge.positionLabel)（共 \(bridge.unitCount) 个单元）")
+        NSLog("%@", "[Lumen][jump] 跳转前：\(bridge.positionLabel)（共 \(bridge.unitCount) 个单元）")
 
         let landed = state.jump(toUnit: target - 1)
 
@@ -720,11 +720,11 @@ struct ReaderContainerView: View {
     /// 得到的「剪贴板是空的」将是假象而不是真 bug。
     private func runLaunchAction(_ raw: String) async {
         guard let action = LumenAction(rawValue: raw) else {
-            NSLog("[Lumen][action] 未知动作：\(raw)")
+            NSLog("%@", "[Lumen][action] 未知动作：\(raw)")
             return
         }
 
-        NSLog("[Lumen][action] 自检执行 \(raw)")
+        NSLog("%@", "[Lumen][action] 自检执行 \(raw)")
         action.run(state)
 
         // 轮询到忙碌状态结束，而不是死等一个固定时长：扫描件要逐页 OCR，

@@ -20,17 +20,17 @@ enum KeyBindingsAudit {
 
     private static func reportCurrentTable() {
         let store = KeyBindingStore()
-        NSLog("[Lumen][keys] 当前快捷键表，共 \(LumenAction.allCases.count) 项")
+        NSLog("%@", "[Lumen][keys] 当前快捷键表，共 \(LumenAction.allCases.count) 项")
 
         var taken: [KeyCombo: LumenAction] = [:]
         var clashes: [String] = []
 
         for group in LumenActionGroup.allCases {
-            NSLog("[Lumen][keys] ── \(group.title) ──")
+            NSLog("%@", "[Lumen][keys] ── \(group.title) ──")
             for action in group.actions {
                 let combo = store.combo(for: action)
                 let tag = store.isCustomized(action) ? "  ← 已自定义" : ""
-                NSLog("[Lumen][keys]   \(action.title) → \(combo?.displayOrDash ?? "—")\(tag)")
+                NSLog("%@", "[Lumen][keys]   \(action.title) → \(combo?.displayOrDash ?? "—")\(tag)")
 
                 guard let combo else { continue }
                 if let other = taken[combo] {
@@ -41,16 +41,16 @@ enum KeyBindingsAudit {
             }
         }
 
-        NSLog("[Lumen][keys] 撞车检查：\(clashes.isEmpty ? "无" : clashes.joined(separator: "；"))")
+        NSLog("%@", "[Lumen][keys] 撞车检查：\(clashes.isEmpty ? "无" : clashes.joined(separator: "；"))")
 
         let reserved = LumenAction.allCases.compactMap { action -> String? in
             guard let combo = store.combo(for: action), combo.isReservedBySystem else { return nil }
             return "\(action.title)=\(combo.display)"
         }
-        NSLog("[Lumen][keys] 系统保留键占用：\(reserved.isEmpty ? "无" : reserved.joined(separator: "，"))")
+        NSLog("%@", "[Lumen][keys] 系统保留键占用：\(reserved.isEmpty ? "无" : reserved.joined(separator: "，"))")
 
         let cleared = LumenAction.allCases.filter { store.isCleared($0) }
-        NSLog("[Lumen][keys] 已主动清空：\(cleared.isEmpty ? "无" : cleared.map(\.title).joined(separator: "，"))")
+        NSLog("%@", "[Lumen][keys] 已主动清空：\(cleared.isEmpty ? "无" : cleared.map(\.title).joined(separator: "，"))")
     }
 
     // MARK: - 规则验证

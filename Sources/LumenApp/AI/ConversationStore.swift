@@ -62,7 +62,7 @@ extension Conversation {
         createdAt = (try? c.decode(Date.self, forKey: .createdAt)) ?? Date()
         sourceDocPath = try? c.decodeIfPresent(String.self, forKey: .sourceDocPath)
         sourceDocTitle = try? c.decodeIfPresent(String.self, forKey: .sourceDocTitle)
-        bubbles = (try? c.decode([AIChatModel.Bubble].self, forKey: .bubbles)) ?? []
+        bubbles = try c.decodeIfPresent([AIChatModel.Bubble].self, forKey: .bubbles) ?? []
     }
 }
 
@@ -82,7 +82,7 @@ private struct ConversationFile: Codable {
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         version = (try? c.decode(Int.self, forKey: .version)) ?? 1
-        conversations = (try? c.decode([Conversation].self, forKey: .conversations)) ?? []
+        conversations = try c.decodeIfPresent([Conversation].self, forKey: .conversations) ?? []
         activeID = (try? c.decode(UUID.self, forKey: .activeID)) ?? nil
     }
 }
@@ -122,8 +122,16 @@ final class ConversationStore: ObservableObject {
         }
 
         // 兜底：任何情况下 activeID 都必须指到一个真实存在的会话。
-        if activeID == nil, let first = conversations.first {
-            activeID = first.id
+        var seen = Set<UUID>()
+        for index in conversations.indices {
+            if !seen.insert(conversations[index].id).inserted {
+                conversations[index].id = UUID()
+            }
+        }
+        if conversations.isEmpty {
+            _ = createConversation(sourcePath: nil, sourceTitle: nil)
+        } else if !conversations.contains(where: { $0.id == activeID }) {
+            activeID = conversations.first?.id
         }
     }
 
@@ -205,7 +213,7 @@ final class ConversationStore: ObservableObject {
                 imported.append(conv)
                 recovered += 1
             } catch {
-                NSLog("[Lumen][conversation] 迁移跳过（改名失败）：\(chatFile.lastPathComponent)：\(error)")
+                NSLog("%@", "[Lumen][conversation] 迁移跳过（改名失败）：\(chatFile.lastPathComponent)：\(error)")
             }
         }
 
@@ -213,7 +221,7 @@ final class ConversationStore: ObservableObject {
         imported.sort { $0.createdAt < $1.createdAt }
         conversations = imported
         activeID = imported.last?.id
-        NSLog("[Lumen][conversation] 迁移完成：导入 \(recovered) 份，其中反查到原路径 \(matched) 份，未反查到 \(unmatched) 份")
+        NSLog("%@", "[Lumen][conversation] 迁移完成：导入 \(recovered) 份，其中反查到原路径 \(matched) 份，未反查到 \(unmatched) 份")
     }
 
     private static func fallbackTitle(_ date: Date) -> String {

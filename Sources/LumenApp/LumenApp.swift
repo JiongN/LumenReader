@@ -47,12 +47,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
 
-        NSLog("[Lumen] 启动参数：\(CommandLine.arguments.dropFirst().joined(separator: " "))")
+        NSLog("%@", "[Lumen] 启动参数：\(CommandLine.arguments.dropFirst().joined(separator: " "))")
         // 构建标记随每次启动打印。背景：build.sh 每次构建会把旧 bundle 挪进
         // dist/.trash，而 Launch Services 仍保留旧路径的注册——从 Spotlight /
         // 「打开方式」进来可能复活旧二进制，症状与「修复没生效」一模一样。
         // 有了这行日志，一眼即可分辨当前跑的是哪一次构建。
-        NSLog("[Lumen] 构建标记：\(AppDelegate.buildStamp)")
+        NSLog("%@", "[Lumen] 构建标记：\(AppDelegate.buildStamp)")
 
         if LaunchOptions.fontReport {
             Task { await FontCatalog.logReport() }
@@ -230,13 +230,13 @@ func stripSystemToggleSidebarShortcut() {
                               isARepeat: false, keyCode: keyCode)!
     let sidCombo = kb.combo(for: .toggleSidebar)
     let sidEnabled = LumenAction.toggleSidebar.isEnabled(in: workspace)
-    NSLog("[Lumen][keys] toggleSidebar combo=\(sidCombo?.display ?? "nil") isEnabled=\(sidEnabled)")
+    NSLog("%@", "[Lumen][keys] toggleSidebar combo=\(sidCombo?.display ?? "nil") isEnabled=\(sidEnabled)")
     let before = workspace.isSidebarVisible
     let consumed = GlobalShortcutRouter.shared.routeTest(ev)
     let after = workspace.isSidebarVisible
     let changed = before != after
-    NSLog("[Lumen][keys] 侧栏 ⌘⌥S 被消费=\(consumed) 翻转=\(changed) 前=\(before) 后=\(after)")
-    NSLog("[Lumen][keys] 自检结果：\(consumed && changed ? "通过 ✅" : "失败 ❌")")
+    NSLog("%@", "[Lumen][keys] 侧栏 ⌘⌥S 被消费=\(consumed) 翻转=\(changed) 前=\(before) 后=\(after)")
+    NSLog("%@", "[Lumen][keys] 自检结果：\(consumed && changed ? "通过 ✅" : "失败 ❌")")
 }
 
 // MARK: - 菜单与快捷键

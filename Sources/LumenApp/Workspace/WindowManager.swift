@@ -54,7 +54,7 @@ final class AppServices: ObservableObject {
         if let panel = LaunchOptions.panelWidth {
             settings.suppressSave = true
             settings.commitAIPanelWidth(panel.ai)
-            NSLog("[Lumen] 自检：--panel-width 只设 AI 面板 = \(Int(panel.ai))pt"
+            NSLog("%@", "[Lumen] 自检：--panel-width 只设 AI 面板 = \(Int(panel.ai))pt"
                   + "（侧栏分量 \(Int(panel.sidebar))pt 已废弃，侧栏采用 \(Int(UISettings.PanelWidth.sidebarDefault))pt 基准宽度并随窗口缩放）")
         }
 
@@ -145,7 +145,7 @@ final class WindowManager: ObservableObject {
         // 之前就送达：那时 openExternally 已经建好窗口并载入了文档。
         // 这里若无条件再建一个，就会变成「文档窗口 + 空白欢迎窗口」两个窗口。
         guard workspaces.isEmpty else {
-            NSLog("[Lumen][tabs] startup：已有外部事件建好的窗口 \(workspaces.count) 个，跳过建窗")
+            NSLog("%@", "[Lumen][tabs] startup：已有外部事件建好的窗口 \(workspaces.count) 个，跳过建窗")
             workspaces.last?.window?.makeKeyAndOrderFront(nil)
             return
         }
@@ -153,21 +153,21 @@ final class WindowManager: ObservableObject {
         let workspace = makeWorkspace()
         createWindow(for: workspace)
 
-        NSLog("[Lumen][tabs] startup：窗口已建，openPath = \(LaunchOptions.openPath ?? "nil")")
+        NSLog("%@", "[Lumen][tabs] startup：窗口已建，openPath = \(LaunchOptions.openPath ?? "nil")")
         if let path = LaunchOptions.openPath {
             // 自检不记「最近打开」（测试书会顶掉真实记录）；正常命令行打开照旧记录。
             workspace.open(
                 url: URL(fileURLWithPath: path),
                 recordInRecents: !LaunchOptions.isAuditRun
             )
-            NSLog("[Lumen][tabs] startup 打开后会话数 = \(workspace.sessions.count)")
+            NSLog("%@", "[Lumen][tabs] startup 打开后会话数 = \(workspace.sessions.count)")
         }
         if let path = LaunchOptions.comparisonOpenPath {
             workspace.open(
                 url: URL(fileURLWithPath: path),
                 recordInRecents: !LaunchOptions.isAuditRun
             )
-            NSLog("[Lumen][tabs] 双文档自检已打开第二份文档，会话数 = \(workspace.sessions.count)")
+            NSLog("%@", "[Lumen][tabs] 双文档自检已打开第二份文档，会话数 = \(workspace.sessions.count)")
         }
 
         // 自检用：`--home-tab 1` 走一次「点 + 建主页标签」。
@@ -175,7 +175,7 @@ final class WindowManager: ObservableObject {
         // 还在不在：主页标签激活时正文应当是欢迎页，readerSurface / sidebar 都不该再上报。
         if LaunchOptions.homeTab {
             workspace.addHomeTab()
-            NSLog("[Lumen][tabs] 自检：新建主页标签 → 会话数 = \(workspace.sessions.count)"
+            NSLog("%@", "[Lumen][tabs] 自检：新建主页标签 → 会话数 = \(workspace.sessions.count)"
                   + " / 主页激活 = \(workspace.activeSession == nil)"
                   + " / 标签栏存在 = \(!workspace.sessions.isEmpty || workspace.homeTabIsActive)")
         }
@@ -196,7 +196,7 @@ final class WindowManager: ObservableObject {
     /// 处理「访达打开方式 / 将文件拖到 Dock 图标」送来的文件。
     /// 全部进当前窗口的新标签；一个窗口都没有就先开窗。
     func openExternally(urls: [URL]) {
-        NSLog("[Lumen][tabs] 收到外部打开事件：\(urls.map(\.path))，当前窗口数 = \(workspaces.count)")
+        NSLog("%@", "[Lumen][tabs] 收到外部打开事件：\(urls.map(\.path))，当前窗口数 = \(workspaces.count)")
         let workspace = activeWorkspace ?? workspaces.last ?? {
             let workspace = makeWorkspace()
             createWindow(for: workspace)
@@ -291,7 +291,7 @@ final class WindowManager: ObservableObject {
             return false
         }
         workspace.detach()
-        NSLog("[Lumen][tabs] detach 自检：已拆出，当前窗口数 = \(workspaces.count)")
+        NSLog("%@", "[Lumen][tabs] detach 自检：已拆出，当前窗口数 = \(workspaces.count)")
         return true
     }
 

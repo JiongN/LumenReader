@@ -100,7 +100,7 @@ struct PDFRenderTuning: Equatable {
         case "low", "l", "1":   return .low
         case "none", "off", "0": return PDFInterpolationQuality.none
         default:
-            NSLog("[Lumen][pdf] 未知的 --pdf-interpolation 取值「\(raw)」（可选 high / low / none），已忽略")
+            NSLog("%@", "[Lumen][pdf] 未知的 --pdf-interpolation 取值「\(raw)」（可选 high / low / none），已忽略")
             return nil
         }
     }

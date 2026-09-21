@@ -38,10 +38,10 @@ enum TranslationPanelAudit {
         var failures: [String] = []
         func check(_ name: String, _ ok: Bool, _ detail: String = "") {
             if ok { passed += 1 } else { failures.append(name) }
-            NSLog("[Lumen][translation] \(ok ? "✅" : "❌") \(name)"
+            NSLog("%@", "[Lumen][translation] \(ok ? "✅" : "❌") \(name)"
                   + (ok || detail.isEmpty ? "" : " —— \(detail)"))
         }
-        func report(_ text: String) { NSLog("[Lumen][translation] \(text)") }
+        func report(_ text: String) { NSLog("%@", "[Lumen][translation] \(text)") }
 
         // ============ 一、机器/LLM 切换 ============
         report("=== 一、机器/LLM 切换（ReaderSettings 语义）===")

@@ -23,7 +23,7 @@ enum RerunAudit {
         var failures: [String] = []
         func check(_ name: String, _ ok: Bool, _ detail: String = "") {
             if ok { passed += 1 } else { failures.append(name) }
-            NSLog("[Lumen][rerun] \(ok ? "✅" : "❌") \(name)"
+            NSLog("%@", "[Lumen][rerun] \(ok ? "✅" : "❌") \(name)"
                   + (ok || detail.isEmpty ? "" : " —— \(detail)"))
         }
 
@@ -50,7 +50,7 @@ enum RerunAudit {
         bridge.selection = selection
         let fallback = bridge.currentContextProvider?() ?? ("", .pdf(page: 0, charOffset: 0))
 
-        NSLog("[Lumen][rerun] 第一次请求：task=explain 服务商=\(config.name) 模型=\(config.selectedModel)")
+        NSLog("%@", "[Lumen][rerun] 第一次请求：task=explain 服务商=\(config.name) 模型=\(config.selectedModel)")
         chat.submit(
             task: .explain,
             selection: selection,
@@ -72,7 +72,7 @@ enum RerunAudit {
         let firstAnswer = chat.bubbles.last?.text ?? ""
         let firstFailed = chat.bubbles.last?.failed ?? true
         let historyAfterFirst = chat.historyMessageCount
-        NSLog("[Lumen][rerun] 第一次结束：气泡 \(countAfterFirst) 条，"
+        NSLog("%@", "[Lumen][rerun] 第一次结束：气泡 \(countAfterFirst) 条，"
               + "末条字数 \(firstAnswer.count)，失败=\(firstFailed)，"
               + "history \(historyAfterFirst) 条，canRerunLast=\(chat.canRerunLast)")
         // 「非空」必须配上「没失败」才算数：连不上桩服务时气泡里也会有一段
@@ -82,7 +82,7 @@ enum RerunAudit {
         check("首次请求后即可重跑", chat.canRerunLast)
 
         let countsBefore = Self.lastRequestMessageCounts()
-        NSLog("[Lumen][rerun] 请求体 messages 条数（首次）：\(countsBefore.map(String.init).joined(separator: ", "))")
+        NSLog("%@", "[Lumen][rerun] 请求体 messages 条数（首次）：\(countsBefore.map(String.init).joined(separator: ", "))")
 
         NSLog("[Lumen][rerun] 触发 rerunLast()")
         chat.rerunLast()
@@ -92,7 +92,7 @@ enum RerunAudit {
         let secondAnswer = chat.bubbles.last?.text ?? ""
         let secondFailed = chat.bubbles.last?.failed ?? true
         let historyAfterRerun = chat.historyMessageCount
-        NSLog("[Lumen][rerun] 重跑结束：气泡 \(countAfterRerun) 条，末条字数 \(secondAnswer.count)，"
+        NSLog("%@", "[Lumen][rerun] 重跑结束：气泡 \(countAfterRerun) 条，末条字数 \(secondAnswer.count)，"
               + "history \(historyAfterRerun) 条，canRerunLast=\(chat.canRerunLast)")
 
         // ① 替换而不是追加：追加会让气泡数 +1，也会让「问—答」的交替被打破
@@ -114,17 +114,17 @@ enum RerunAudit {
         //    必须一致。读不到转储文件（桩服务没在跑 / 路径被环境变量改过）时
         //    如实跳过，而不是拿一个空结果当通过。
         let countsAfter = Self.lastRequestMessageCounts()
-        NSLog("[Lumen][rerun] 请求体 messages 条数（末两次）：\(countsAfter.map(String.init).joined(separator: ", "))")
+        NSLog("%@", "[Lumen][rerun] 请求体 messages 条数（末两次）：\(countsAfter.map(String.init).joined(separator: ", "))")
         if countsAfter.count == 2 {
             check("重跑的请求体与首次规模一致（history 未叠加）",
                   countsAfter[0] == countsAfter[1],
                   "首次 \(countsAfter[0]) 条 vs 重跑 \(countsAfter[1]) 条")
         } else {
-            NSLog("[Lumen][rerun] ⚠️ 读不到两次请求体（\(countsAfter.count)/2），"
+            NSLog("%@", "[Lumen][rerun] ⚠️ 读不到两次请求体（\(countsAfter.count)/2），"
                   + "跳过「history 未叠加」断言——桩服务的转储文件是 \(Self.requestDumpPath)")
         }
 
-        NSLog("[Lumen][rerun] 自检：通过 \(passed) 项，失败 \(failures.count) 项"
+        NSLog("%@", "[Lumen][rerun] 自检：通过 \(passed) 项，失败 \(failures.count) 项"
               + (failures.isEmpty ? " ✅" : " ❌ " + failures.joined(separator: "；")))
     }
 

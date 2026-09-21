@@ -54,11 +54,14 @@ struct SidebarColumn: View {
                     if let controller = bridge.pdfTranslationController {
                         PDFTranslationPane(controller: controller)
                             .layoutProbe("sidebarPane_translation")
+                    } else if let controller = bridge.epubTranslationController {
+                        EPUBTranslationPane(controller: controller)
+                            .layoutProbe("sidebarPane_translation")
                     } else {
                         SidebarEmptyState(
                             icon: "character.book.closed",
                             title: "正在准备翻译",
-                            message: "PDF 载入完成后即可使用。"
+                            message: "文档载入完成后即可使用。"
                         )
                         .layoutProbe("sidebarPane_translation")
                     }

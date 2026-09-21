@@ -35,3 +35,6 @@ xcuserdata/
 # 一张动辄几百 KB～1MB，2026-09-19 那一轮 before/after 对比一共 12M。
 # 证据留在磁盘上供人翻就够了，入库之后 12M 就永远在 .git 里出不来了。
 docs/verification/
+
+# 可分发的版本包、校验和与构建信息
+releases/

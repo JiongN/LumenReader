@@ -561,7 +561,7 @@ final class LayoutAuditLog {
             .first { $0.isVisible && ($0.contentView?.bounds.height ?? 0) > 100 }?
             .contentView?.bounds.size ?? .zero
 
-        NSLog("[Lumen][layout] 窗口内容区 \(Int(content.width))x\(Int(content.height))，共上报 \(frames.count) 项")
+        NSLog("%@", "[Lumen][layout] 窗口内容区 \(Int(content.width))x\(Int(content.height))，共上报 \(frames.count) 项")
         for (name, frame) in frames.sorted(by: { $0.key < $1.key }) {
             NSLog(
                 String(
@@ -586,22 +586,22 @@ enum ClipboardAudit {
     static func dump(_ label: String) {
         let pasteboard = NSPasteboard.general
         let types = (pasteboard.types ?? []).map(\.rawValue).sorted()
-        NSLog("[Lumen][clipboard] \(label) 类型=[\(types.joined(separator: ", "))]")
+        NSLog("%@", "[Lumen][clipboard] \(label) 类型=[\(types.joined(separator: ", "))]")
 
         if let string = pasteboard.string(forType: .string) {
             let oneLine = string
                 .replacingOccurrences(of: "\n", with: "⏎")
                 .replacingOccurrences(of: "\r", with: "")
-            NSLog("[Lumen][clipboard] \(label) 纯文本 字数=\(string.count) 预览=\(String(oneLine.prefix(160)))")
+            NSLog("%@", "[Lumen][clipboard] \(label) 纯文本 字数=\(string.count) 预览=\(String(oneLine.prefix(160)))")
         } else {
-            NSLog("[Lumen][clipboard] \(label) 无纯文本")
+            NSLog("%@", "[Lumen][clipboard] \(label) 无纯文本")
         }
 
         let urls = (pasteboard.readObjects(forClasses: [NSURL.self]) as? [URL]) ?? []
         if urls.isEmpty {
-            NSLog("[Lumen][clipboard] \(label) 无文件 URL")
+            NSLog("%@", "[Lumen][clipboard] \(label) 无文件 URL")
         } else {
-            NSLog("[Lumen][clipboard] \(label) 文件 URL=\(urls.map(\.path).joined(separator: " , "))")
+            NSLog("%@", "[Lumen][clipboard] \(label) 文件 URL=\(urls.map(\.path).joined(separator: " , "))")
         }
     }
 }
@@ -677,7 +677,7 @@ enum WindowCapture {
             try process.run()
             process.waitUntilExit()
         } catch {
-            NSLog("[Lumen] 录屏通道启动失败：\(error.localizedDescription)")
+            NSLog("%@", "[Lumen] 录屏通道启动失败：\(error.localizedDescription)")
             return false
         }
 
@@ -689,11 +689,11 @@ enum WindowCapture {
         guard process.terminationStatus == 0,
               let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
               data.count > 1024 else {
-            NSLog("[Lumen] 录屏通道失败（状态 \(process.terminationStatus)）\(message)")
+            NSLog("%@", "[Lumen] 录屏通道失败（状态 \(process.terminationStatus)）\(message)")
             return false
         }
 
-        NSLog("[Lumen] 截图已写入 \(path)（录屏通道，真实像素；窗口 \(Int(window.frame.width))x\(Int(window.frame.height))）")
+        NSLog("%@", "[Lumen] 截图已写入 \(path)（录屏通道，真实像素；窗口 \(Int(window.frame.width))x\(Int(window.frame.height))）")
         return true
     }
 
@@ -746,7 +746,7 @@ enum WindowCapture {
                 + "sheetParent=\(candidate.sheetParent != nil) "
                 + "frame=\(Int(candidate.frame.width))x\(Int(candidate.frame.height))"
         }
-        NSLog("[Lumen] 窗口清单（★=被截图的那个）共 \(NSApp.windows.count) 个：\n\(inventory.joined(separator: "\n"))")
+        NSLog("%@", "[Lumen] 窗口清单（★=被截图的那个）共 \(NSApp.windows.count) 个：\n\(inventory.joined(separator: "\n"))")
     }
 
     private static func hex(_ color: NSColor) -> String {
@@ -769,7 +769,7 @@ enum WindowCapture {
                 + "frame=\(Int(window.frame.width))x\(Int(window.frame.height)) "
                 + "content=\(Int(size.width))x\(Int(size.height))"
         }
-        NSLog("[Lumen] 当前窗口共 \(NSApp.windows.count) 个：\n\(lines.joined(separator: "\n"))")
+        NSLog("%@", "[Lumen] 当前窗口共 \(NSApp.windows.count) 个：\n\(lines.joined(separator: "\n"))")
     }
 
     private static func render(_ window: NSWindow) -> Data? {
@@ -787,10 +787,10 @@ enum WindowCapture {
     private static func write(_ data: Data, to path: String) -> Bool {
         do {
             try data.write(to: URL(fileURLWithPath: path))
-            NSLog("[Lumen] 截图已写入 \(path)")
+            NSLog("%@", "[Lumen] 截图已写入 \(path)")
             return true
         } catch {
-            NSLog("[Lumen] 截图写入失败：\(error)")
+            NSLog("%@", "[Lumen] 截图写入失败：\(error)")
             return false
         }
     }
@@ -845,7 +845,7 @@ enum WindowCapture {
 
                 if elapsed >= giveUpAfter {
                     logWindowInventory()
-                    NSLog("[Lumen] 截图超时：\(Int(giveUpAfter))s 内没有等到可用窗口")
+                    NSLog("%@", "[Lumen] 截图超时：\(Int(giveUpAfter))s 内没有等到可用窗口")
                     NSApp.terminate(nil)
                     return
                 }

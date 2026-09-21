@@ -98,7 +98,7 @@ public struct TranslationCache: Sendable, Equatable {
         guard let data = try? encoder.encode(File(version: 1, entries: entries)) else {
             // 编码失败是「这份结构自己有问题」，不是磁盘问题。不能静默：
             // 缓存写不进去会让用户以为「翻译又跑了一遍」，实际是每段都重发。
-            NSLog("[Lumen][translate] 译文缓存编码失败，本次未写盘（\(entries.count) 条）")
+            NSLog("%@", "[Lumen][translate] 译文缓存编码失败，本次未写盘（\(entries.count) 条）")
             return
         }
         PersistFile.write(data, to: url, label: "译文缓存")

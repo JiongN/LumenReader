@@ -238,7 +238,7 @@ final class PDFController: NSObject, ObservableObject {
         // 打开时不要让 PDFKit 自作主张地缩小到「适宽」以外的倍率
         view.scaleFactor = 1.0
 
-        NSLog("[Lumen][pdf] 渲染旋钮：\(tuning.summary)"
+        NSLog("%@", "[Lumen][pdf] 渲染旋钮：\(tuning.summary)"
             + (tuning.isBaseline ? "（默认·与改造前一致）" : "（非默认：被开关覆盖，见 --pdf-render-slim / --pdf-page-*）"))
     }
 

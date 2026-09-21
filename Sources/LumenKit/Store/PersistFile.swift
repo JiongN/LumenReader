@@ -49,7 +49,7 @@ public enum PersistFile {
             return try decoder.decode(type, from: data)
         } catch {
             let label = reason.isEmpty ? "\(type)" : reason
-            NSLog("[Lumen][persist] 解码失败：\(fileURL.lastPathComponent)（\(label)）：\(error)")
+            NSLog("%@", "[Lumen][persist] 解码失败：\(fileURL.lastPathComponent)（\(label)）：\(error)")
             backupCorrupt(fileURL, reason: label)
             return nil
         }
@@ -66,17 +66,17 @@ public enum PersistFile {
     public static func backupCorrupt(_ fileURL: URL, reason: String) -> URL? {
         let fm = FileManager.default
         guard fm.fileExists(atPath: fileURL.path) else {
-            NSLog("[Lumen][persist] 解码失败但没有文件可备份：\(fileURL.lastPathComponent)（\(reason)）")
+            NSLog("%@", "[Lumen][persist] 解码失败但没有文件可备份：\(fileURL.lastPathComponent)（\(reason)）")
             return nil
         }
 
         let destination = uniqueBackupURL(for: fileURL, stamp: timestamp())
         do {
             try fm.moveItem(at: fileURL, to: destination)
-            NSLog("[Lumen][persist] 原文件已备份：\(fileURL.lastPathComponent) → \(destination.lastPathComponent)（\(reason)）")
+            NSLog("%@", "[Lumen][persist] 原文件已备份：\(fileURL.lastPathComponent) → \(destination.lastPathComponent)（\(reason)）")
             return destination
         } catch {
-            NSLog("[Lumen][persist] 备份失败：\(fileURL.lastPathComponent)：\(error)（\(reason)）")
+            NSLog("%@", "[Lumen][persist] 备份失败：\(fileURL.lastPathComponent)：\(error)（\(reason)）")
             return nil
         }
     }
@@ -96,7 +96,7 @@ public enum PersistFile {
             try data.write(to: fileURL, options: .atomic)
             return true
         } catch {
-            NSLog("[Lumen][persist] 写盘失败：\(fileURL.lastPathComponent)（\(label)）：\(error)")
+            NSLog("%@", "[Lumen][persist] 写盘失败：\(fileURL.lastPathComponent)（\(label)）：\(error)")
             return false
         }
     }

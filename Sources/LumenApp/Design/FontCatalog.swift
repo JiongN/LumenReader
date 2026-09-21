@@ -277,7 +277,7 @@ public enum FontCatalog {
         }.joined(separator: " ")
 
         let chineseFriendly = list.filter(\.supportsChinese).count
-        NSLog("[Lumen] 字体目录：共 \(list.count) 族，支持中文 \(chineseFriendly) 族（装载耗时 \(elapsed)ms）\(counts)")
+        NSLog("%@", "[Lumen] 字体目录：共 \(list.count) 族，支持中文 \(chineseFriendly) 族（装载耗时 \(elapsed)ms）\(counts)")
 
         // 这些断言失败就说明筛选规则错了，不是"这台机器的字体环境特殊"。
         let checks: [(String, Bool)] = [
@@ -290,12 +290,12 @@ public enum FontCatalog {
             ("无重复族名", Set(list.map(\.name)).count == list.count)
         ]
         for (label, passed) in checks {
-            NSLog("[Lumen] 字体目录自检 \(passed ? "✅" : "❌") \(label)")
+            NSLog("%@", "[Lumen] 字体目录自检 \(passed ? "✅" : "❌") \(label)")
         }
 
         for group in Group.allCases {
             let sample = orderedFamilies(in: group).prefix(6).map(\.name).joined(separator: ", ")
-            NSLog("[Lumen] 字体目录 \(group.displayName)：\(sample.isEmpty ? "（无）" : sample)")
+            NSLog("%@", "[Lumen] 字体目录 \(group.displayName)：\(sample.isEmpty ? "（无）" : sample)")
         }
     }
 }

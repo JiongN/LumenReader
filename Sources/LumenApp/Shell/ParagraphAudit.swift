@@ -49,11 +49,11 @@ enum ParagraphAudit {
             if ok { passed += 1 } else { failures.append(name) }
             // 通过时不打 detail：那些数字每条目上面已单独打过一行，
             // 通过时再附一句「（本该如此）」会被误读成失败。
-            NSLog("[Lumen][paragraph] \(ok ? "✅" : "❌") \(name)"
+            NSLog("%@", "[Lumen][paragraph] \(ok ? "✅" : "❌") \(name)"
                   + (ok || detail.isEmpty ? "" : " —— \(detail)"))
         }
         func report(_ text: String) {
-            NSLog("[Lumen][paragraph] \(text)")
+            NSLog("%@", "[Lumen][paragraph] \(text)")
         }
 
         report("=== 一、表驱动：行 → 段 ===")
@@ -94,7 +94,7 @@ enum ParagraphAudit {
         report("=== 二、真机：打开的文档 ===")
         await assertRealDocument(path: documentPath, check: check, report: report)
 
-        NSLog("[Lumen][paragraph] 自检：通过 \(passed) 项，失败 \(failures.count) 项"
+        NSLog("%@", "[Lumen][paragraph] 自检：通过 \(passed) 项，失败 \(failures.count) 项"
               + (failures.isEmpty ? " ✅" : " ❌ " + failures.joined(separator: "；")))
     }
 

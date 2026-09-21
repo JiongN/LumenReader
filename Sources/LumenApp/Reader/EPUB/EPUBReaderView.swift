@@ -1,6 +1,7 @@
 import SwiftUI
 import WebKit
 import LumenKit
+import Translation
 
 /// WKWebView 挂载点。视图实例由 Controller 持有，这里不做任何重建。
 struct WebViewRepresentable: NSViewRepresentable {
@@ -27,6 +28,7 @@ struct EPUBReaderView: View {
     @StateObject private var translation = EPUBTranslationController()
     @State private var store: ReadingStateStore?
     @State private var source: EPUBDocumentSource?
+    @State private var translationConfiguration: TranslationSession.Configuration?
 
     init(document: OpenDocument, theme: ReadingTheme, reader: ReaderSettings) {
         self.document = document
@@ -53,6 +55,12 @@ struct EPUBReaderView: View {
             }
         }
         .task(id: document.id) { await prepare() }
+        .translationTask(translationConfiguration) { session in
+            await translation.runApple(
+                session: session,
+                target: state.settingsStore.reader.translationTargetLanguage
+            )
+        }
         // **只留一条。** `ReaderSettings` 里就包含 `themeID`，所以换主题必然也表现为
         // `reader` 变化；原来另有一条 `.onChange(of: theme.id)` 也调 `applyTheme`，
         // 于是切一次主题要跑两遍 `evaluateJavaScript` 注入 CSS 变量——
@@ -64,16 +72,36 @@ struct EPUBReaderView: View {
         .onChange(of: reader.epubTranslateEnabled) { _, enabled in
             enabled ? startTranslation() : stopTranslation()
         }
+        .onChange(of: translationIdentity) { _, _ in
+            if reader.epubTranslateEnabled { startTranslation() }
+        }
+        .onReceive(translation.$appleSessionRequest.dropFirst()) { _ in
+            var next = TranslationSession.Configuration(
+                source: nil,
+                target: Locale.Language(identifier: reader.translationTargetLanguage)
+            )
+            if translationConfiguration != nil { next.invalidate() }
+            translationConfiguration = next
+        }
         .onReceive(controller.$chapterLoadRevision.dropFirst()) { _ in
             refreshTranslationIfEnabled()
         }
         .onDisappear {
+            translation.stop()
+            if bridge.epubTranslationController === translation {
+                bridge.epubTranslationController = nil
+            }
             store?.flush()
             state.recent.updateProgress(
                 path: document.url.standardizedFileURL.path,
                 progress: bridge.progress
             )
         }
+    }
+
+    private var translationIdentity: String {
+        let terms = reader.translationGlossary.map { "\($0.source)=\($0.target)" }.joined(separator: "|")
+        return "\(reader.translationEngineID)|\(reader.translationTargetLanguage)|\(terms)"
     }
 
     // MARK: - 载入
@@ -213,6 +241,14 @@ struct EPUBReaderView: View {
                 Task { await self.logTranslationReport() }
             }
         }
+        translation.onError = { [weak state] message in
+            state?.showToast(message, isError: true)
+        }
+        translation.retryAction = { [weak translation] in
+            guard translation != nil else { return }
+            startTranslation()
+        }
+        bridge.epubTranslationController = translation
 
         // 搜索走解包后的纯文本，而不是让 WebKit 去 `window.find`：
         // 前者能跨章节一次搜完，并且在后台线程跑得动。
@@ -261,11 +297,34 @@ struct EPUBReaderView: View {
     /// 打开开关：翻译当前这一章。
     private func startTranslation() {
         guard state.settingsStore.reader.epubTranslateEnabled else { return }
-        let target = state.settingsStore.reader.translationTargetLanguage
+        let settings = state.settingsStore
+        let target = settings.reader.translationTargetLanguage
+        let engineID = settings.reader.translationEngineID
+        let customEngine: (any TranslationEngine)? = {
+            guard engineID == LLMTranslation.engineID,
+                  let config = settings.activeProvider,
+                  config.isConfigured else { return nil }
+            return LLMTranslationEngine(
+                config: config,
+                apiKey: AICredentialStore.read(account: config.keychainAccount) ?? "",
+                glossary: settings.reader.translationGlossary
+            )
+        }()
+        controller.clearTranslations()
         translation.start(
+            documentPath: document.url.standardizedFileURL.path,
+            chapterIndex: controller.currentChapter,
             target: target,
-            paragraphs: { [weak controller] in await controller?.prepareParagraphs() ?? [] },
-            markLoading: { [weak controller] in controller?.markTranslationsLoading() },
+            engineID: engineID,
+            glossary: settings.reader.translationGlossary,
+            customEngine: customEngine,
+            paragraphs: { [weak controller] in
+                guard let controller else { return [] }
+                return try await controller.prepareParagraphs()
+            },
+            markLoading: { [weak controller] indices in
+                controller?.markTranslationsLoading(indices: indices)
+            },
             apply: { [weak controller] index, text, state in
                 controller?.setTranslation(index: index, text: text, state: state)
             }

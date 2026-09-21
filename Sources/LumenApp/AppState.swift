@@ -368,7 +368,7 @@ final class AppState: ObservableObject {
         let normalized = url.standardizedFileURL
 
         guard FileManager.default.fileExists(atPath: normalized.path) else {
-            NSLog("[Lumen][tabs] open 失败：文件不存在 \(normalized.path)")
+            NSLog("%@", "[Lumen][tabs] open 失败：文件不存在 \(normalized.path)")
             presentAlert(title: "文件不存在", message: "找不到 \(normalized.path)\n\n它可能已被移动或删除。")
             return
         }
@@ -393,7 +393,7 @@ final class AppState: ObservableObject {
 
         let document = OpenDocument(url: normalized, kind: kind)
         add(ReaderSession(document: document))
-        NSLog("[Lumen][tabs] open 已加标签：\(normalized.lastPathComponent)，当前会话数 = \(sessions.count)")
+        NSLog("%@", "[Lumen][tabs] open 已加标签：\(normalized.lastPathComponent)，当前会话数 = \(sessions.count)")
     }
 
     /// 菜单「关闭文档」的新语义：关闭当前标签。
@@ -474,11 +474,11 @@ final class AppState: ObservableObject {
 
     /// 系统全屏状态变化（来自窗口的进出全屏通知）。只处理「退出全屏」方向。
     func systemFullScreenChanged(_ isFullScreen: Bool) {
-        NSLog("[Lumen][immersive] 收到全屏通知 isFullScreen=\(isFullScreen)"
+        NSLog("%@", "[Lumen][immersive] 收到全屏通知 isFullScreen=\(isFullScreen)"
             + " 当前 isImmersive=\(isImmersive)")
         guard isImmersive, !isFullScreen else { return }
         setIsImmersive(false, animated: false)
-        NSLog("[Lumen][immersive] 已随退出全屏复位：isImmersive=\(isImmersive)"
+        NSLog("%@", "[Lumen][immersive] 已随退出全屏复位：isImmersive=\(isImmersive)"
             + " 侧栏=\(isSidebarVisible) AI面板=\(isAIPanelVisible)")
     }
 
@@ -488,7 +488,7 @@ final class AppState: ObservableObject {
             NSLog("[Lumen][immersive] 模拟退出全屏失败：窗口当前不在全屏")
             return
         }
-        NSLog("[Lumen][immersive] 模拟系统方式退出全屏（未触碰 isImmersive，当前=\(isImmersive)）")
+        NSLog("%@", "[Lumen][immersive] 模拟系统方式退出全屏（未触碰 isImmersive，当前=\(isImmersive)）")
         window.toggleFullScreen(nil)
     }
 
@@ -627,7 +627,7 @@ final class AppState: ObservableObject {
     ) {
         // 自检通道：`--auto-confirm 1` 时直接执行，不弹框。
         if LaunchOptions.autoConfirms {
-            NSLog("[Lumen][action] 自检自动确认：\(title)")
+            NSLog("%@", "[Lumen][action] 自检自动确认：\(title)")
             action()
             return
         }

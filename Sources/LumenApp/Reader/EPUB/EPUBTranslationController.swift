@@ -1,155 +1,274 @@
 import Foundation
 import LumenKit
+import Translation
 
-/// 一段译文的呈现状态。
 enum EPUBTranslationState: String, Sendable {
     case loading
     case done
     case failed
-
-    /// 占位 / 失败文案。写在 Swift 侧而不是 JS 里：界面上的措辞要能一处改，
-    /// 也要能被单测直接读到。
-    var placeholder: String {
-        switch self {
-        case .loading: return "翻译中…"
-        case .done:    return ""
-        case .failed:  return "翻译失败"
-        }
-    }
 }
 
-/// EPUB 逐段翻译的编排器：取段落 → 并发请求 → 逐段回填 → 收尾统计。
-///
-/// 单独成类的理由：**翻译是长任务，而章节随时会变**。换章、关开关、
-/// 关标签，都要求它能被干净地取消，而且取消之后不能再往新 DOM 里写旧译文
-/// （那是「张冠李戴」级别的错）。所以请求过程必须是一个可持有的 Task，
-/// 不能散落在视图的 `.task` 里。
-///
-/// 它不认识 WebKit：段落从哪来、译文写到哪去，全由注入的两个闭包决定，
-/// 这样单测里塞一对数组就能跑完整条链路。
+/// EPUB 当前章节的逐段翻译编排器。每次切章、换引擎或关闭翻译都会递增代际，
+/// 旧请求即使晚到也不能再写进新的页面。
 @MainActor
 final class EPUBTranslationController: ObservableObject {
-
     @Published private(set) var isRunning = false
     @Published private(set) var totalCount = 0
     @Published private(set) var completedCount = 0
     @Published private(set) var failureCount = 0
+    @Published private(set) var errorMessage: String?
+    @Published private(set) var appleSessionRequest = 0
 
-    /// 一次翻译跑完后的收尾回调（用来弹提示条）。参数是失败段数。
     var onFinish: ((_ failed: Int) -> Void)?
+    var onError: ((_ message: String) -> Void)?
+    var retryAction: (() -> Void)?
 
-    private var task: Task<Void, Never>?
-    private let translator: MicrosoftTranslator
-    /// 并发上限。一段一个 HTTP 请求，无上限的话一章几十段会把接口打爆（429），
-    /// 且译文回填顺序会乱得没法读。批内并发 + 批间串行，顺序可控也够快。
-    private let batchSize = 4
-
-    init(translator: MicrosoftTranslator = .shared) {
-        self.translator = translator
+    private struct Item: Sendable {
+        let index: Int
+        let text: String
+        let cacheKey: String
     }
 
-    /// 开始翻译一章。
-    ///
-    /// - Parameters:
-    ///   - target: 目标语言标签（`zh-Hans` / `en`）。
-    ///   - paragraphs: 取当前章的段落原文（顺便完成 DOM 标记）。
-    ///   - markLoading: 一次性把所有段落标成「翻译中…」。
-    ///   - apply: 把第 `index` 段的译文写回页面。
-    ///
-    /// `markLoading` 为什么单独成一个闭包而不是拿 `apply` 循环：
-    /// 段落回填到 WebKit 里是一次 `evaluateJavaScript`，一章几十段就是几十次
-    /// 跨进程调用。铺占位必须是**一次** JS 在页面里批量插入，逐段往返光 IPC
-    /// 就要几百毫秒，还会让占位一块一块往外蹦。
+    private var task: Task<Void, Never>?
+    private var generation = 0
+    private var queuedAppleItems: [Item] = []
+    private var cache = TranslationCache()
+    private var cacheURL: URL?
+    private var apply: ((Int, String, EPUBTranslationState) -> Void)?
+    private var pendingSinceSave = 0
+
+    private static let concurrency = 4
+    private static let saveEvery = 8
+
     func start(
+        documentPath: String,
+        chapterIndex: Int,
         target: String,
-        paragraphs: @escaping () async -> [String],
-        markLoading: @escaping () -> Void,
+        engineID: String,
+        glossary: [TranslationGlossaryEntry],
+        customEngine: (any TranslationEngine)?,
+        paragraphs: @escaping () async throws -> [String],
+        markLoading: @escaping ([Int]) -> Void,
         apply: @escaping (Int, String, EPUBTranslationState) -> Void
     ) {
-        task?.cancel()
+        cancelRun()
+        let token = generation
+        isRunning = true
         totalCount = 0
         completedCount = 0
         failureCount = 0
-        isRunning = true
+        errorMessage = nil
+        queuedAppleItems = []
+        self.apply = apply
 
-        let translator = self.translator
-        let batchSize = self.batchSize
+        let normalizedTarget = TranslationLanguage.target(for: target).id
+        let scope = Self.cacheScope(engineID: engineID, glossary: glossary)
+        let cacheURL = AppPaths.translationCacheFile(forPath: documentPath)
+        self.cacheURL = cacheURL
+        cache = TranslationCache.load(from: cacheURL)
+
         task = Task { [weak self] in
-            let texts = await paragraphs()
-            guard !Task.isCancelled, !texts.isEmpty else {
-                await MainActor.run { self?.isRunning = false }
-                return
-            }
-            await MainActor.run { self?.totalCount = texts.count }
-
-            // 先一次性铺满「翻译中…」：等待期间读者能看到进度发生在哪些段上，
-            // 而不是整页毫无动静地卡十几秒。
-            await MainActor.run { markLoading() }
-
-            var failed = 0
-            var done = 0
-
-            for start in stride(from: 0, to: texts.count, by: batchSize) {
-                if Task.isCancelled { break }
-                let slice = Array(start..<min(start + batchSize, texts.count))
-                let results = await Self.translateBatch(
-                    slice.map { texts[$0] },
-                    indices: slice,
-                    to: target,
-                    translator: translator
-                )
-                await MainActor.run {
-                    for (index, text) in results {
-                        if let text {
-                            apply(index, text, .done)
-                            done += 1
-                        } else {
-                            apply(index, EPUBTranslationState.failed.placeholder, .failed)
-                            failed += 1
-                        }
-                    }
-                    self?.completedCount = done + failed
-                    self?.failureCount = failed
+            guard let self else { return }
+            do {
+                let texts = try await paragraphs()
+                guard token == self.generation, !Task.isCancelled else { return }
+                guard !texts.isEmpty else {
+                    self.finishWithError("当前章节没有识别到可翻译的正文段落。")
+                    return
                 }
-            }
 
-            await MainActor.run {
-                self?.isRunning = false
-                self?.onFinish?(failed)
+                let items = texts.enumerated().compactMap { index, text -> Item? in
+                    let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard trimmed.contains(where: { $0.isLetter }),
+                          !TranslationEligibility.isAlreadyTargetLanguage(trimmed, target: normalizedTarget)
+                    else { return nil }
+                    let identity = AppPaths.stableHash(trimmed)
+                    let key = "epub::\(scope)::\(normalizedTarget)::c\(chapterIndex)-p\(index)-\(identity)"
+                    return Item(index: index, text: trimmed, cacheKey: key)
+                }
+
+                guard !items.isEmpty else {
+                    self.finishWithError("当前章节的正文已经是目标语言，或只有页码和装饰文字。")
+                    return
+                }
+
+                self.totalCount = items.count
+                var queue: [Item] = []
+                for item in items {
+                    if let cached = self.cache.translation(for: item.cacheKey) {
+                        apply(item.index, cached, .done)
+                        self.completedCount += 1
+                    } else {
+                        queue.append(item)
+                    }
+                }
+
+                guard !queue.isEmpty else {
+                    self.finish(failed: 0)
+                    return
+                }
+                markLoading(queue.map(\.index))
+
+                if engineID == AppleSystemTranslation.engineID {
+                    self.queuedAppleItems = queue
+                    self.task = nil
+                    self.appleSessionRequest &+= 1
+                    return
+                }
+
+                guard let engine = customEngine ?? TranslationEngineCatalog.engine(for: engineID) else {
+                    self.finishWithError(engineID == LLMTranslation.engineID
+                        ? "尚未配置可用的 AI 服务商，无法使用 LLM 翻译。"
+                        : "所选翻译引擎不可用。")
+                    return
+                }
+                await self.run(queue, engine: engine, target: normalizedTarget, token: token)
+            } catch is CancellationError {
+                return
+            } catch {
+                guard token == self.generation else { return }
+                self.finishWithError(Self.describe(error))
             }
         }
     }
 
-    /// 取消并清空统计。换章 / 关开关都要走这里。
+    func runApple(session: TranslationSession, target: String) async {
+        let items = queuedAppleItems
+        guard !items.isEmpty, task == nil else { return }
+        queuedAppleItems = []
+        let token = generation
+        let normalizedTarget = TranslationLanguage.target(for: target).id
+        task = Task { [weak self] in
+            guard let self else { return }
+            await self.runApple(items, session: session, target: normalizedTarget, token: token)
+            if token == self.generation { self.task = nil }
+        }
+        await task?.value
+    }
+
     func stop() {
-        task?.cancel()
-        task = nil
+        cancelRun()
+        persistCache()
         isRunning = false
         totalCount = 0
         completedCount = 0
         failureCount = 0
+        errorMessage = nil
     }
 
-    private static func translateBatch(
-        _ texts: [String],
-        indices: [Int],
-        to target: String,
-        translator: MicrosoftTranslator
-    ) async -> [(Int, String?)] {
-        await withTaskGroup(of: (Int, String?).self) { group in
-            for (offset, text) in texts.enumerated() {
-                let index = indices[offset]
+    func retry() { retryAction?() }
+
+    private func cancelRun() {
+        task?.cancel()
+        task = nil
+        queuedAppleItems = []
+        generation &+= 1
+    }
+
+    private func run(_ items: [Item], engine: any TranslationEngine,
+                     target: String, token: Int) async {
+        await withTaskGroup(of: (Item, Result<String, Error>).self) { group in
+            var next = 0
+            func submit() {
+                guard next < items.count else { return }
+                let item = items[next]
+                next += 1
                 group.addTask {
                     do {
-                        return (index, try await translator.translate(text, to: target))
+                        var pieces: [String] = []
+                        for chunk in TranslationTextSplitter.split(item.text) {
+                            pieces.append(try await engine.translate(chunk, to: target, from: "auto-detect"))
+                        }
+                        return (item, .success(TranslationTextSplitter.join(pieces, target: target)))
                     } catch {
-                        return (index, nil)
+                        return (item, .failure(error))
                     }
                 }
             }
-            var out: [(Int, String?)] = []
-            for await item in group { out.append(item) }
-            return out
+            for _ in 0..<min(Self.concurrency, items.count) { submit() }
+            for await (item, result) in group {
+                guard token == generation, !Task.isCancelled else { continue }
+                consume(result, for: item)
+                submit()
+            }
         }
+        guard token == generation, !Task.isCancelled else { return }
+        finish(failed: failureCount)
+    }
+
+    private func runApple(_ items: [Item], session: TranslationSession,
+                          target: String, token: Int) async {
+        for item in items {
+            guard token == generation, !Task.isCancelled else { return }
+            do {
+                var translated: [String] = []
+                for chunk in TranslationTextSplitter.split(item.text) {
+                    let response = try await session.translate(chunk)
+                    translated.append(response.targetText)
+                }
+                consume(.success(TranslationTextSplitter.join(translated, target: target)), for: item)
+            } catch {
+                consume(.failure(error), for: item)
+            }
+        }
+        guard token == generation, !Task.isCancelled else { return }
+        finish(failed: failureCount)
+    }
+
+    private func consume(_ result: Result<String, Error>, for item: Item) {
+        switch result {
+        case .success(let value):
+            let text = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            if text.isEmpty {
+                recordFailure("翻译引擎返回了空译文", item: item)
+            } else {
+                apply?(item.index, text, .done)
+                cache.store(text, for: item.cacheKey)
+                completedCount += 1
+                pendingSinceSave += 1
+                if pendingSinceSave >= Self.saveEvery { persistCache() }
+            }
+        case .failure(let error):
+            recordFailure(Self.describe(error), item: item)
+        }
+    }
+
+    private func recordFailure(_ reason: String, item: Item) {
+        apply?(item.index, "翻译失败：\(reason)", .failed)
+        completedCount += 1
+        failureCount += 1
+        if errorMessage == nil { errorMessage = reason }
+    }
+
+    private func finish(failed: Int) {
+        persistCache()
+        isRunning = false
+        task = nil
+        onFinish?(failed)
+    }
+
+    private func finishWithError(_ message: String) {
+        errorMessage = message
+        isRunning = false
+        task = nil
+        onError?(message)
+    }
+
+    private func persistCache() {
+        guard let cacheURL else { return }
+        cache.save(to: cacheURL)
+        pendingSinceSave = 0
+    }
+
+    private static func cacheScope(engineID: String,
+                                   glossary: [TranslationGlossaryEntry]) -> String {
+        let terms = glossary.filter(\.isUsable)
+            .map { "\($0.source)=\($0.target)" }
+            .joined(separator: "|")
+        return terms.isEmpty ? engineID : "\(engineID)-\(AppPaths.stableHash(terms))"
+    }
+
+    private static func describe(_ error: Error) -> String {
+        (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
     }
 }

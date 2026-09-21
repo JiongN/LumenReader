@@ -80,17 +80,17 @@ enum AgentAudit {
         var failures: [String] = []
         func check(_ name: String, _ ok: Bool, _ detail: String = "") {
             if ok { passed += 1 } else { failures.append(name) }
-            NSLog("[Lumen][agent] \(ok ? "✅" : "❌") \(name)\(detail.isEmpty ? "" : " —— \(detail)")")
+            NSLog("%@", "[Lumen][agent] \(ok ? "✅" : "❌") \(name)\(detail.isEmpty ? "" : " —— \(detail)")")
         }
 
         let library = AgentSkill.catalog
-        NSLog("[Lumen][agent] 内置技能：\(library.count) 条"
+        NSLog("%@", "[Lumen][agent] 内置技能：\(library.count) 条"
             + "（" + library.map(\.name).joined(separator: "、") + "）")
 
-        NSLog("[Lumen][agent] 预设 Agent：\(AgentConfig.presets.count) 个")
+        NSLog("%@", "[Lumen][agent] 预设 Agent：\(AgentConfig.presets.count) 个")
         for agent in AgentConfig.presets {
             let names = agent.resolvedSkills(in: library).map(\.name).joined(separator: "/")
-            NSLog("[Lumen][agent]   \(agent.name)｜技能=\(names)"
+            NSLog("%@", "[Lumen][agent]   \(agent.name)｜技能=\(names)"
                 + "｜联网=\(agent.usesWebSearch)｜id=\(agent.id.prefix(8))…")
         }
 
@@ -344,16 +344,16 @@ enum AgentAudit {
 
         // 联网检索：真跑一次，把结果和失败原因都打出来
         let query = "cultural capital education inequality"
-        NSLog("[Lumen][agent] 联网检索测试：query = 「\(query)」")
+        NSLog("%@", "[Lumen][agent] 联网检索测试：query = 「\(query)」")
         let started = Date()
         let outcome = await WebLiteratureSearch.search(query: query)
         let elapsed = Int(Date().timeIntervalSince(started) * 1000)
-        NSLog("[Lumen][agent] 耗时 \(elapsed)ms，命中 \(outcome.hits.count) 条，失败 \(outcome.failures.count) 个源")
+        NSLog("%@", "[Lumen][agent] 耗时 \(elapsed)ms，命中 \(outcome.hits.count) 条，失败 \(outcome.failures.count) 个源")
         for failure in outcome.failures {
-            NSLog("[Lumen][agent]   源失败：\(failure)")
+            NSLog("%@", "[Lumen][agent]   源失败：\(failure)")
         }
         for hit in outcome.hits.prefix(5) {
-            NSLog("[Lumen][agent]   [\(hit.source)] \(hit.title.prefix(60))"
+            NSLog("%@", "[Lumen][agent]   [\(hit.source)] \(hit.title.prefix(60))"
                 + " — \(hit.authors.prefix(30)) \(hit.year) \(hit.identifier)")
         }
 
@@ -364,7 +364,7 @@ enum AgentAudit {
         // 只看「有结果」还不够：三个源里挂两个、只剩一个在撑，从终值上分辨不出来。
         // 把出结果的源列出来，才看得出覆盖面。
         let sources = Set(outcome.hits.map(\.source)).sorted()
-        NSLog("[Lumen][agent] 出结果的源：\(sources.isEmpty ? "无" : sources.joined(separator: "、"))")
+        NSLog("%@", "[Lumen][agent] 出结果的源：\(sources.isEmpty ? "无" : sources.joined(separator: "、"))")
         check("至少两个数据源出了结果（单源故障不影响可用性）", sources.count >= 2,
               "\(sources.count) 个源")
 
@@ -420,7 +420,7 @@ enum AgentAudit {
             }
         }
 
-        NSLog("[Lumen][agent] 自检：通过 \(passed) 项，失败 \(failures.count) 项"
+        NSLog("%@", "[Lumen][agent] 自检：通过 \(passed) 项，失败 \(failures.count) 项"
             + (failures.isEmpty ? " ✅" : " ❌ " + failures.joined(separator: "；")))
     }
 }

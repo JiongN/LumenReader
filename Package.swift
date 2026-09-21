@@ -26,6 +26,7 @@ let package = Package(
             name: "LumenKitTests",
             dependencies: ["LumenKit"],
             path: "Tests/LumenKitTests"
-        )
+        ),
+        .testTarget(name: "LumenAppTests", dependencies: ["LumenApp"], path: "Tests/LumenAppTests")
     ]
 )

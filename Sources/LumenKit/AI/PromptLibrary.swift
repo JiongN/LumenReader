@@ -71,7 +71,7 @@ public enum PromptLibrary {
         // 这样拼出来的系统提示会静默变短（角色还在、技能没了），界面上完全看不出来，
         // 所以在出错的地方喊一声。
         if let agent, !agent.skills.isEmpty, skills.isEmpty {
-            NSLog("[Lumen][prompt] 传了 Agent 但没传技能库，技能段落为空：agent=\(agent.name)")
+            NSLog("%@", "[Lumen][prompt] 传了 Agent 但没传技能库，技能段落为空：agent=\(agent.name)")
         }
 
         if let section = agent?.promptSection(in: skills), !section.isEmpty {

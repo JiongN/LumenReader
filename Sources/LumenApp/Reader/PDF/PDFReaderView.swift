@@ -210,7 +210,7 @@ struct PDFReaderView: View {
 
         do {
             let result = try await controller.recognize(page: page)
-            NSLog("[Lumen] OCR 第 \(page + 1) 页完成：\(result.lines.count) 行，平均置信度 \(Int(result.averageConfidence * 100))%")
+            NSLog("%@", "[Lumen] OCR 第 \(page + 1) 页完成：\(result.lines.count) 行，平均置信度 \(Int(result.averageConfidence * 100))%")
             if result.isEmpty {
                 state.presentAlert(
                     title: "没有识别到文字",

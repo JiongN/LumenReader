@@ -212,7 +212,7 @@ enum JankAudit {
         range: ClosedRange<Double>,
         steps: Int
     ) async {
-        NSLog("[Lumen][jank] ── 连续交互卡顿自检（每段 \(steps) 步，帧预算 \(Int(stallBudgetMs))ms）──")
+        NSLog("%@", "[Lumen][jank] ── 连续交互卡顿自检（每段 \(steps) 步，帧预算 \(Int(stallBudgetMs))ms）──")
 
         let meter = MainStallMeter()
 
@@ -255,7 +255,7 @@ enum JankAudit {
     private static func logEnvironment(_ pdfView: PDFView) {
         let window = pdfView.window
         let visible = window?.occlusionState.contains(.visible) ?? false
-        NSLog("[Lumen][jank] 环境：窗口 \(window == nil ? "无" : "有")"
+        NSLog("%@", "[Lumen][jank] 环境：窗口 \(window == nil ? "无" : "有")"
             + " key=\(window?.isKeyWindow ?? false) visible=\(window?.isVisible ?? false)"
             + " occlusionVisible=\(visible) appActive=\(NSApp.isActive)"
             + " layerBacked=\(pdfView.wantsLayer)")
@@ -275,7 +275,7 @@ enum JankAudit {
         pdfView.displayIfNeeded()
         let after = JankTally.shared.snapshot()[.pdfViewDraw] ?? 0
         let ok = after > before
-        NSLog("[Lumen][jank] 计数器自检（强制重绘）：PDFView.draw \(before) → \(after) "
+        NSLog("%@", "[Lumen][jank] 计数器自检（强制重绘）：PDFView.draw \(before) → \(after) "
             + (ok ? "✅ 能亮" : "❌ 恒为 0——本计数器不可信，滚动段读数作废"))
         NSLog("[Lumen][jank] 计数器覆盖范围：PDFView.draw 只反映「view 被要求重画」"
             + "（frame 变化等）；PDFKit 翻页/滚动的分页光栅化走内部文档视图的 tiled/layer 路径，"
@@ -314,7 +314,7 @@ enum JankAudit {
         if let zoom = LaunchOptions.jankScrollZoom {
             let clamped = min(max(CGFloat(zoom), pdfView.minScaleFactor), pdfView.maxScaleFactor)
             pdfView.scaleFactor = clamped
-            NSLog("[Lumen][jank] 滚动：倍率钉在 \(String(format: "%.2f", pdfView.scaleFactor))（--jank-scroll-zoom）")
+            NSLog("%@", "[Lumen][jank] 滚动：倍率钉在 \(String(format: "%.2f", pdfView.scaleFactor))（--jank-scroll-zoom）")
         }
 
         // 方向自适应：不同系统 / 触控板的「自然滚动」设置会翻转滚轮事件的符号约定。
@@ -350,7 +350,7 @@ enum JankAudit {
             if now == lastOffset { stalledSteps += 1 } else { stalledSteps = 0 }
             lastOffset = now
         }
-        NSLog("[Lumen][jank] 滚动：投完 \(steps) 步（每步 \(Int(delta))px × \(burst) 事件、倍率 "
+        NSLog("%@", "[Lumen][jank] 滚动：投完 \(steps) 步（每步 \(Int(delta))px × \(burst) 事件、倍率 "
             + String(format: "%.2f", pdfView.scaleFactor) + "）时 页=\(viewportPageIndex(pdfView).map(String.init) ?? "?")"
             + " 偏移=\(fmt(scrollOffsetY(pdfView)))（落定后的回调还没发生，下面等惯性）")
         // 关键：投完事件不能立刻收尾。带精确增量的滚轮会进入「响应式滚动 / 惯性」，
@@ -368,7 +368,7 @@ enum JankAudit {
         report(phase: "滚动", samples: samples, counts: counts, steps: steps, cpuSeconds: cpuSeconds)
 
         if stalledSteps > 5 {
-            NSLog("[Lumen][jank] 滚动：⚠️ 末尾有 \(stalledSteps) 步没有位移——驱动已滚到文档末尾在空转，"
+            NSLog("%@", "[Lumen][jank] 滚动：⚠️ 末尾有 \(stalledSteps) 步没有位移——驱动已滚到文档末尾在空转，"
                 + "这些步几乎不产生重活，CPU/步 被稀释，本段只反映前半段。"
                 + "请换更大文档，或调小 `--jank-scroll-delta`。")
         }
@@ -382,7 +382,7 @@ enum JankAudit {
             cpuPerStep, realMachineCPUPerStepMs, cpuPerStep / realMachineCPUPerStepMs
         ))
         if cpuPerStep < realMachineCPUPerStepMs * 0.5 {
-            NSLog("[Lumen][jank] 滚动：⚠️ 合成驱动只有真机的 \(String(format: "%.2f", cpuPerStep / realMachineCPUPerStepMs))×"
+            NSLog("%@", "[Lumen][jank] 滚动：⚠️ 合成驱动只有真机的 \(String(format: "%.2f", cpuPerStep / realMachineCPUPerStepMs))×"
                 + "——它比真机**轻**，在它上面得出的「不卡」不能代表真机。"
                 + "要逼近真机可加大：`--jank-scroll-delta`、`--jank-scroll-zoom`。")
         }
@@ -405,7 +405,7 @@ enum JankAudit {
         let moved = (offsetBefore != offsetAfter) || (pageBefore != pageAfter)
         let before = pageBefore.map(String.init) ?? "?"
         let after = pageAfter.map(String.init) ?? "?"
-        NSLog("[Lumen][jank] 滚动驱动自证：页码 \(before) → \(after)，滚动偏移 \(fmt(offsetBefore)) → \(fmt(offsetAfter)) "
+        NSLog("%@", "[Lumen][jank] 滚动驱动自证：页码 \(before) → \(after)，滚动偏移 \(fmt(offsetBefore)) → \(fmt(offsetAfter)) "
             + (moved ? "✅ 确实滚了" : "❌ 没滚动（读数无效）"))
     }
 
@@ -495,12 +495,12 @@ enum JankAudit {
             wheel1: 30, wheel2: 0, wheel3: 0
         )
         let e = cg.flatMap { NSEvent(cgEvent: $0) }
-        NSLog("[Lumen][jank] 滚动事件诊断：units=pixel wheel1=30 → "
+        NSLog("%@", "[Lumen][jank] 滚动事件诊断：units=pixel wheel1=30 → "
             + "scrollingDeltaY=\(e?.scrollingDeltaY ?? -999) deltaY=\(e?.deltaY ?? -999) "
             + "precise=\(e?.hasPreciseScrollingDeltas ?? false) "
             + "phase=\(e.map { String($0.phase.rawValue) } ?? "n/a") "
             + "momentum=\(e.map { String($0.momentumPhase.rawValue) } ?? "n/a")")
-        NSLog("[Lumen][jank] 内部滚动视图：\(sv == nil ? "未找到" : "找到")"
+        NSLog("%@", "[Lumen][jank] 内部滚动视图：\(sv == nil ? "未找到" : "找到")"
             + " contentView.bounds=\(NSStringFromRect(sv?.contentView.bounds ?? .zero))"
             + " documentView.frame=\(NSStringFromRect(sv?.documentView?.frame ?? .zero))"
             + " hasVerticalScroller=\(sv?.hasVerticalScroller ?? false)")
@@ -526,7 +526,7 @@ enum JankAudit {
         // AI 面板上限被阅读区保底压回到下限 300，`range` 成了 300...300。
         // 必须显式说穿，否则读数看起来像「拖动一点都不卡」。
         if span < 20 {
-            NSLog("[Lumen][jank] 拖动：可用区间仅 \(Int(span))pt（\(Int(range.lowerBound))…\(Int(range.upperBound))）"
+            NSLog("%@", "[Lumen][jank] 拖动：可用区间仅 \(Int(span))pt（\(Int(range.lowerBound))…\(Int(range.upperBound))）"
                 + "——分隔线没有可拖动的余量，本段读数无效。请加大 --window-size 重跑。")
         }
 
@@ -607,7 +607,7 @@ enum JankAudit {
         } else {
             verdict = "✅ 应用 \(applied) 次、容器重算 \(containerBody) 次——布局真的跟着动了"
         }
-        NSLog("[Lumen][jank] 拖动驱动自证：宽度 \(Int(widthBefore))pt → \(Int(from))…\(Int(to))pt；"
+        NSLog("%@", "[Lumen][jank] 拖动驱动自证：宽度 \(Int(widthBefore))pt → \(Int(from))…\(Int(to))pt；"
             + "每帧 \(pointerWritesPerFrame) 次指针写入（与真实手势同一条 liveWidth 写入路径）。"
             + "写入 \(submitted) 次 → 实际应用 \(applied) 次（值真的变了）；"
             + "合并节拍回调 \(ticks) 次；容器重算 \(containerBody) 次。\(verdict)")
@@ -839,7 +839,7 @@ final class JankWatch {
         ========================================
         """
         write(file)
-        NSLog("[Lumen][jank] jank watch 已开启：日志 → \(Self.logPath)（正常交互即可，⌘Q 退出）")
+        NSLog("%@", "[Lumen][jank] jank watch 已开启：日志 → \(Self.logPath)（正常交互即可，⌘Q 退出）")
     }
 
     private func write(_ line: String) {

@@ -25,15 +25,15 @@ enum UpdateAudit {
         var failures: [String] = []
         func check(_ name: String, _ ok: Bool, _ detail: String = "") {
             if ok { passed += 1 } else { failures.append(name) }
-            NSLog("[Lumen][update] \(ok ? "✅" : "❌") \(name)"
+            NSLog("%@", "[Lumen][update] \(ok ? "✅" : "❌") \(name)"
                   + (ok || detail.isEmpty ? "" : " —— \(detail)"))
         }
 
         // ── ① 版本读取链路 ────────────────────────────────────────────────
-        NSLog("[Lumen][update] 界面版本 = \(AppVersionInfo.display)")
+        NSLog("%@", "[Lumen][update] 界面版本 = \(AppVersionInfo.display)")
         guard let local = AppVersionInfo.semver else {
             NSLog("[Lumen][update] ❌ 本地版本号解析失败：AppVersionInfo.semver == nil")
-            NSLog("[Lumen][update] 结果：\(passed) 通过 / \(failures.count) 失败：\(failures)")
+            NSLog("%@", "[Lumen][update] 结果：\(passed) 通过 / \(failures.count) 失败：\(failures)")
             return
         }
         check("Info.plist 版本号可解析", true, "本地 \(local.display)")
@@ -69,7 +69,7 @@ enum UpdateAudit {
         }
 
         // ── ③ 真实端到端（只打印，不硬断言）───────────────────────────────
-        NSLog("[Lumen][update] 真实请求 GitHub \(UpdateChecker.defaultRepository)…")
+        NSLog("%@", "[Lumen][update] 真实请求 GitHub \(UpdateChecker.defaultRepository)…")
         Task {
             let outcome = await UpdateChecker.check(
                 repository: UpdateChecker.defaultRepository,
@@ -82,9 +82,9 @@ enum UpdateAudit {
             case .noRelease: description = "仓库暂无 release"
             case .failed(let reason): description = "失败：\(reason)"
             }
-            NSLog("[Lumen][update] 真实请求结果：\(description)")
+            NSLog("%@", "[Lumen][update] 真实请求结果：\(description)")
 
-            NSLog("[Lumen][update] 结果汇总：\(passed) 通过 / \(failures.count) 失败：\(failures)")
+            NSLog("%@", "[Lumen][update] 结果汇总：\(passed) 通过 / \(failures.count) 失败：\(failures)")
         }
     }
 

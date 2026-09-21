@@ -24,7 +24,7 @@ enum AnnotationAudit {
             try FileManager.default.copyItem(at: url, to: destination)
             return destination
         } catch {
-            NSLog("[Lumen][annotate] 无法创建自检副本：\(error.localizedDescription)")
+            NSLog("%@", "[Lumen][annotate] 无法创建自检副本：\(error.localizedDescription)")
             return nil
         }
     }
@@ -37,7 +37,7 @@ enum AnnotationAudit {
         var failures: [String] = []
         func check(_ name: String, _ ok: Bool, _ detail: String = "") {
             if ok { passed += 1 } else { failures.append(name) }
-            NSLog("[Lumen][annotate] \(ok ? "✅" : "❌") \(name)\(detail.isEmpty ? "" : " —— \(detail)")")
+            NSLog("%@", "[Lumen][annotate] \(ok ? "✅" : "❌") \(name)\(detail.isEmpty ? "" : " —— \(detail)")")
         }
 
         guard let copy = makeCopy(of: sourceURL) else { return }
@@ -47,8 +47,8 @@ enum AnnotationAudit {
             NSLog("[Lumen][annotate] 无法载入自检副本，跳过")
             return
         }
-        NSLog("[Lumen][annotate] 自检副本：\(copy.path)，共 \(controller.pageCount) 页")
-        NSLog("[Lumen][annotate] 起点批注数（重开文件统计）：\(annotationCount(in: copy))")
+        NSLog("%@", "[Lumen][annotate] 自检副本：\(copy.path)，共 \(controller.pageCount) 页")
+        NSLog("%@", "[Lumen][annotate] 起点批注数（重开文件统计）：\(annotationCount(in: copy))")
 
         // ① 高亮：真实走一遍「设置选区 → 高亮 → 写盘」
         //
@@ -66,7 +66,7 @@ enum AnnotationAudit {
         check("测试页有可用的文本层", pageText.count >= 40, "\(pageText.count) 字")
 
         let textBand = glyphBand(of: testPage)
-        NSLog("[Lumen][annotate] 文字占用带 \(textBand)"
+        NSLog("%@", "[Lumen][annotate] 文字占用带 \(textBand)"
             + "（页 bounds \(testPage.bounds(for: .mediaBox))）")
 
         var selectionText = ""
@@ -89,11 +89,11 @@ enum AnnotationAudit {
         // 「文档里是换行、锚里是空格就匹配不上」那个坑。
         let anchor = selectionText.isEmpty ? firstSentence(in: pageText) : selectionText
         let occurrences = pageText.components(separatedBy: anchor).count - 1
-        NSLog("[Lumen][annotate] 锚文本 \(anchor.count) 字，在本页出现 \(occurrences) 次")
+        NSLog("%@", "[Lumen][annotate] 锚文本 \(anchor.count) 字，在本页出现 \(occurrences) 次")
 
         // 两条查锚路径的耗时对照：终值一样，所以断言只能打在代价上
         let cost = controller.anchorLookupCostProbe(anchor: anchor, pageIndex: targetPage)
-        NSLog("[Lumen][annotate] 查锚耗时：全书 findString \(cost.wholeBook)µs／页内查找 \(cost.pageLocal)µs"
+        NSLog("%@", "[Lumen][annotate] 查锚耗时：全书 findString \(cost.wholeBook)µs／页内查找 \(cost.pageLocal)µs"
             + "（\(cost.pageLocal > 0 ? String(format: "%.0f×", Double(cost.wholeBook) / Double(cost.pageLocal)) : "—")）")
 
         let noteOK = controller.addNote(
@@ -119,15 +119,15 @@ enum AnnotationAudit {
 
         // ③ 最硬的断言：重新打开磁盘上的文件，批注必须真的在那里
         let afterWrite = annotationCount(in: copy)
-        NSLog("[Lumen][annotate] 写盘后重新打开，批注数 = \(afterWrite)")
+        NSLog("%@", "[Lumen][annotate] 写盘后重新打开，批注数 = \(afterWrite)")
         check("写盘后文件里确实有批注", afterWrite >= 1, "统计到 \(afterWrite) 条")
 
         // ④ 清单接口与文件内容一致
         let listed = await controller.annotationsList()
-        NSLog("[Lumen][annotate] 清单接口返回 \(listed.count) 条，文件里 \(afterWrite) 条")
+        NSLog("%@", "[Lumen][annotate] 清单接口返回 \(listed.count) 条，文件里 \(afterWrite) 条")
         check("清单条数 == 文件里的批注数", listed.count == afterWrite)
         if let first = listed.first {
-            NSLog("[Lumen][annotate] 首条：\(first.locator.displayLabel())"
+            NSLog("%@", "[Lumen][annotate] 首条：\(first.locator.displayLabel())"
                 + " 引文=\(first.quote.prefix(24))… 正文=\(first.note.prefix(24))…")
         }
 
@@ -135,7 +135,7 @@ enum AnnotationAudit {
         if let victim = listed.first {
             let deleted = controller.deleteAnnotation(id: victim.id)
             let afterDelete = annotationCount(in: copy)
-            NSLog("[Lumen][annotate] 删除一条后重新打开，批注数 = \(afterDelete)")
+            NSLog("%@", "[Lumen][annotate] 删除一条后重新打开，批注数 = \(afterDelete)")
             check("删除返回成功", deleted)
             check("删除后文件里少了一条", afterDelete == afterWrite - 1,
                   "\(afterWrite) → \(afterDelete)")
@@ -189,9 +189,9 @@ enum AnnotationAudit {
         // ⑫ 历史遗留的「半行」批注：读取侧补算 + 一键把文件里的矩形改宽
         await assertLegacyRowWidening(controller: controller, pageIndex: targetPage, check: check)
 
-        NSLog("[Lumen][annotate] 自检：通过 \(passed) 项，失败 \(failures.count) 项"
+        NSLog("%@", "[Lumen][annotate] 自检：通过 \(passed) 项，失败 \(failures.count) 项"
             + (failures.isEmpty ? " ✅" : " ❌ " + failures.joined(separator: "；")))
-        NSLog("[Lumen][annotate] 自检产物保留在 \(copy.path)（可直接用预览打开核对）")
+        NSLog("%@", "[Lumen][annotate] 自检产物保留在 \(copy.path)（可直接用预览打开核对）")
     }
 
     // MARK: - 整行化与顺序（⑨⑩⑪）
@@ -437,16 +437,16 @@ enum AnnotationAudit {
     @MainActor
     private static func logInventory(label: String, of controller: PDFController, url: URL) {
         let size = (try? FileManager.default.attributesOfItem(atPath: url.path))?[.size] as? Int
-        NSLog("[Lumen][annotate] —— \(label)：文件 \(size.map(String.init) ?? "?") 字节 ——")
+        NSLog("%@", "[Lumen][annotate] —— \(label)：文件 \(size.map(String.init) ?? "?") 字节 ——")
         if let doc = controller.document {
             for index in 0..<doc.pageCount {
                 guard let page = doc.page(at: index), !page.annotations.isEmpty else { continue }
                 let types = page.annotations.map { $0.type ?? "nil" }.joined(separator: ",")
-                NSLog("[Lumen][annotate]   内存 第 \(index + 1) 页：\(page.annotations.count) 条 [\(types)]")
+                NSLog("%@", "[Lumen][annotate]   内存 第 \(index + 1) 页：\(page.annotations.count) 条 [\(types)]")
             }
         }
         let onDisk = diskInventory(url: url)
-        NSLog("[Lumen][annotate]   磁盘 \(onDisk.isEmpty ? "无批注" : onDisk.joined(separator: "；"))")
+        NSLog("%@", "[Lumen][annotate]   磁盘 \(onDisk.isEmpty ? "无批注" : onDisk.joined(separator: "；"))")
     }
 
     private static func diskInventory(url: URL) -> [String] {
@@ -564,7 +564,7 @@ enum AnnotationAudit {
             }
         }
         guard let best = counts.max(by: { $0.value < $1.value }) else { return nil }
-        NSLog("[Lumen][search] 查询词取自全书最常出现的字符「\(best.key)」，全书出现 \(best.value) 次")
+        NSLog("%@", "[Lumen][search] 查询词取自全书最常出现的字符「\(best.key)」，全书出现 \(best.value) 次")
         return String(best.key)
     }
 
@@ -574,7 +574,7 @@ enum AnnotationAudit {
         var failures: [String] = []
         func check(_ name: String, _ ok: Bool, _ detail: String = "") {
             if ok { passed += 1 } else { failures.append(name) }
-            NSLog("[Lumen][search] \(ok ? "✅" : "❌") \(name)\(detail.isEmpty ? "" : " —— \(detail)")")
+            NSLog("%@", "[Lumen][search] \(ok ? "✅" : "❌") \(name)\(detail.isEmpty ? "" : " —— \(detail)")")
         }
 
         guard let copy = makeCopy(of: sourceURL) else { return }
@@ -582,7 +582,7 @@ enum AnnotationAudit {
         guard controller.load(url: copy) != nil else { return }
 
         let baseline = annotationCount(in: copy)
-        NSLog("[Lumen][search] 起点批注数 = \(baseline)")
+        NSLog("%@", "[Lumen][search] 起点批注数 = \(baseline)")
 
         // 查询词必须从**文档本身**里取。
         // 早先这里写死成英文 "the"，而测试素材全是中文——搜索 0 命中，
@@ -593,7 +593,7 @@ enum AnnotationAudit {
             return
         }
         let hits = controller.search(query)
-        NSLog("[Lumen][search] 搜索「\(query)」命中 \(hits.count) 处，"
+        NSLog("%@", "[Lumen][search] 搜索「\(query)」命中 \(hits.count) 处，"
             + "页面高亮批注 \(controller.searchHighlightCount) 条")
         check("搜索有命中", !hits.isEmpty, "\(hits.count) 处")
         // 断言写 >= 而不是 ==：一处命中若跨行，会被拆成多条高亮（每条贴住一行），
@@ -604,7 +604,7 @@ enum AnnotationAudit {
         // 重复搜索不能把上一次的高亮叠上去（叠加既费内存，也让「命中数」失去意义）
         let firstHighlightCount = controller.searchHighlightCount
         let secondPass = controller.search(query)
-        NSLog("[Lumen][search] 再搜一次：命中 \(secondPass.count)／高亮 \(controller.searchHighlightCount)"
+        NSLog("%@", "[Lumen][search] 再搜一次：命中 \(secondPass.count)／高亮 \(controller.searchHighlightCount)"
             + "（首次 \(firstHighlightCount)）")
         check("再搜一次不叠加高亮", controller.searchHighlightCount == firstHighlightCount)
 
@@ -613,22 +613,22 @@ enum AnnotationAudit {
             let expected = secondPass[2].locator.pageIndex
             controller.revealSearchHit(2)
             let actual = controller.currentPageIndex
-            NSLog("[Lumen][search] 定位第 3 处：期望第 \(expected + 1) 页，实际第 \(actual + 1) 页")
+            NSLog("%@", "[Lumen][search] 定位第 3 处：期望第 \(expected + 1) 页，实际第 \(actual + 1) 页")
             check("定位落到命中所在的页", actual == expected)
         }
 
         // 最硬的断言：搜索高亮是临时的，绝不能写进用户的书
         _ = controller.saveToFile()
         let afterSave = annotationCount(in: copy)
-        NSLog("[Lumen][search] 保存后重新打开，批注数 = \(afterSave)（起点 \(baseline)）")
+        NSLog("%@", "[Lumen][search] 保存后重新打开，批注数 = \(afterSave)（起点 \(baseline)）")
         check("搜索高亮没有写进文件", afterSave == baseline, "\(baseline) → \(afterSave)")
 
         // 清理：清除搜索高亮
         controller.clearSearchHighlights()
-        NSLog("[Lumen][search] 清除后剩余临时高亮 = \(controller.searchHighlightCount)")
+        NSLog("%@", "[Lumen][search] 清除后剩余临时高亮 = \(controller.searchHighlightCount)")
         check("清除搜索后临时高亮归零", controller.searchHighlightCount == 0)
 
-        NSLog("[Lumen][search] 自检：通过 \(passed) 项，失败 \(failures.count) 项"
+        NSLog("%@", "[Lumen][search] 自检：通过 \(passed) 项，失败 \(failures.count) 项"
             + (failures.isEmpty ? " ✅" : " ❌ " + failures.joined(separator: "；")))
     }
 }

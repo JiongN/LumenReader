@@ -54,7 +54,7 @@ enum PDFRenderAudit {
 
         let tuning = PDFRenderTuning.current
         let view = controller.view
-        NSLog("[Lumen][pdf] 渲染自检锚点：第 \(anchorPage + 1) 页，倍率 "
+        NSLog("%@", "[Lumen][pdf] 渲染自检锚点：第 \(anchorPage + 1) 页，倍率 "
             + String(format: "%.4f", view.scaleFactor)
             + "，视口 " + String(format: "%.0fx%.0f", view.bounds.width, view.bounds.height)
             + "，旋钮 " + tuning.summary

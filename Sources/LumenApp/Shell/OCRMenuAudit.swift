@@ -19,7 +19,7 @@ enum OCRMenuAudit {
         var failures: [String] = []
         func check(_ name: String, _ ok: Bool, _ detail: String = "") {
             if ok { passed += 1 } else { failures.append(name) }
-            NSLog("[Lumen][ocr-menu] \(ok ? "✅" : "❌") \(name)"
+            NSLog("%@", "[Lumen][ocr-menu] \(ok ? "✅" : "❌") \(name)"
                   + (ok || detail.isEmpty ? "" : " —— \(detail)"))
         }
 
@@ -90,7 +90,7 @@ enum OCRMenuAudit {
             check("OCR 项恒在末尾（\(row.name)）", ocrIsLast, "实际 \(items)")
         }
 
-        NSLog("[Lumen][ocr-menu] 自检：通过 \(passed) 项，失败 \(failures.count) 项"
+        NSLog("%@", "[Lumen][ocr-menu] 自检：通过 \(passed) 项，失败 \(failures.count) 项"
               + (failures.isEmpty ? " ✅" : " ❌ " + failures.joined(separator: "；")))
     }
 }

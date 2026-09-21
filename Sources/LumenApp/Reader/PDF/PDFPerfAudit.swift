@@ -45,13 +45,13 @@ enum PDFPerfAudit {
     static func run(controller: PDFController) async {
         let pageCount = controller.pageCount
         guard pageCount > 1 else {
-            NSLog("[Lumen][perf] 文档只有 \(pageCount) 页，不足以做翻页自检，跳过")
+            NSLog("%@", "[Lumen][perf] 文档只有 \(pageCount) 页，不足以做翻页自检，跳过")
             return
         }
 
         let requested = LaunchOptions.perfPageTurns
         let turns = min(requested, pageCount)
-        NSLog("[Lumen][perf] 文档 \(pageCount) 页；本轮翻 \(turns) 页（请求 \(requested) 页）")
+        NSLog("%@", "[Lumen][perf] 文档 \(pageCount) 页；本轮翻 \(turns) 页（请求 \(requested) 页）")
 
         await warmUp(controller: controller, pageCount: pageCount)
 
@@ -257,7 +257,7 @@ enum PDFPerfAudit {
         let b = stats(bare)
         let s = stats(scroll)
 
-        NSLog("[Lumen][perf] ── PDF 浏览性能（\(pageCount) 页，翻 \(turns) 页）──")
+        NSLog("%@", "[Lumen][perf] ── PDF 浏览性能（\(pageCount) 页，翻 \(turns) 页）──")
         NSLog(String(
             format: "[Lumen][perf] ① 翻页·带回调（正常路径）：p50=%.2fms p95=%.2fms max=%.2fms 均值=%.2fms",
             a.p50, a.p95, a.max, a.mean
@@ -296,7 +296,7 @@ enum PDFPerfAudit {
         var failures: [String] = []
         func check(_ name: String, _ ok: Bool, _ detail: String = "") {
             if ok { passed += 1 } else { failures.append(name) }
-            NSLog("[Lumen][perf] \(ok ? "✅" : "❌") \(name)" + (ok || detail.isEmpty ? "" : " —— \(detail)"))
+            NSLog("%@", "[Lumen][perf] \(ok ? "✅" : "❌") \(name)" + (ok || detail.isEmpty ? "" : " —— \(detail)"))
         }
 
         check(
@@ -324,7 +324,7 @@ enum PDFPerfAudit {
             )
         } else {
             // 证伪对照：关掉上限后驻留张数应当回到「等于全本页数」。
-            NSLog("[Lumen][perf] ④ 缩略图缓存上限已关闭（`--perf-thumbnail-unbounded 1`）："
+            NSLog("%@", "[Lumen][perf] ④ 缩略图缓存上限已关闭（`--perf-thumbnail-unbounded 1`）："
                   + "驻留 \(thumbs.resident) 张 = 全本 \(thumbs.rendered) 页（证伪对照，不作断言）")
         }
 
@@ -334,7 +334,7 @@ enum PDFPerfAudit {
               + String(format: "%.0f%%", a.p95 > 0 ? (a.p95 - b.p95) / a.p95 * 100 : 0)
               + "（占比高 → 优化本层回调有意义；接近 0 → 瓶颈在 PDFKit 内部）")
 
-        NSLog("[Lumen][perf] 自检：通过 \(passed) 项，失败 \(failures.count) 项"
+        NSLog("%@", "[Lumen][perf] 自检：通过 \(passed) 项，失败 \(failures.count) 项"
               + (failures.isEmpty ? " ✅" : " ❌ " + failures.joined(separator: "；")))
     }
 

@@ -91,6 +91,8 @@ final class ReaderBridge: ObservableObject {
     @Published var epubEffectiveColumns: Int = 1
     /// PDF 翻译控制器由 PDFReaderView 创建，侧栏只观察并呈现。
     @Published var pdfTranslationController: PDFTranslationController?
+    /// EPUB 翻译控制器由 EPUBReaderView 创建，侧栏只观察并呈现。
+    @Published var epubTranslationController: EPUBTranslationController?
 
     // MARK: 命令（外壳 → 视图）
 
@@ -240,6 +242,8 @@ final class ReaderBridge: ObservableObject {
         addNoteAtCurrentPosition = nil
         normalizeAnnotationRows = nil
         revealTranslationParagraph = nil
+        pdfTranslationController = nil
+        epubTranslationController = nil
         focusedAnnotationID = nil
     }
 }
@@ -261,7 +265,7 @@ enum SidebarTab: String, CaseIterable, Identifiable {
     static func available(for kind: DocumentKind?) -> [SidebarTab] {
         kind == .pdf
             ? [.outline, .smartOutline, .search, .annotations, .thumbnails, .translation]
-            : [.outline, .smartOutline, .search, .annotations]
+            : [.outline, .smartOutline, .search, .annotations, .translation]
     }
 
     var title: String {

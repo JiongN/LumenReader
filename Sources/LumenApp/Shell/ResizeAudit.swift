@@ -77,7 +77,7 @@ enum ResizeAudit {
             if ok { passed += 1 } else { failures.append(name) }
             // 通过时不打 detail：那些数字在每条目上面已经单独打过一行，
             // 通过时再附一句「（响应式断了）」反而让人误读成失败。
-            NSLog("[Lumen][resize] \(ok ? "✅" : "❌") \(name)"
+            NSLog("%@", "[Lumen][resize] \(ok ? "✅" : "❌") \(name)"
                   + (ok || detail.isEmpty ? "" : " —— \(detail)"))
         }
 
@@ -87,7 +87,7 @@ enum ResizeAudit {
         let staticUpper = UISettings.PanelWidth.aiRange.upperBound * scale
         let cap = Self.aiPanelCap(state: state)
         let baseCap = cap / scale
-        NSLog("[Lumen][resize] 窗口可用宽度 \(Int(Self.containerWidth()))pt；"
+        NSLog("%@", "[Lumen][resize] 窗口可用宽度 \(Int(Self.containerWidth()))pt；"
               + "AI 面板上限 静态 \(Int(staticUpper))pt / 按窗口 \(Int(cap))pt；下限 \(Int(lowerBound))pt；"
               + "侧栏固定 \(Int(UISettings.PanelWidth.sidebarDefault))pt")
 
@@ -95,7 +95,7 @@ enum ResizeAudit {
             NSLog("[Lumen][resize] ❌ 没有读到 AI 面板布局探针（--open 打开文档了吗？）")
             return
         }
-        NSLog("[Lumen][resize] 修改前：AI 面板实际宽度 \(Int(beforeFrame.width))pt")
+        NSLog("%@", "[Lumen][resize] 修改前：AI 面板实际宽度 \(Int(beforeFrame.width))pt")
 
         // ① 布局跟随：写入一个**与当前值明显不同**的宽度，读探针看它有没有真的变宽。
         //
@@ -114,12 +114,12 @@ enum ResizeAudit {
                 NSLog("[Lumen][resize] ❌ 修改后读不到布局探针")
                 return
             }
-            NSLog("[Lumen][resize] 写入 \(Int(target))pt → 实际渲染 \(Int(afterFrame.width))pt")
+            NSLog("%@", "[Lumen][resize] 写入 \(Int(target))pt → 实际渲染 \(Int(afterFrame.width))pt")
             check("AI 面板宽度写入后布局跟随",
                   abs(afterFrame.width - target) < 2,
                   "期望 \(Int(target))pt，实际 \(Int(afterFrame.width))pt（响应式断了）")
         } else {
-            NSLog("[Lumen][resize] ⚠️ 窗口过窄（AI 面板可用区间 \(Int(cap - lowerBound))pt < 40pt），"
+            NSLog("%@", "[Lumen][resize] ⚠️ 窗口过窄（AI 面板可用区间 \(Int(cap - lowerBound))pt < 40pt），"
                   + "跳过「布局跟随」断言——此处若硬跑，断言会是恒真的")
         }
 
@@ -159,7 +159,7 @@ enum ResizeAudit {
         }
         let layoutMatches = abs(frameAfterBurst.width - finalValue * scale) < 2
 
-        NSLog("[Lumen][resize] 连续写 \(frames) 次：区间 [\(Int(observedMin)), \(Int(observedMax))]pt，"
+        NSLog("%@", "[Lumen][resize] 连续写 \(frames) 次：区间 [\(Int(observedMin)), \(Int(observedMax))]pt，"
               + "终值 \(Int(finalValue))pt，布局实测 \(Int(frameAfterBurst.width))pt")
         check("逐帧写入期间不越界", stayedInBounds,
               "观测到 [\(Int(observedMin)), \(Int(observedMax))]pt，允许 [\(Int(lowerBound)), \(Int(cap))]pt")
@@ -177,7 +177,7 @@ enum ResizeAudit {
         store.commitSidebarWidth(fixedSidebar + 120)
         try? await Task.sleep(nanoseconds: 800_000_000)
         if let sidebarFrame = LayoutAuditLog.shared.frame(named: "sidebar") {
-            NSLog("[Lumen][resize] 侧栏兼容字段写入 \(Int(fixedSidebar + 120))pt → 实际渲染 "
+            NSLog("%@", "[Lumen][resize] 侧栏兼容字段写入 \(Int(fixedSidebar + 120))pt → 实际渲染 "
                   + "\(Int(sidebarFrame.width))pt（期望常量 \(Int(fixedSidebar))pt）")
             check("侧栏宽度按窗口比例计算，不受设置影响",
                   abs(sidebarFrame.width - fixedSidebar) < 2,
@@ -194,12 +194,12 @@ enum ResizeAudit {
                 check(result.name, result.ok, result.detail)
             }
         } else {
-            NSLog("[Lumen][resize] ⚠️ 两侧面板没有同时可见（侧栏 \(state.isSidebarVisible)"
+            NSLog("%@", "[Lumen][resize] ⚠️ 两侧面板没有同时可见（侧栏 \(state.isSidebarVisible)"
                   + " / AI \(state.isAIPanelVisible) / 沉浸 \(state.isImmersive)），"
                   + "跳过窗口缩放断言——它们验的正是三栏同时在场时的挤压")
         }
 
-        NSLog("[Lumen][resize] 自检：通过 \(passed) 项，失败 \(failures.count) 项"
+        NSLog("%@", "[Lumen][resize] 自检：通过 \(passed) 项，失败 \(failures.count) 项"
               + (failures.isEmpty ? " ✅" : " ❌ " + failures.joined(separator: "；")))
     }
 
@@ -238,7 +238,7 @@ enum ResizeAudit {
             NSLog("[Lumen][resize] ❌ 宽窗口下读不到布局探针")
             return results
         }
-        NSLog("[Lumen][resize] 宽窗口 \(Int(baseline.container))pt：\(Self.describe(baseline))；"
+        NSLog("%@", "[Lumen][resize] 宽窗口 \(Int(baseline.container))pt：\(Self.describe(baseline))；"
               + "AI 面板实渲染 \(Int(baseline.aiPanel.width))pt（落库 \(Int(preference))pt）")
 
         // —— 收窄到应用声明的最小窗口宽度（920pt），AI 面板偏好顶满静态上限。
@@ -250,7 +250,7 @@ enum ResizeAudit {
             NSLog("[Lumen][resize] ❌ 窄窗口下读不到布局探针")
             return results
         }
-        NSLog("[Lumen][resize] 窄窗口 \(Int(narrow.container))pt：\(Self.describe(narrow))；"
+        NSLog("%@", "[Lumen][resize] 窄窗口 \(Int(narrow.container))pt：\(Self.describe(narrow))；"
               + "AI 面板实渲染 \(Int(narrow.aiPanel.width))pt（落库 \(Int(preference))pt）")
 
         results.append(CheckResult(
@@ -283,7 +283,7 @@ enum ResizeAudit {
             NSLog("[Lumen][resize] ❌ 宽窗口下读不到布局探针")
             return results
         }
-        NSLog("[Lumen][resize] 宽窗口 \(Int(wide.container))pt：\(Self.describe(wide))；"
+        NSLog("%@", "[Lumen][resize] 宽窗口 \(Int(wide.container))pt：\(Self.describe(wide))；"
               + "AI 面板实渲染 \(Int(wide.aiPanel.width))pt（落库 \(Int(preference))pt）")
 
         if Double(wide.container) >= needed - 1 {
@@ -292,7 +292,7 @@ enum ResizeAudit {
                 ok: abs(wide.aiPanel.width - expectedWideAI) < 2,
                 detail: "实渲染 \(Int(wide.aiPanel.width))pt（偏好被窄窗口的钳制值覆写了）"))
         } else {
-            NSLog("[Lumen][resize] ⚠️ 宽窗口只有 \(Int(wide.container))pt（需要 ≥\(Int(needed))pt），"
+            NSLog("%@", "[Lumen][resize] ⚠️ 宽窗口只有 \(Int(wide.container))pt（需要 ≥\(Int(needed))pt），"
                   + "跳过「偏好还原」断言——硬跑会把「显示器不够宽」误报成实现问题")
         }
 
@@ -314,7 +314,7 @@ enum ResizeAudit {
         )
         let extremeBudget = Double(extremeContainer) - railAndHandles
         let extremeUsed = (extreme.sidebar ?? 0) + (extreme.aiPanel ?? 0)
-        NSLog("[Lumen][resize] 极窄容器 \(Int(extremeContainer))pt（界面到不了，仅算式层）："
+        NSLog("%@", "[Lumen][resize] 极窄容器 \(Int(extremeContainer))pt（界面到不了，仅算式层）："
               + "\(extreme.description)，预算 \(Int(extremeBudget))pt，面板占用 \(Int(extremeUsed))pt")
         results.append(CheckResult(
             name: "极窄容器下两侧面板不超出预算（图标栏 x 不会为负）",

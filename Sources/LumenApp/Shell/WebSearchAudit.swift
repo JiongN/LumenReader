@@ -26,11 +26,11 @@ enum WebSearchAudit {
         var failures: [String] = []
         func check(_ name: String, _ ok: Bool, _ detail: String = "") {
             if ok { passed += 1 } else { failures.append(name) }
-            NSLog("[Lumen][websearch] \(ok ? "✅" : "❌") \(name)"
+            NSLog("%@", "[Lumen][websearch] \(ok ? "✅" : "❌") \(name)"
                   + (ok || detail.isEmpty ? "" : " —— \(detail)"))
         }
 
-        NSLog("[Lumen][websearch] 查询词「\(query)」（真实联网，超时 10s/源）")
+        NSLog("%@", "[Lumen][websearch] 查询词「\(query)」（真实联网，超时 10s/源）")
 
         // ① 逐源：命中数 / 失败原因 / 耗时。
         //
@@ -47,9 +47,9 @@ enum WebSearchAudit {
 
             switch result {
             case .success(let hits):
-                NSLog("[Lumen][websearch]   \(source.name)：命中 \(hits.count) 条，耗时 \(elapsed)ms")
+                NSLog("%@", "[Lumen][websearch]   \(source.name)：命中 \(hits.count) 条，耗时 \(elapsed)ms")
                 for hit in hits.prefix(3) {
-                    NSLog("[Lumen][websearch]     · \(hit.title.prefix(60))"
+                    NSLog("%@", "[Lumen][websearch]     · \(hit.title.prefix(60))"
                           + " — \(hit.authors.prefix(30)) \(hit.year) \(hit.identifier)")
                 }
                 if hits.isEmpty {
@@ -58,14 +58,14 @@ enum WebSearchAudit {
                     sourcesWithHits.append(source.name)
                 }
             case .failure(let error):
-                NSLog("[Lumen][websearch]   \(source.name)：失败 \(error.localizedDescription)，耗时 \(elapsed)ms")
+                NSLog("%@", "[Lumen][websearch]   \(source.name)：失败 \(error.localizedDescription)，耗时 \(elapsed)ms")
                 failedNames.append(source.name)
             }
         }
 
-        NSLog("[Lumen][websearch] 出结果的源：\(sourcesWithHits.isEmpty ? "无" : sourcesWithHits.joined(separator: "、"))")
+        NSLog("%@", "[Lumen][websearch] 出结果的源：\(sourcesWithHits.isEmpty ? "无" : sourcesWithHits.joined(separator: "、"))")
         if !failedNames.isEmpty {
-            NSLog("[Lumen][websearch] 失败或空结果的源：\(failedNames.joined(separator: "、"))")
+            NSLog("%@", "[Lumen][websearch] 失败或空结果的源：\(failedNames.joined(separator: "、"))")
         }
         check("至少一个源检索到文献", !sourcesWithHits.isEmpty,
               "全部失败：\(failedNames.joined(separator: "、"))")
@@ -75,10 +75,10 @@ enum WebSearchAudit {
         let started = Date()
         let outcome = await WebLiteratureSearch.search(query: query)
         let elapsed = Int(Date().timeIntervalSince(started) * 1000)
-        NSLog("[Lumen][websearch] 聚合检索：去重后 \(outcome.hits.count) 条，"
+        NSLog("%@", "[Lumen][websearch] 聚合检索：去重后 \(outcome.hits.count) 条，"
               + "失败 \(outcome.failures.count) 个源，耗时 \(elapsed)ms")
         for failure in outcome.failures {
-            NSLog("[Lumen][websearch]   源失败：\(failure)")
+            NSLog("%@", "[Lumen][websearch]   源失败：\(failure)")
         }
         check("去重后总命中 ≥ 3 条", outcome.hits.count >= 3,
               "实际 \(outcome.hits.count) 条")
@@ -86,7 +86,7 @@ enum WebSearchAudit {
         // ③ 每条都要带得回可核查的出处：这是「引用可核查」这条承诺的底线，
         //    没有 DOI / 编号的条目，模型写出来读者也验不了。
         let withIdentifier = outcome.hits.filter { !$0.identifier.isEmpty }
-        NSLog("[Lumen][websearch] 带 DOI/编号的条目 \(withIdentifier.count)/\(outcome.hits.count)")
+        NSLog("%@", "[Lumen][websearch] 带 DOI/编号的条目 \(withIdentifier.count)/\(outcome.hits.count)")
         if !outcome.hits.isEmpty {
             check("命中条目都带可核查的出处",
                   withIdentifier.count == outcome.hits.count,
@@ -119,7 +119,7 @@ enum WebSearchAudit {
             NSLog("[Lumen][websearch] 三个源在这次聚合里都出了结果——这一次没有可验证的失败上报，如实记录而不是硬造一条恒真断言")
         }
 
-        NSLog("[Lumen][websearch] 自检：通过 \(passed) 项，失败 \(failures.count) 项"
+        NSLog("%@", "[Lumen][websearch] 自检：通过 \(passed) 项，失败 \(failures.count) 项"
               + (failures.isEmpty ? " ✅" : " ❌ " + failures.joined(separator: "；")))
     }
 

@@ -19,8 +19,8 @@ extension AIChatModel.Bubble {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         id = (try? c.decode(UUID.self, forKey: .id)) ?? UUID()
         role = (try? c.decode(Role.self, forKey: .role)) ?? .user
-        text = (try? c.decode(String.self, forKey: .text)) ?? ""
-        reasoning = (try? c.decode(String.self, forKey: .reasoning)) ?? ""
+        text = try c.decodeIfPresent(String.self, forKey: .text) ?? ""
+        reasoning = try c.decodeIfPresent(String.self, forKey: .reasoning) ?? ""
         progress = (try? c.decode(String.self, forKey: .progress)) ?? ""
         citations = (try? c.decode([DocumentLocator].self, forKey: .citations)) ?? []
         taskTitle = (try? c.decode(String.self, forKey: .taskTitle)) ?? ""
@@ -413,7 +413,7 @@ final class AIChatModel: ObservableObject {
         // 而那几秒里界面不该是「正在思考…」——那是模型在想的措辞，
         // 用户该看到的是「正在联网检索文献…」，否则会以为卡住了。
         streamTask = Task { [weak self] in
-            guard let self else { return }
+            guard let self, !Task.isCancelled else { return }
 
             var webContext = ""
             // 触发条件两路：Agent 自带「要查文献」，或输入框上的手动开关。
@@ -422,6 +422,7 @@ final class AIChatModel: ObservableObject {
                 if !query.isEmpty {
                     self.setProgress("正在联网检索文献…")
                     let outcome = await WebLiteratureSearch.search(query: query)
+                    guard !Task.isCancelled else { return }
                     webContext = WebLiteratureSearch.promptBlock(outcome)
                     if outcome.isEmpty {
                         self.setProgress("这次联网没有检索到文献，改为只依据原文回答")
@@ -429,7 +430,7 @@ final class AIChatModel: ObservableObject {
                         self.setProgress("已检索到 \(outcome.hits.count) 篇文献，正在阅读…")
                     }
                     if !outcome.failures.isEmpty {
-                        NSLog("[Lumen] 文献检索部分失败：\(outcome.failures.joined(separator: "；"))")
+                        NSLog("%@", "[Lumen] 文献检索部分失败：\(outcome.failures.joined(separator: "；"))")
                     }
                 }
             }
@@ -458,6 +459,7 @@ final class AIChatModel: ObservableObject {
                     failure = Self.describe(error)
                 }
             }
+            guard !Task.isCancelled else { return }
             self.flushDelta(force: true)
             self.finishStreaming(failure: failure)
         }
@@ -579,7 +581,7 @@ final class AIChatModel: ObservableObject {
         let totalCharacters = slices.reduce(0) { $0 + $1.text.count }
 
         streamTask = Task { [weak self] in
-            guard let self else { return }
+            guard let self, !Task.isCancelled else { return }
             var failure: String?
 
             do {
@@ -600,7 +602,7 @@ final class AIChatModel: ObservableObject {
                     var summaries: [String] = []
 
                     for (index, slice) in capped.enumerated() {
-                        if Task.isCancelled { break }
+                        try Task.checkCancellation()
                         self.setProgress("正在读第 \(index + 1)/\(capped.count) 段…")
                         let messages = PromptLibrary.chapterSummaryMessages(
                             text: slice.text,
@@ -613,12 +615,7 @@ final class AIChatModel: ObservableObject {
                         }
                     }
 
-                    guard !Task.isCancelled else {
-                        self.setProgress("")
-                        self.flushDelta(force: true)
-                        self.finishStreaming(failure: nil)
-                        return
-                    }
+                    guard !Task.isCancelled else { return }
 
                     self.setProgress("正在汇总结论…")
                     var reduceConfig = config
@@ -641,6 +638,7 @@ final class AIChatModel: ObservableObject {
                 }
             }
 
+            guard !Task.isCancelled else { return }
             self.setProgress("")
             self.flushDelta(force: true)
             self.finishStreaming(failure: failure)
@@ -712,24 +710,27 @@ final class AIChatModel: ObservableObject {
 
     /// 把流式增量写进当前气泡。
     private func streamIntoBubble(messages: [AIMessage], config: AIProviderConfig) async throws {
+        try Task.checkCancellation()
         let provider = makeProvider(config)
         for try await event in provider.stream(messages: messages) {
-            if Task.isCancelled { break }
+            try Task.checkCancellation()
             switch event {
             case .delta(let text):      appendDelta(text)
             case .reasoning(let text):  appendReasoning(text)
             case .finished:             break
             }
         }
+        try Task.checkCancellation()
         flushDelta(force: true)
     }
 
     /// 一次性取回完整回复（map 阶段用，不需要逐字展示）。
     private func complete(messages: [AIMessage], config: AIProviderConfig) async throws -> String {
+        try Task.checkCancellation()
         let provider = makeProvider(config)
         var output = ""
         for try await event in provider.stream(messages: messages) {
-            if Task.isCancelled { break }
+            try Task.checkCancellation()
             if case .delta(let text) = event { output += text }
         }
         return output.trimmingCharacters(in: .whitespacesAndNewlines)

@@ -60,7 +60,6 @@ private struct AppearancePanel: View {
                 columnRow
                 flowRow
                 Divider()
-                translationRow
             } else if state.document != nil {
                 Divider()
                 Toggle("保持 PDF 原色", isOn: Binding(
@@ -219,57 +218,6 @@ private struct AppearancePanel: View {
         )
     }
 
-    // MARK: 逐段翻译
-
-    /// 译文显示在每段原文**上方**，所以开关说明里就写清楚这件事——
-    /// 有的人期待的是「悬停才出现」，先说清楚省得开了以为没生效。
-    private var translationRow: some View {
-        VStack(alignment: .leading, spacing: DS.Space.xs) {
-            sectionTitle("翻译")
-            Toggle(isOn: Binding(
-                get: { store.reader.epubTranslateEnabled },
-                set: { store.reader.epubTranslateEnabled = $0 }
-            )) {
-                Text("逐段翻译（译文显示在原文上方）")
-                    .font(DS.Typo.ui(size: 12))
-            }
-            .toggleStyle(.switch)
-            .controlSize(.small)
-
-            HStack(spacing: DS.Space.xs) {
-                ForEach(Self.quickTargets) { option in
-                    let isActive = store.reader.translationTargetLanguage == option.id
-                    Button(option.displayName) { store.reader.translationTargetLanguage = option.id }
-                        .buttonStyle(.plain)
-                        .font(DS.Typo.ui(size: 11, weight: isActive ? .semibold : .regular))
-                        .foregroundStyle(isActive ? DS.Palette.accent : DS.Palette.textSecondary)
-                        .padding(.horizontal, DS.Space.s)
-                        .padding(.vertical, 4)
-                        .background(
-                            RoundedRectangle(cornerRadius: DS.Radius.s, style: .continuous)
-                                .fill(isActive ? DS.Palette.accentSoft : DS.Palette.surfaceSunken)
-                        )
-                }
-            }
-            // 引擎名从目录读，不在这里写死「走微软…」：
-            // 引擎现在是可切换的，写死的说明在换引擎之后就成了假话。
-            Text("当前引擎：\(engineName)。在「设置 › 阅读 › 翻译」里更换引擎与目标语言。")
-                .font(DS.Typo.ui(size: 10))
-                .foregroundStyle(DS.Palette.textTertiary)
-                .fixedSize(horizontal: false, vertical: true)
-        }
-    }
-
-    private var engineName: String {
-        TranslationEngineCatalog.descriptor(for: store.reader.translationEngineID).displayName
-    }
-
-    /// 菜单里只放两个最常用的目标语言——这里是个快捷开关，不是设置面板，
-    /// 五个语言横排会把这一行挤爆。完整列表在设置页。
-    private static let quickTargets: [TranslationLanguage.Option] = [
-        TranslationLanguage.target(for: "zh-Hans"),
-        TranslationLanguage.target(for: "en")
-    ]
 
     private func sectionTitle(_ text: String) -> some View {
         Text(text)

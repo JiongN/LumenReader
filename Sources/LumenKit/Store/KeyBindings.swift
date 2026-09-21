@@ -531,14 +531,14 @@ public final class KeyBindingStore: ObservableObject {
         for (actionName, combo) in decoded where known.contains(actionName) {
             let label = LumenAction(rawValue: actionName)?.title ?? actionName
             guard let migrated = combo.migrated else {
-                NSLog("[Lumen][keys] 丢弃不可键入的绑定「\(label)」：key=「\(combo.key)」"
+                NSLog("%@", "[Lumen][keys] 丢弃不可键入的绑定「\(label)」：key=「\(combo.key)」"
                       + "（无法归一化为可键入字符），已回落默认 "
                       + "\(LumenAction(rawValue: actionName)?.defaultCombo.display ?? "—")")
                 didChange = true
                 continue
             }
             if migrated.key != combo.key {
-                NSLog("[Lumen][keys] 迁移绑定「\(label)」：key「\(combo.key)」→「\(migrated.key)」"
+                NSLog("%@", "[Lumen][keys] 迁移绑定「\(label)」：key「\(combo.key)」→「\(migrated.key)」"
                       + "（全角/大写归一化，modifiers 不变）")
                 didChange = true
             }

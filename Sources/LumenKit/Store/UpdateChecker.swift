@@ -27,8 +27,9 @@ public struct AppVersion: Comparable, Equatable, Sendable {
         var text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         if text.lowercased().hasPrefix("v") { text.removeFirst() }
 
-        let parts = text.split(separator: ".")
+        let parts = text.split(separator: ".", omittingEmptySubsequences: false)
         guard parts.count >= 1, parts.count <= 3,
+              parts.allSatisfy({ !$0.isEmpty && $0.utf8.allSatisfy { (48...57).contains($0) } }),
               let major = Int(parts[0]), major >= 0 else { return nil }
         // 缺段补 0；**已出现**的段必须能解析成非负整数，否则整段判解析失败
         // （不能把 `1.2.x` 悄悄当成 `1.2.0`）。
@@ -85,7 +86,7 @@ public struct UpdateInfo: Sendable, Equatable {
 /// 免密钥、走 GitHub Releases API 的更新检查。
 ///
 /// 为什么不用 Sparkle：本项目是零依赖 + 纯 SwiftPM + 无 Xcode 的工程，
-/// Sparkle 是闭源二进制 framework，需要嵌入 + 维护 appcast.xml + 复杂签名；
+/// Sparkle 需要引入额外 framework、维护 appcast 与更新签名；
 /// 对一个「自签 + 免会员、体积优先」的免费工具它属于过度工程。GitHub API 已
 /// 免费提供 `releases/latest`，App 里用一个 URLSession 请求就能拿到来版号与直链。
 ///
