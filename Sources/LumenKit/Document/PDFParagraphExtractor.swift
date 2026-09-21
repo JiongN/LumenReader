@@ -22,6 +22,17 @@ public enum PDFParagraphExtractor {
         /// 调到 0.3 则会把正常行距也当成换段。
         public var paragraphGapFactor: CGFloat = 0.62
 
+        /// **窄栏/摘要栏的行距放宽系数**。
+        ///
+        /// 当某块文本的右端显著小于页面正文右端（如双栏版面的单栏、论文摘要区），
+        /// 其行距往往大于正文行距（如 1.5~2.5 倍行高）。此时用正文的 0.62 会把同一段拆碎。
+        /// 此因子在检测到「窄栏」时生效，建议 1.5~2.0。
+        public var narrowColumnGapFactor: CGFloat = 1.8
+
+        /// 判定为「窄栏」的阈值：块右端 / 页面正文右端 < 本值。
+        /// Selwyn 摘要右端 337 / 正文右端 445 ≈ 0.76，双栏单栏通常 0.5~0.6。
+        public var narrowColumnWidthRatio: CGFloat = 0.85
+
         /// 行右端缩进超过「参考宽度 × (1 - 本系数)」时判为**段末短行**。
         ///
         /// 0.80 意为「缩进超过参考宽的 20% 才算短行」。合法的短行通常缩进得远不止 20%
@@ -32,7 +43,7 @@ public enum PDFParagraphExtractor {
         /// **参考宽度不是一个，是两个，必须同时满足**（见 `cluster` 里 `previousWasShort`）：
         /// 一是整页正文右边界，二是**本段自己的右边界**。只用前者会把
         /// 「自己就排在窄栏里」的整段逐行拆散 —— 论文标题页的摘要常排成比正文窄的栏
-        /// （实测 Selwyn 2025 第 2 页：摘要每行只到 `x=337`，正文到 `445`），
+        /// （实测 Selwyn 2025 第 2 页：摘要每行只到 `x=337`、正文到 `445`），
         /// 于是摘要的**每一行**都被判成段末短行、20 行摘要碎成 20 段。
         public var shortLineFactor: CGFloat = 0.80
 
@@ -113,7 +124,7 @@ public enum PDFParagraphExtractor {
         return a.text < b.text                             // 兜底，保证全序
     }
 
-    // MARK: - 页眉 / 页脚
+    // MARK: - 页眉 / 页脚 / 元数据
 
     private static func dropFurniture(
         _ lines: [PDFTextLine],
@@ -123,19 +134,210 @@ public enum PDFParagraphExtractor {
     ) -> [PDFTextLine] {
         guard let size = pageSize, size.height > 1, size.width > 1 else { return lines }
         let margin = size.height * options.furnitureMarginFactor
-        return lines.filter { line in
+
+        // 先识别「元数据区块」：首行带期刊墙标的行（引用信息、DOI、ARTICLE HISTORY、
+        // KEYWORDS、CONTACT、版权声明、导航链接等）。返回要剔除的行集合。
+        // 与页眉页脚不同，这些区块常位于页面中部、行可能很宽，不能只靠贴边+短行判。
+        let metadataIndices = detectMetadataBlockIndices(lines, pageSize: size)
+
+        return lines.enumerated().compactMap { index, line -> PDFTextLine? in
             let box = line.bounds
             let nearTop = box.maxY >= size.height - margin
             let nearBottom = box.minY <= margin
-            guard nearTop || nearBottom else { return true }
+            let atPageEdge = nearTop || nearBottom
+
             let fingerprint = furnitureFingerprint(line.text)
-            if repeatedFingerprints.contains(fingerprint) { return false }
+            if repeatedFingerprints.contains(fingerprint) { return nil }
+            if metadataIndices.contains(index) { return nil }
             if line.text.trimmingCharacters(in: .whitespacesAndNewlines)
-                .allSatisfy({ $0.isNumber || $0.isWhitespace }) { return false }
+                .allSatisfy({ $0.isNumber || $0.isWhitespace }) { return nil }
+
             // 贴边 + 够短，才当页眉页脚。第二个条件不能省：
             // 正文里紧贴页顶的满行宽首行也是「贴边」，只按位置删会连正文一起删。
-            return box.width >= size.width * options.furnitureWidthRatio
+            if atPageEdge {
+                return box.width >= size.width * options.furnitureWidthRatio ? line : nil
+            }
+            return line
         }
+    }
+
+    // MARK: 元数据区块检测
+
+    /// 检测「期刊墙标区块」：首行带强标签、其后是内容行的紧凑文本块。
+    ///
+    /// 典型分布（实测 Selwyn 2025）：
+    /// - 第 1 页（封面/引用页）：ISSN 行、To cite this article 引用块、Full Terms 行
+    /// - 第 2 页（文章首页）：ARTICLE HISTORY / KEYWORDS（右栏窄块）、CONTACT、版权行
+    ///
+    /// 这些区块**首行**几乎总是以大写墙标开头（`ARTICLE HISTORY`、`KEYWORDS`、
+    /// `CONTACT`、`To cite this article:`），正文段落里这些词通常出现在句中而不是
+    /// 行首占位。所以强标签只匹配「该行**开头**」，避免把正文里提及 "keywords are…"、
+    /// "our methods…" 的普通段落误删。
+    private static func detectMetadataBlockIndices(
+        _ lines: [PDFTextLine],
+        pageSize: CGSize
+    ) -> Set<Int> {
+        var removed: Set<Int> = []
+        // 显式类型标注，避免 Dictionary(grouping:) 的类型推断歧义
+        let pageEntries: [(offset: Int, element: PDFTextLine)] = Array(lines.enumerated())
+        let byPage = Dictionary(grouping: pageEntries, by: { $0.element.pageIndex })
+        for (_, pageSorted) in byPage {
+            let sorted = pageSorted.sorted { a, b in
+                let ay = (a.element.bounds.midY * 2).rounded()
+                let by = (b.element.bounds.midY * 2).rounded()
+                return ay != by ? ay > by : a.element.bounds.minX < b.element.bounds.minX
+            }
+            var i = 0
+            while i < sorted.count {
+                // 找到以墙标开头的行；吞并范围并入 removed。
+                // 主循环逐个推进（不用 Set 大小跳步——跨栏/非连续 offset 会让 Set.count
+                // 与实际行数不一致，导致跳过未扫描的墙标起点）。
+                if let span = metadataSpanStarting(at: i, in: sorted) {
+                    removed.formUnion(span)
+                }
+                i += 1
+            }
+        }
+        return removed
+    }
+
+    /// 从 `index` 起，若该行首以「强墙标」开头，则把该行起连续文本行一并标记剔除。
+    /// 返回被标记的索引段；不是墙标则返回 nil。
+    private static func metadataSpanStarting(
+        at index: Int,
+        in entries: [(offset: Int, element: PDFTextLine)]
+    ) -> Set<Int>? {
+        let head = entries[index].element
+        let raw = head.text.trimmingCharacters(in: .whitespaces)
+        // 大小写敏感匹配墙标 —— 期刊墙标是大写/标题式词，正文/夹具里的同词是小写。
+        guard isConfidentMetadataLabel(raw) else { return nil }
+
+        var removed = Set<Int>()
+
+        // 标签行自身的处理分两种情况：
+        // · 纯标签类墙标（ABSTRACT、RESEARCH/ORIGINAL/REVIEW ARTICLE）→ **只剔标签行**，
+        //   其后的正文/摘要内容必须保留。摘要、正文标题是有阅读价值的内容，不能跟
+        //   KEYWORDS 一样整块删。
+        // · 其余墙标（KEYWORDS / CONTACT / ARTICLE HISTORY / 引用块 / 边栏）→ 整块删除。
+        let lower = raw.lowercased()
+        let isArticleTypeLabel = ["research article", "original article", "review article"]
+            .contains { lower.hasPrefix($0) }
+        let dropLineOnly = lower == "abstract" || lower == "abstract:"
+            || isArticleTypeLabel
+        if dropLineOnly {
+            removed.insert(entries[index].offset)
+            return removed
+        }
+
+        // 墙标块的内容行竖直上紧邻、水平上与墙标重叠。但**双栏布局会把另一栏的行夹在
+        // 中间**（Sorted 按 y 网格，左右栏 y 交错），线性 `j += 1` 推两格就撞上错栏行、
+        // 跨栏保护触发 break，本栏后续内容漏吞。因此这里**跳跃搜索**：在页内所有行里
+        // 找「竖直紧邻且水平重叠」的下一行，允许跳过被另一栏插入的行。
+        let colLeft = entries[index].element.bounds.minX
+        let colRight = entries[index].element.bounds.maxX
+        let colWidth = max(colRight - colLeft, 1)
+        let refHeight = max(entries[index].element.bounds.height, 1)
+        let wallMidY = entries[index].element.bounds.midY
+
+        // 若墙标行自身带完整内容（不以冒号/纯标签结尾），只剔墙标行自己，
+        // 不向后吞（避免吞掉下面的正文标题）。
+        guard wallLabelEndsOpen(head.text) else {
+            return [entries[index].offset]
+        }
+
+        // 候选：墙标行下方、水平重叠的行。entries 已带 offset，不能 enumerated()
+        //（enumerated 会再包一层使 tuple 类型错乱）。按竖直紧邻（midY 大者先）排。
+        let wallOffset = entries[index].offset
+        let candidates = entries.filter { e in
+            guard e.offset != wallOffset else { return false }
+            let overlapX = min(colRight, e.element.bounds.maxX)
+                - max(colLeft, e.element.bounds.minX)
+            guard overlapX >= colWidth * 0.5 else { return false }
+            return e.element.bounds.midY < wallMidY
+        }.sorted { a, b in
+            a.element.bounds.midY > b.element.bounds.midY
+        }
+
+        // 从墙标行正下方开始，沿竖直紧邻连续往下吞；遇墙标行、竖直跳变过大则停。
+        removed.insert(wallOffset)
+        var cursor = wallMidY
+        for pick in candidates {
+            let c = pick.element
+            guard c.bounds.midY < cursor else { continue }
+            // 下一个墙标行 → 停（交给主循环单独处理）
+            if isConfidentMetadataLabel(c.text.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)) { break }
+            // 竖直跳变过大（>2.5 倍行高）→ 进入下一个不相干块，停
+            let yGap = cursor - c.bounds.midY
+            if yGap > c.bounds.height * 2.5 || yGap > refHeight * 2.5 { break }
+            removed.insert(pick.offset)
+            cursor = c.bounds.midY
+        }
+        return removed
+    }
+
+    /// 墙标行是否「标签结束、内容在下一行」，从而允许向后吞并内容行。
+    ///
+    /// 三种情况算开放：
+    /// 1. 以冒号/破折号结尾（内容在下一行）；
+    /// 2. 整行就是一个纯墙标（如独占一行的 "ABSTRACT"）；
+    /// 3. 属于「引用/链接块墙标」——这类墙标行自身往往带上引用内容而不以冒号结尾
+    ///    （如 "To cite this article: Neil Selwyn, …, When the prompting stops…"），
+    ///    **整块引用必须连标题一起剔除**，所以一旦命中就无脑向后吞。
+    private static func wallLabelEndsOpen(_ text: String) -> Bool {
+        let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let last = t.last else { return true }
+        if last == ":" || last == "—" || last == "–" { return true }
+        // 引用/链接块墙标：命中即整块剔除（含其后的引用正文）
+        let citationBlockLabels = [
+            "to cite this article", "to link to this article", "full terms",
+            "how to cite", "article views", "view related articles",
+            "view crossmark", "citing articles", "view citing articles",
+            "submit your article", "published online"
+        ]
+        let lower = t.lowercased()
+        if citationBlockLabels.contains(where: { lower.hasPrefix($0) }) { return true }
+        // 纯墙标（独占一行）
+        let bareLabels = [
+            "abstract", "article history", "keywords", "key words", "contact",
+            "corresponding author", "license", "open access", "copyright",
+            "introduction", "methods", "results", "discussion", "conclusion",
+            "research article", "original article"
+        ]
+        return bareLabels.contains(lower)
+    }
+
+    /// 判断行首是否为「可信的期刊墙标」。**大小写敏感**：真实墙标是全大写或标题式大写，
+    /// 而正文段落里提及这些词时是小写 —— 这两者必须分开，否则「abstract line one…」
+    /// 这类普通正文会被误删（表驱动回归曾因此挂掉）。
+    private static func isConfidentMetadataLabel(_ head: String) -> Bool {
+        // 全大写的强墙标（期刊固定区块标题）
+        let allCapsLabels = [
+            "ABSTRACT", "ARTICLE HISTORY", "KEYWORDS", "CONTACT",
+            "RESEARCH ARTICLE", "ORIGINAL ARTICLE", "REVIEW ARTICLE",
+            "OPEN ACCESS", "LICENSE", "COPYRIGHT", "CITED BY",
+            "ARTICLE INFO", "ASSOCIATE EDITOR", "HANDLING EDITOR",
+            "PUBLISHED ONLINE", "RECEIVED", "ACCEPTED", "DOI",
+            "HOW TO CITE", "SUBMIT YOUR ARTICLE"
+        ]
+        if allCapsLabels.contains(where: { head.hasPrefix($0) }) {
+            return true
+        }
+        // 标题式大小写的引导短语（期刊封面/引用块固定文案）
+        let titleCaseLabels = [
+            "To cite this article", "Full Terms", "Journal homepage",
+            "ISSN", "View related articles", "View Crossmark data",
+            "View Crossmark", "Article views", "Citing articles",
+            "View citing articles", "How to Cite", "This is an Open Access",
+            "Corresponding Author", "Disclosure Statement", "Funding",
+            "Notes on Contributors",
+            "Published online", "Submit your article",
+            "Volume", "Issue", "Article Metrics", "Skip to main content",
+            "Received", "Accepted"
+        ]
+        if titleCaseLabels.contains(where: { head.hasPrefix($0) }) {
+            return true
+        }
+        return false
     }
 
     /// 页眉页脚有时很宽，也可能离页边超过 5%。先在整本书的上下 12% 区域里找重复文本，
@@ -188,6 +390,17 @@ public enum PDFParagraphExtractor {
             blockRightEdge = 0
         }
 
+        /// 当前块是否为窄栏：块右端显著小于页面正文右端。
+        func isNarrowBlock() -> Bool {
+            guard bodyWidth > 1, blockRightEdge > 1 else { return false }
+            return blockRightEdge < rightEdge * options.narrowColumnWidthRatio
+        }
+
+        /// 当前适用的行距因子：窄栏用宽松因子，否则用正常因子。
+        func currentGapFactor() -> CGFloat {
+            isNarrowBlock() ? options.narrowColumnGapFactor : options.paragraphGapFactor
+        }
+
         for (ordinal, line) in lines.enumerated() {
             guard let previous = current.last else {
                 current = [line]
@@ -202,7 +415,7 @@ public enum PDFParagraphExtractor {
                         - max(previous.bounds.minX, line.bounds.minX)
             let narrower = min(previous.bounds.width, line.bounds.width)
 
-            let gapTooLarge = gap > referenceHeight * options.paragraphGapFactor
+            let gapTooLarge = gap > referenceHeight * currentGapFactor()
             let noOverlap = overlap < narrower * options.minimumHorizontalOverlapFactor
             // 短行判据要**两个参考宽度同时满足**才成立：
             //
@@ -214,7 +427,7 @@ public enum PDFParagraphExtractor {
             // （典型是标题页的摘要、以及双栏页里某一栏的整段）会连中招 ——
             // 实测 Selwyn 2025 第 2 页的摘要 20 行只到 `x=337`、正文到 `445`，
             // 每行都被判成段末短行，一整段摘要碎成 20 个单行段。
-            // 反过来只用段内右边界也不行：那样「段内最宽的那一行」永远不触发，
+            // 反过来只用段内右边界也不行：那些「段内最宽的那一行」永远不触发，
             // 用文字排出的表格（ID 列 11~26pt 宽、描述列 115~362pt 宽）会整片粘成一坨。
             // 两个都要求，才既能留住表格行、又不拆散窄栏整段。
             let endsShortOfPage = bodyWidth > 1
@@ -309,7 +522,20 @@ public enum PDFParagraphExtractor {
         let overlap = min(previousFragment.bounds.maxX, nextFragment.bounds.maxX)
             - max(previousFragment.bounds.minX, nextFragment.bounds.minX)
         let narrower = min(previousFragment.bounds.width, nextFragment.bounds.width)
-        return gap <= referenceHeight * options.paragraphGapFactor
+
+        // 自适应行距因子：若两段都在窄栏（右端显著小于页面右端），用宽松因子。
+        // 需要页面尺寸来算 rightEdge；拿不到则退回正常因子。
+        var gapFactor = options.paragraphGapFactor
+        if let pageSize = pageSizes[previousPage], pageSize.width > 1 {
+            let prevRight = previousFragment.bounds.maxX
+            let nextRight = nextFragment.bounds.maxX
+            let pageRightEdge = pageSize.width * 0.95 // 粗略估计
+            let narrowThreshold = pageRightEdge * options.narrowColumnWidthRatio
+            if prevRight < narrowThreshold && nextRight < narrowThreshold {
+                gapFactor = options.narrowColumnGapFactor
+            }
+        }
+        return gap <= referenceHeight * gapFactor
             && overlap >= narrower * options.minimumHorizontalOverlapFactor
     }
 

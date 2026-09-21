@@ -64,6 +64,7 @@ enum ParagraphAudit {
         assertNarrowRunDetector(check: check, report: report)
         assertFurniture(check: check, report: report)
         assertRepeatedFurniture(check: check, report: report)
+        assertMetadataWallLabels(check: check, report: report)
         assertReadingOrder(check: check, report: report)
         assertNoCrossPageMerge(check: check, report: report)
         assertContinuationMerging(check: check, report: report)
@@ -407,6 +408,74 @@ enum ParagraphAudit {
 
     // MARK: - 阅读顺序
 
+    /// 期刊首页「元数据墙标」剔除 + 摘要保留。
+    ///
+    /// 覆盖两类行为（这是修复下方标题摘要区被拆碎/混入元数据的能力）：
+    /// · **墙标整块剔除**：ARTICLE HISTORY / KEYWORDS / CONTACT 这类首行带大写墙标的
+    ///   元数据块，连同其内容行一起从输出里消失。
+    /// · **纯标签行剔除、内容保留**：ABSTRACT 独占一行时，只剔标签行，摘要正文
+    ///   合并成一段保留下来。
+    ///
+    /// 反向对照：正文里以小写 `abstract` 开头的普通段落不得误删（表驱动曾因此挂掉）。
+    private static func assertMetadataWallLabels(
+        check: (String, Bool, String) -> Void,
+        report: (String) -> Void
+    ) {
+        // 页高 800，正文区自上而下：标题(700) → 摘要(650~) → ARTICLE HISTORY(430) → KEYWORDS(330)
+        let fixture = linesOnPage(0, [
+            // 标题（应保留）
+            ("When the prompting stops",
+             CGRect(x: bodyLeft, y: 700, width: 400, height: lineHeight)),
+            // ABSTRACT 标签独占一行（只剔标签，摘要正文保留）
+            ("ABSTRACT", CGRect(x: bodyLeft, y: 660, width: 40, height: lineHeight)),
+            ("Teachers are now encouraged to use generative AI",     // 摘要行1
+             CGRect(x: bodyLeft, y: 648, width: 300, height: lineHeight)),
+            ("for a range of administrative tasks",                   // 摘要行2
+             CGRect(x: bodyLeft, y: 636, width: 300, height: lineHeight)),
+            // ARTICLE HISTORY 墙标块（整块剔除）
+            ("ARTICLE HISTORY", CGRect(x: bodyLeft + 300, y: 600, width: 70, height: lineHeight)),
+            ("Received 7 April 2025", CGRect(x: bodyLeft + 300, y: 588, width: 80, height: lineHeight)),
+            ("Accepted 16 July 2025", CGRect(x: bodyLeft + 300, y: 576, width: 80, height: lineHeight)),
+            // KEYWORDS 墙标块（整块剔除）
+            ("KEYWORDS", CGRect(x: bodyLeft + 300, y: 520, width: 50, height: lineHeight)),
+            ("teachers; generative AI;", CGRect(x: bodyLeft + 300, y: 508, width: 90, height: lineHeight)),
+            ("automation; work;",         CGRect(x: bodyLeft + 300, y: 496, width: 80, height: lineHeight)),
+            // 普通正文段（abstract 小写开头，不得误删）
+            ("abstract line one still going on here at full width for the body",
+             CGRect(x: bodyLeft, y: 420, width: 350, height: lineHeight)),
+            ("abstract body line two continues the paragraph fine",
+             CGRect(x: bodyLeft, y: 408, width: 350, height: lineHeight)),
+        ])
+        let sizes = [0: pageSize]
+        let paragraphs = PDFParagraphExtractor.paragraphs(from: fixture, pageSizes: sizes)
+        let text = paragraphs.map({ $0.text }).joined(separator: " ◇ ")
+        report("元数据墙标：ABSTRACT 标签剔除留摘要 + ARTICLE HISTORY/KEYWORDS 整块剔除 → \(paragraphs.count) 段")
+
+        // 1. ARTICLE HISTORY / KEYWORDS 及其内容全部消失
+        check("元数据墙标：ARTICLE HISTORY 整块剔除",
+              !text.contains("ARTICLE HISTORY") && !text.contains("Received 7") && !text.contains("Accepted 16"),
+              "结果：\(text)")
+        check("元数据墙标：KEYWORDS 整块剔除",
+              !text.contains("KEYWORDS") && !text.contains("generative AI;"),
+              "结果：\(text)")
+        // 2. ABSTRACT 标签行被剔，但摘要正文保留且合并成一段（含两行内容）
+        check("元数据墙标：ABSTRACT 标签行被剔除",
+              !text.contains("ABSTRACT"),
+              "结果：\(text)")
+        check("元数据墙标：摘要正文保留且两行合并成一段",
+              text.contains("Teachers are now") && text.contains("administrative tasks")
+                && text.contains("Teachers are now encouraged to use generative AI for a range"),
+              "结果：\(text)")
+        // 3. 标题保留
+        check("元数据墙标：文章标题保留",
+              text.contains("When the prompting stops"),
+              "结果：\(text)")
+        // 4. 反向对照：小写 abstract 正文段不得误删
+        check("元数据墙标·反向对照：小写 abstract 正文段不误删",
+              text.contains("abstract line one still going"),
+              "结果：\(text)")
+    }
+
     /// 乱序输入 → 输出按阅读顺序（自上而下；同一水平带内自左向右）。
     ///
     /// 断言打在**几何位置**上而不是 `firstLineOrdinal` ——
@@ -622,12 +691,36 @@ enum ParagraphAudit {
             from: rawLines,
             pageSizes: PDFLineExtractor.pageSizes(in: document)
         )
+
+        // DEBUG: 打印前两页的段落详情
+        for page in 0..<min(2, document.pageCount) {
+            let pageParas = paragraphs.filter { $0.pageIndex == page }
+            let pageLines = rawLines.filter { $0.pageIndex == page }
+            report("  ── 第 \(page + 1) 页：\(pageLines.count) 行 → \(pageParas.count) 段 ──")
+            for (i, p) in pageParas.enumerated() {
+                let text = p.text.replacingOccurrences(of: "\n", with: " ")
+                let short = p.isShort ? " [SHORT]" : ""
+                let span = p.spansPages ? " [SPANS \(p.pageIndices.map { String($0 + 1) }.joined(separator: ","))]" : ""
+                report("    [\(i)] \(p.lineCount) 行  x=[\(Int(p.bounds.minX)),\(Int(p.bounds.maxX))] w=\(Int(p.bounds.width))\(short)\(span)")
+                report("        \"\(text.prefix(80))\"")
+            }
+        }
+
         let kept = paragraphs.reduce(0) { $0 + $1.lineCount }
         let dropped = rawLines.count - kept
         let rawChars = rawLines.reduce(0) { $0 + $1.text.count }
         let paraChars = paragraphs.reduce(0) { $0 + $1.text.count }
         let shortCount = paragraphs.filter(\.isShort).count
         let ratio = rawChars > 0 ? Double(paraChars) / Double(rawChars) : 0
+
+        // 跨页段清单：诊断跨页合并链路（上页底部 → 下页顶部续段）
+        let crossPages = paragraphs.filter(\.spansPages)
+        report("  跨页段 \(crossPages.count) 条：")
+        for p in crossPages.prefix(20) {
+            let pages = p.pageIndices.map { String($0 + 1) }.joined(separator: ",")
+            let frags = p.fragments.map { "P\($0.pageIndex + 1)[y\(Int($0.bounds.minY))]" }.joined(separator: " ")
+            report("    · \(p.lineCount)行 \(pages)页 \(frags) 「\(p.text.prefix(50))…」")
+        }
 
         report("文档：\(name)（\(document.pageCount) 页）")
         report("  文字层 \(rawLines.count) 行 / \(rawChars) 字  →  \(paragraphs.count) 段 / \(kept) 行 / \(paraChars) 字")
