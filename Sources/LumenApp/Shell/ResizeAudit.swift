@@ -81,9 +81,12 @@ enum ResizeAudit {
                   + (ok || detail.isEmpty ? "" : " —— \(detail)"))
         }
 
-        let lowerBound = UISettings.PanelWidth.aiRange.lowerBound
-        let staticUpper = UISettings.PanelWidth.aiRange.upperBound
+        let scale = Double(DS.Size.windowScale(for: Self.containerWidth()))
+        let baseLowerBound = UISettings.PanelWidth.aiRange.lowerBound
+        let lowerBound = baseLowerBound * scale
+        let staticUpper = UISettings.PanelWidth.aiRange.upperBound * scale
         let cap = Self.aiPanelCap(state: state)
+        let baseCap = cap / scale
         NSLog("[Lumen][resize] 窗口可用宽度 \(Int(Self.containerWidth()))pt；"
               + "AI 面板上限 静态 \(Int(staticUpper))pt / 按窗口 \(Int(cap))pt；下限 \(Int(lowerBound))pt；"
               + "侧栏固定 \(Int(UISettings.PanelWidth.sidebarDefault))pt")
@@ -103,7 +106,7 @@ enum ResizeAudit {
             let current = beforeFrame.width
             let target = (current + 60 <= cap) ? current + 60 : max(lowerBound, current - 60)
 
-            store.commitAIPanelWidth(target, maxWidth: cap)
+            store.commitAIPanelWidth(target / scale, maxWidth: baseCap)
 
             // 布局跟随需要一次视图失效 + 布局帧；0.8s 足够，又不至于拖慢自检
             try? await Task.sleep(nanoseconds: 800_000_000)
@@ -121,18 +124,18 @@ enum ResizeAudit {
         }
 
         // ② 越界钳制（上限）
-        store.commitAIPanelWidth(cap + 500, maxWidth: cap)
+        store.commitAIPanelWidth(baseCap + 500, maxWidth: baseCap)
         let clampedHigh = store.ui.aiPanelWidth
         check("越界写入被钳制到上限 \(Int(cap))pt",
-              abs(clampedHigh - cap) < 0.5,
+              abs(clampedHigh - baseCap) < 0.5,
               "实际 \(Int(clampedHigh))pt")
 
         // ③ 越界钳制（下限）：往下拖到底也要停得住。下限 300 是本批从 280 提上来的，
         // 这条断言同时守住「footer 行不被压到换行」这条用户诉求。
-        store.commitAIPanelWidth(20, maxWidth: cap)
+        store.commitAIPanelWidth(20, maxWidth: baseCap)
         let clampedLow = store.ui.aiPanelWidth
         check("低于下限的写入被钳回下限 \(Int(lowerBound))pt",
-              abs(clampedLow - lowerBound) < 0.5,
+              abs(clampedLow - baseLowerBound) < 0.5,
               "实际 \(Int(clampedLow))pt")
 
         // ④⑤⑥ 逐帧写入：连写 N 次（模拟拖拽 60 帧），中间值不得越界，终值必须等于上限
@@ -141,20 +144,20 @@ enum ResizeAudit {
         let frames = 60
         for index in 0..<frames {
             // 从下限之下起步、每帧 +12pt，末帧远超上限
-            store.commitAIPanelWidth(Double(lowerBound) - 40 + Double(index) * 12, maxWidth: cap)
+            store.commitAIPanelWidth(baseLowerBound - 40 + Double(index) * 12, maxWidth: baseCap)
             observedMin = min(observedMin, store.ui.aiPanelWidth)
             observedMax = max(observedMax, store.ui.aiPanelWidth)
         }
         let finalValue = store.ui.aiPanelWidth
-        let stayedInBounds = observedMin >= lowerBound - 0.001 && observedMax <= cap + 0.001
-        let finalIsCap = abs(finalValue - cap) < 0.5
+        let stayedInBounds = observedMin >= baseLowerBound - 0.001 && observedMax <= baseCap + 0.001
+        let finalIsCap = abs(finalValue - baseCap) < 0.5
 
         try? await Task.sleep(nanoseconds: 800_000_000)
         guard let frameAfterBurst = LayoutAuditLog.shared.frame(named: "aiPanel") else {
             NSLog("[Lumen][resize] ❌ 连续写入后读不到布局探针")
             return
         }
-        let layoutMatches = abs(frameAfterBurst.width - finalValue) < 2
+        let layoutMatches = abs(frameAfterBurst.width - finalValue * scale) < 2
 
         NSLog("[Lumen][resize] 连续写 \(frames) 次：区间 [\(Int(observedMin)), \(Int(observedMax))]pt，"
               + "终值 \(Int(finalValue))pt，布局实测 \(Int(frameAfterBurst.width))pt")
@@ -170,19 +173,19 @@ enum ResizeAudit {
         // 这条盯的是「有人悄悄把侧栏又接回了设置」——例如把 `.frame(width:)` 改回
         // `settings.ui.sidebarWidth`。那种改法不会崩溃、截图也看不出，
         // 只有把设置写成一个不同的值、再看渲染宽度才抓得住。
-        let fixedSidebar = UISettings.PanelWidth.sidebarDefault
+        let fixedSidebar = UISettings.PanelWidth.sidebarDefault * scale
         store.commitSidebarWidth(fixedSidebar + 120)
         try? await Task.sleep(nanoseconds: 800_000_000)
         if let sidebarFrame = LayoutAuditLog.shared.frame(named: "sidebar") {
             NSLog("[Lumen][resize] 侧栏兼容字段写入 \(Int(fixedSidebar + 120))pt → 实际渲染 "
                   + "\(Int(sidebarFrame.width))pt（期望常量 \(Int(fixedSidebar))pt）")
-            check("侧栏宽度是常量，不受设置影响",
+            check("侧栏宽度按窗口比例计算，不受设置影响",
                   abs(sidebarFrame.width - fixedSidebar) < 2,
                   "落库 \(Int(store.ui.sidebarWidth))pt，实渲染 \(Int(sidebarFrame.width))pt"
                       + "（侧栏又接回了设置？）")
         } else {
             NSLog("[Lumen][resize] ❌ 读不到侧栏布局探针")
-            failures.append("侧栏宽度是常量，不受设置影响")
+            failures.append("侧栏宽度按窗口比例计算，不受设置影响")
         }
 
         // ⑧–⑫ 窗口缩放
@@ -242,7 +245,7 @@ enum ResizeAudit {
         //
         // AI 偏好顶满才会真的挤到阅读区（52 + 248 + 640 = 940 > 920）。
         store.ui.aiPanelWidth = aiUpper
-        await setContentSize(width: 920, on: window)
+        await setContentSize(width: 940, on: window)
         guard let narrow = Self.frames() else {
             NSLog("[Lumen][resize] ❌ 窄窗口下读不到布局探针")
             return results
@@ -268,8 +271,10 @@ enum ResizeAudit {
         //
         // 期望值成立有个前提：宽窗口真的装得下「AI 偏好 + 侧栏 + 图标栏 + 阅读区保底」。
         // 显示器比这还窄时如实跳过，而不是把期望值改成实现算出来的数。
-        let needed = preference + UISettings.PanelWidth.sidebarDefault
-            + Double(LeftRail.width)
+        let wideScale = Double(DS.Size.windowScale(for: wideWidth))
+        let expectedWideAI = preference * wideScale
+        let needed = expectedWideAI + UISettings.PanelWidth.sidebarDefault * wideScale
+            + Double(LeftRail.width) * wideScale
             + PanelWidthPolicy.handleWidth
             + minimumReader
         store.ui.aiPanelWidth = preference
@@ -283,8 +288,8 @@ enum ResizeAudit {
 
         if Double(wide.container) >= needed - 1 {
             results.append(CheckResult(
-                name: "窗口拉宽后 AI 面板回到落库的偏好值 \(Int(preference))pt",
-                ok: abs(wide.aiPanel.width - preference) < 2,
+                name: "窗口拉宽后 AI 面板按比例恢复偏好值 \(Int(expectedWideAI))pt",
+                ok: abs(wide.aiPanel.width - expectedWideAI) < 2,
                 detail: "实渲染 \(Int(wide.aiPanel.width))pt（偏好被窄窗口的钳制值覆写了）"))
         } else {
             NSLog("[Lumen][resize] ⚠️ 宽窗口只有 \(Int(wide.container))pt（需要 ≥\(Int(needed))pt），"

@@ -20,9 +20,12 @@ final class ReaderSession: ObservableObject, Identifiable {
 
     /// 阅读视图与外壳之间的唯一通道（PDF / EPUB 各自填闭包）。
     let bridge = ReaderBridge()
-    /// 这份文档的 AI 对话（落盘在 docs/<哈希>/chats.json）。
-    let chat = AIChatModel()
     /// 这份文档的 AI 智能目录。
+    ///
+    /// 注意：AI 对话不再挂在会话上——全局共享一份（见 `ConversationStore` /
+    /// `AIChatModel`），由 `AppState.chat`（= `services.activeChat`）统一取用。
+    /// 这里刻意不再持有 `chat`，避免「A 标签的请求落到 B 标签的气泡」这类串台，
+    /// 也避免一份会话被多份会话各自持有、各自落盘。
     let smartOutline = SmartOutlineModel()
 
     /// 阅读区上报的文档元数据镜像，导出摘要时需要作者 / 篇幅。
@@ -45,15 +48,28 @@ final class ReaderSession: ObservableObject, Identifiable {
     init(document: OpenDocument, id: UUID = UUID()) {
         self.id = id
         self.document = document
-        // 与旧实现同一个绑定入口：对话与智能目录都按文档路径存取，
-        // 这里在会话创建时就绑好，视图挂载后 ReaderContainerView 还会再绑一次
-        // （幂等，只是重新从磁盘载入），两条路径不冲突。
-        chat.bind(to: document)
+        // 智能目录按文档路径存取，只在创建会话时绑定，重新挂载视图不清空草稿、不重读文件。
         smartOutline.bind(to: document, unitName: document.kind == .epub ? "章" : "页")
 
         documentObservation = document.objectWillChange.sink { [weak self] _ in
             self?.objectWillChange.send()
         }
+    }
+
+    /// Only close tears down work; moving a tab to another window preserves its session.
+    ///
+    /// 不在这里调用 `chat.stop()`：对话是全局共享的（见 `AppState.chat`），
+    /// 关掉一个文档标签不该把正在进行的整篇回答中断掉。流式任务会随全局
+    /// `AIChatModel` 的生命周期自然结束。
+    func close() {
+        busyCancel?()
+        busyCancel = nil
+        fullTextTask?.cancel()
+        fullTextTask = nil
+        smartOutline.cancelAllWork()
+        bridge.closeReader?()
+        bridge.reset()
+        pendingAIRequest = nil
     }
 
     /// 标签上显示的标题（文档元数据加载完可能是书名，否则是文件名）。

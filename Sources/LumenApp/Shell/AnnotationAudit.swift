@@ -177,9 +177,257 @@ enum AnnotationAudit {
                   "\(all.count) 条 / \(unique) 个唯一 id")
         }
 
+        // ⑨ 整行化（用户报的原始症状：引文只剩半行，出现「人）属于哪个群体」这种断头句）
+        assertRowExpansion(controller: controller, pageIndex: targetPage, check: check)
+
+        // ⑩ 清单顺序按内容位置（页升序 → 页内自上而下），不再按「什么时候划的」
+        await assertListOrdering(controller: controller, pageIndex: targetPage, check: check)
+
+        // ⑪ 便签与高亮并存 + 高亮带颜色 + 同页两条便签不撞 id
+        await assertNotesCoexist(controller: controller, check: check)
+
+        // ⑫ 历史遗留的「半行」批注：读取侧补算 + 一键把文件里的矩形改宽
+        await assertLegacyRowWidening(controller: controller, pageIndex: targetPage, check: check)
+
         NSLog("[Lumen][annotate] 自检：通过 \(passed) 项，失败 \(failures.count) 项"
             + (failures.isEmpty ? " ✅" : " ❌ " + failures.joined(separator: "；")))
         NSLog("[Lumen][annotate] 自检产物保留在 \(copy.path)（可直接用预览打开核对）")
+    }
+
+    // MARK: - 整行化与顺序（⑨⑩⑪）
+
+    /// ⑨ 把「半行片段」交给 `fullRowBounds`，必须扩回**整行**。
+    ///
+    /// 测试数据从被测页**自己**长出来：取一条真实文本行，再截出它中间 40% 当片段。
+    /// 不写死坐标——项目里踩过三次「测试自己坏了而非功能坏了」。
+    @MainActor
+    private static func assertRowExpansion(
+        controller: PDFController, pageIndex: Int, check: (String, Bool, String) -> Void
+    ) {
+        guard let page = controller.document?.page(at: pageIndex) else {
+            check("整行化：拿得到测试页", false, "页 \(pageIndex) 取不到")
+            return
+        }
+        let band = glyphBand(of: page)
+        guard let selection = page.selection(for: band),
+              let line = selection.selectionsByLine().first else {
+            check("整行化：测试页能取到一条真实文本行", false, "文字带 \(band) 上没有文本")
+            return
+        }
+        let lineRect = line.bounds(for: page)
+        // 只取中间 40%：模拟「用户从词中间起划、在句中收手」
+        let fragment = CGRect(x: lineRect.midX - lineRect.width * 0.2,
+                              y: lineRect.minY,
+                              width: lineRect.width * 0.4,
+                              height: lineRect.height)
+
+        // 第一道：先证明这个测试**不是恒真的**——片段必须真的比整行窄，
+        // 否则「扩到整行」和「原样返回」两种实现都会被判通过。
+        check("整行化：测试片段确实窄于整行（防恒真）",
+              lineRect.width > fragment.width * 1.4,
+              String(format: "整行 %.1fpt / 片段 %.1fpt", lineRect.width, fragment.width))
+
+        let expanded = PDFController.fullRowBounds(for: fragment, on: page)
+        if let row = expanded {
+            check("整行化：半行片段扩回了整行",
+                  abs(row.minX - lineRect.minX) < 1.0 && abs(row.maxX - lineRect.maxX) < 1.0,
+                  String(format: "扩后 x=[%.1f,%.1f]，期望 x=[%.1f,%.1f]",
+                         row.minX, row.maxX, lineRect.minX, lineRect.maxX))
+            // 幂等：已经是一整行时再扩一次不该变（证明它没有「无限往外吃」）
+            let again = PDFController.fullRowBounds(for: row, on: page)
+            check("整行化：对整行再扩一次结果不变（幂等）",
+                  again.map { abs($0.minX - row.minX) < 1.0 && abs($0.maxX - row.maxX) < 1.0 } ?? false,
+                  "再扩 = \(again.map { String(format: "x=[%.1f,%.1f]", $0.minX, $0.maxX) } ?? "nil")")
+        } else {
+            check("整行化：半行片段扩回了整行", false, "fullRowBounds 返回 nil")
+        }
+
+        // 反向对照：页面下边距（正文之外）必须扩不出行 —— 证明它不是「把输入原样回显」
+        let pageBounds = page.bounds(for: .mediaBox)
+        let margin = CGRect(x: pageBounds.minX + 40, y: pageBounds.minY + 3,
+                            width: max(1, pageBounds.width - 80), height: 6)
+        check("整行化：正文外的空白带不返回伪整行（反向对照）",
+              PDFController.fullRowBounds(for: margin, on: page) == nil,
+              "下边距返回 \(PDFController.fullRowBounds(for: margin, on: page) == nil ? "nil ✅" : "非 nil ❌")")
+    }
+
+    /// ⑩ 清单顺序：页号单调不减；同一页内靠上的那条排在前面。
+    ///
+    /// 做法是在**同一页**取上下两条真实文本带各画一条高亮，再按引文认出它们。
+    /// 只断言「页号有序」是不够的——那只覆盖跨页，页内的上下关系必须另有位置型断言。
+    @MainActor
+    private static func assertListOrdering(
+        controller: PDFController, pageIndex: Int, check: (String, Bool, String) -> Void
+    ) async {
+        guard let page = controller.document?.page(at: pageIndex) else { return }
+        let base = glyphBand(of: page)
+        // 往下走 4 行取第二条，两条都在正文区里
+        let upper = base
+        let lower = base.offsetBy(dx: 0, dy: -(base.height * 4))
+
+        var texts: [String] = []
+        for (tag, band) in [("上", upper), ("下", lower)] {
+            guard let sel = page.selection(for: band),
+                  let text = sel.string,
+                  !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                check("排序：第 \(tag) 条测试带取到文字", false, "带 \(band)")
+                return
+            }
+            texts.append(text)
+            controller.view.setCurrentSelection(sel, animate: false)
+            _ = controller.addHighlight(fromCurrentSelection: "自检排序：\(tag)")
+        }
+        check("排序：两条测试批注的文字不同（否则认不出谁是谁）",
+              texts[0] != texts[1],
+              "上=\(texts[0].prefix(14)) 下=\(texts[1].prefix(14))")
+
+        let listed = await controller.annotationsList()
+        let pages = listed.map(\.locator.pageIndex)
+        check("排序：页号单调不减",
+              zip(pages, pages.dropFirst()).allSatisfy { $0 <= $1 },
+              "页序 \(pages.prefix(14))")
+
+        func index(of text: String) -> Int? {
+            let probe = String(text.prefix(8))
+            guard probe.count >= 4 else { return nil }
+            return listed.firstIndex { !$0.quote.isEmpty && $0.quote.contains(probe) }
+        }
+        if let u = index(of: texts[0]), let l = index(of: texts[1]) {
+            check("排序：同一页内靠上的排在前面", u < l, "上 = #\(u)，下 = #\(l)（共 \(listed.count) 条）")
+        } else {
+            check("排序：能在清单里认出这两条测试批注", false,
+                  "上 = \(String(describing: index(of: texts[0])))，下 = \(String(describing: index(of: texts[1])))")
+        }
+    }
+
+    /// ⑪ 便签与高亮并存、高亮带颜色、同页两条便签 id 不撞车。
+    @MainActor
+    private static func assertNotesCoexist(
+        controller: PDFController, check: (String, Bool, String) -> Void
+    ) async {
+        // 同一个当前页连开两条便签：这是原来必然撞 id 的场景
+        //（图标固定放在右上角，两条便签原点完全相同，而 id = 页号 + 原点 + 类型）
+        var ids: [String] = []
+        for _ in 0..<2 {
+            if let item = controller.addPageNoteAtCurrentPosition() { ids.append(item.id) }
+        }
+        check("新建批注：同页两条便签都建得出来", ids.count == 2, "建成 \(ids.count) 条")
+        check("新建批注：同页两条便签 id 不撞车", Set(ids).count == ids.count,
+              ids.joined(separator: " / "))
+
+        let listed = await controller.annotationsList()
+        let highlights = listed.filter { $0.hasHighlight }
+        let notes = listed.filter { !$0.hasHighlight }
+        check("清单：便签与高亮同时出现（便签不再被藏起来）",
+              !notes.isEmpty && !highlights.isEmpty,
+              "高亮 \(highlights.count) 条 / 便签 \(notes.count) 条")
+
+        let allHexShaped = highlights.allSatisfy { item in
+            guard let hex = item.highlightHex else { return false }
+            return hex.count == 7 && hex.hasPrefix("#")
+        }
+        check("清单：每条高亮都带 #RRGGBB 颜色", allHexShaped,
+              highlights.compactMap(\.highlightHex).prefix(4).joined(separator: ","))
+
+        check("清单：id 全局无重复",
+              Set(listed.map(\.id)).count == listed.count,
+              "\(listed.count) 条 / \(Set(listed.map(\.id)).count) 个唯一 id")
+    }
+
+    /// ⑫ 历史遗留的「半行」批注：读取侧必须补算成整行，并且能一键把文件里的矩形改宽。
+    ///
+    /// 为什么单列一组：上一轮只改了「**画**的时候扩整行」，而修复前画下的批注
+    /// **存进 PDF 的矩形本身**就是半行——清单若直接拿它反查，就永远显示半行碎片，
+    /// 用户看到的正是「批注还是没有解决」。
+    ///
+    /// 测试数据从被测对象自己长出来：先走真实入口画一条整行高亮，再把它的 bounds
+    /// 缩成中间 40%（模拟修复前写进文件的状态），而不是手写一个假矩形。
+    @MainActor
+    private static func assertLegacyRowWidening(
+        controller: PDFController, pageIndex: Int, check: (String, Bool, String) -> Void
+    ) async {
+        guard let page = controller.document?.page(at: pageIndex) else {
+            check("历史半行：拿得到测试页", false, "页 \(pageIndex) 取不到")
+            return
+        }
+        let band = glyphBand(of: page)
+        guard let sel = page.selection(for: band),
+              !(sel.string ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            check("历史半行：测试页能取到真实文本行", false, "带 \(band) 上没有文字")
+            return
+        }
+
+        // ① 走真实入口画一条整行高亮（作者标记、颜色、时间戳都与用户操作一致）
+        let beforeIDs = Set(page.annotations.map { ObjectIdentifier($0) })
+        controller.view.setCurrentSelection(sel, animate: false)
+        guard controller.addHighlight(fromCurrentSelection: "自检：模拟老批注") else {
+            check("历史半行：测试高亮画得上去", false, "addHighlight 返回 false")
+            return
+        }
+        guard let created = page.annotations.first(where: {
+            !beforeIDs.contains(ObjectIdentifier($0)) && $0.lumenIsMarkup
+        }) else {
+            check("历史半行：找得到刚画的那一条", false, "页面批注里没有新增的划线")
+            return
+        }
+
+        // ② 把矩形缩成中间 40% —— 这就是修复前写进文件的样子
+        let full = created.bounds
+        let fragment = CGRect(x: full.midX - full.width * 0.2, y: full.minY,
+                              width: full.width * 0.4, height: full.height)
+        check("历史半行：测试片段确实窄于整行（防恒真）",
+              full.width > fragment.width * 1.4,
+              String(format: "整行 %.1fpt / 半行 %.1fpt", full.width, fragment.width))
+        // Model an actual legacy annotation, which had no QuadPoints.
+        created.removeValue(forAnnotationKey: PDFAnnotationGeometry.identityKey)
+        created.quadrilateralPoints = nil
+        created.bounds = fragment
+
+        // ③ 读取侧：清单给出的引文必须是**整行**，而不是存进文件的那半行
+        let storedQuote = page.selection(for: fragment)?.string ?? ""
+        let fullQuote = page.selection(for: full)?.string ?? ""
+        guard !storedQuote.isEmpty, !fullQuote.isEmpty else {
+            check("历史半行：能取到两段对照文字", false,
+                  "半行 \(storedQuote.count) 字 / 整行 \(fullQuote.count) 字")
+            return
+        }
+        let listed = await controller.annotationsList()
+        // 同一基串在枚举里可能被追加 `#k`，所以按前缀认，而不是要求完全相等
+        let base = PDFController.entryID(created, pageIndex: pageIndex)
+        guard let entry = listed.first(where: { $0.id == base || $0.id.hasPrefix(base + "#") }) else {
+            check("历史半行：清单里认得出这一条", false,
+                  "基串 \(base)，清单 \(listed.count) 条：\(listed.prefix(6).map(\.id))")
+            return
+        }
+        check("历史半行：清单引文是整行（读取侧补算了）",
+              entry.quote == fullQuote,
+              "实际 \(entry.quote.count) 字「\(String(entry.quote.prefix(24)))」，"
+                  + "期望整行 \(fullQuote.count) 字「\(String(fullQuote.prefix(24)))」")
+        check("历史半行：清单引文长于文件里那半行（防恒真）",
+              entry.quote.count > storedQuote.count,
+              "清单 \(entry.quote.count) 字 / 存储矩形 \(storedQuote.count) 字")
+        check("历史半行：条目带 truncated 标记（界面据此给修正入口与条数）",
+              entry.truncated,
+              "truncated=\(entry.truncated)")
+
+        // ④ 一键修正：把文件里的矩形真的改宽，且条数与界面一致、可重复调用无害
+        let truncatedBefore = listed.filter(\.truncated).count
+        let changed = controller.normalizeAnnotationRows()
+        check("历史半行：normalizeAnnotationRows 改宽了 ≥1 条", changed >= 1, "返回 \(changed)")
+        check("历史半行：改宽条数 == 界面标记的条数（数字对得上账）",
+              changed == truncatedBefore,
+              "界面标记 \(truncatedBefore) 条 / 实际改了 \(changed) 条")
+        check("历史半行：文件里的矩形真的变宽到整行",
+              abs(created.bounds.minX - full.minX) < 1.0
+                  && abs(created.bounds.maxX - full.maxX) < 1.0,
+              String(format: "%.1f → %.1fpt（期望 %.1fpt）",
+                     fragment.width, created.bounds.width, full.width))
+        let second = controller.normalizeAnnotationRows()
+        check("历史半行：再跑一次返回 0（幂等，不会反复写盘）", second == 0, "第二次返回 \(second)")
+        let after = await controller.annotationsList()
+        check("历史半行：改完之后没有条目再被标为 truncated",
+              after.allSatisfy { !$0.truncated },
+              "剩余 truncated 条数 = \(after.filter(\.truncated).count)")
     }
 
     /// 打印「内存里的文档」与「磁盘上的文件」各自的批注明细。

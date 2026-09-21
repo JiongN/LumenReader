@@ -9,8 +9,8 @@ struct AIRequest: Identifiable, Equatable {
         case explain      // 解释选中内容
         case translate    // 翻译
         case ask          // 就选中内容追问
-        case summarize    // 总结本章
-        case summarizeAll // 总结全书（命令面板用）
+        case summarize    // 总结当前页 / 章
+        case summarizeAll // 总结全文（命令面板用）
         case custom       // 自定义提示词
 
         var title: String {
@@ -19,7 +19,7 @@ struct AIRequest: Identifiable, Equatable {
             case .translate:    return "翻译"
             case .ask:          return "追问"
             case .summarize:    return "总结"
-            case .summarizeAll: return "总结全书"
+            case .summarizeAll: return "总结全文"
             case .custom:       return "自定义"
             }
         }

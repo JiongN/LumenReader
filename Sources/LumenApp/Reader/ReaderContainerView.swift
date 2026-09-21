@@ -41,10 +41,10 @@ struct ReaderContainerView: View {
     /// 容器（窗口内容区）的可用宽度。面板上限要按它动态收窄。
     @State private var containerWidth: CGFloat = 0
 
-    /// 通道与对话模型都属于**当前标签的会话**：多标签并存时，
-    /// A 标签的阅读视图不能把回调接到 B 标签的 bridge 上。
+    /// 阅读通道属于**当前标签的会话**：多标签并存时，A 标签的阅读视图不能把回调接到 B 标签的 bridge 上。
+    /// 对话模型（chat）则是全局共享的那一份（见 `AppState.chat`），任何标签都通过它访问活动会话。
     private var bridge: ReaderBridge { session.bridge }
-    private var chat: AIChatModel { session.chat }
+    private var chat: AIChatModel { state.chat }
 
     var body: some View {
         // 卡顿自检：三栏整棵树每次重排都会走到这里。必须写在 body 里而不是做成 ViewModifier——
@@ -53,13 +53,16 @@ struct ReaderContainerView: View {
         HStack(spacing: 0) {
             // 图标栏常驻（沉浸模式除外）：内容面板可以收起，切页签的入口不能跟着消失。
             if !state.isImmersive {
-                LeftRail(
+                // 图标栏由 `SidebarRail` 转一层：它自己观察 `bridge`，这样
+                // 「只切页签、别的什么都没变」时高亮能跟上（详见 `SidebarRail` 的注释）。
+                // 探针仍叫 `sidebarRail`，几何断言不受影响。
+                SidebarRail(
                     tabs: SidebarTab.available(for: document.kind),
-                    activeTab: bridge.sidebarTab,
                     isExpanded: state.isSidebarVisible,
+                    layoutScale: layoutScale,
                     onSelect: selectSidebarTab
                 )
-                .frame(width: LeftRail.width)
+                .frame(width: railWidth)
                 .layoutProbe("sidebarRail")
                 .background(DS.Palette.surfaceSunken)
                 .transition(.opacity.combined(with: .offset(x: -10)))
@@ -115,10 +118,11 @@ struct ReaderContainerView: View {
                     committedWidth: aiPanelWidth,
                     liveWidth: liveWidthBinding,
                     range: aiPanelRange,
-                    defaultWidth: UISettings.PanelWidth.aiDefault,
+                    defaultWidth: UISettings.PanelWidth.aiDefault * Double(layoutScale),
                     panelIsLeading: false,
                     onCommit: { value in
-                        settings.commitAIPanelWidth(value, maxWidth: aiPanelCap)
+                        let scale = Double(layoutScale)
+                        settings.commitAIPanelWidth(value / scale, maxWidth: aiPanelCap / scale)
                     },
                     onDragStateChange: { bridge.setPanelResizing?($0) }
                 )
@@ -159,8 +163,6 @@ struct ReaderContainerView: View {
             session.smartOutline.syncUnitCount(newValue, unitName: state.unitName)
         }
         .task(id: document.id) {
-            chat.bind(to: document)
-            session.smartOutline.bind(to: document, unitName: state.unitName)
             session.documentMetadata = bridge.metadata
             await applyLaunchDiagnostics()
         }
@@ -173,7 +175,9 @@ struct ReaderContainerView: View {
     private var aiPanelIsVisible: Bool { state.isAIPanelVisible && !state.isImmersive }
 
     /// AI 面板用户这一刻「想要」的宽度：拖动中用即时值，否则用落库值。
-    private var aiPanelDemand: Double { livePanelWidth.value ?? settings.ui.aiPanelWidth }
+    /// 普通窗口保持现有密度；外接大屏上的宽窗口按比例放大两侧栏。
+    private var layoutScale: CGFloat { DS.Size.windowScale(for: containerWidth) }
+    private var railWidth: CGFloat { LeftRail.width * layoutScale }
 
     /// 分隔线用的即时宽度绑定。读的是**已应用**值；写走 `LivePanelWidth.submit`，
     /// 由它按显示刷新合并（不是在绑定这层直接落状态，否则合并就白做了）。
@@ -199,21 +203,23 @@ struct ReaderContainerView: View {
             containerWidth: containerWidth,
             showsRail: !state.isImmersive,
             sidebarVisible: sidebarIsVisible,
-            aiPanelPreferred: aiPanelIsVisible ? aiPanelDemand : nil
+            aiPanelPreferred: aiPanelIsVisible
+                ? (livePanelWidth.value.map { $0 / Double(layoutScale) } ?? settings.ui.aiPanelWidth)
+                : nil
         )
     }
 
     /// 侧栏**当前应当显示**的宽度。固定值——侧栏不再接受任何宽度输入。
     private var sidebarWidth: Double {
-        panelLayout.sidebar ?? UISettings.PanelWidth.sidebarDefault
+        panelLayout.sidebar ?? UISettings.PanelWidth.sidebarDefault * Double(layoutScale)
     }
 
     private var aiPanelWidth: Double {
-        panelLayout.aiPanel ?? UISettings.PanelWidth.aiDefault
+        panelLayout.aiPanel ?? UISettings.PanelWidth.aiDefault * Double(layoutScale)
     }
 
     private var aiPanelRange: ClosedRange<Double> {
-        UISettings.PanelWidth.aiRange.lowerBound...aiPanelCap
+        (UISettings.PanelWidth.aiRange.lowerBound * Double(layoutScale))...aiPanelCap
     }
 
     private var aiPanelCap: Double {
@@ -230,9 +236,9 @@ struct ReaderContainerView: View {
     /// 所以「切到某页签时若面板收起要一并展开」这条规则只有一份实现。
     private func selectSidebarTab(_ tab: SidebarTab) {
         if state.isSidebarVisible && bridge.sidebarTab == tab {
-            withAnimation(DS.Motion.panel) { state.isSidebarVisible = false }
+            state.setSidebarVisible(false)
         } else {
-            withAnimation(DS.Motion.quick) { state.revealSidebar(tab: tab) }
+            state.revealSidebar(tab: tab)
         }
     }
 
@@ -316,6 +322,38 @@ struct ReaderContainerView: View {
             await RerunAudit.run(session: session, state: state)
         }
 
+        // 面板展开 / 收起过渡自检（`--panel-transition-report 1`）。
+        // 同样必须挂在文档装好、PDF 控制器已接上桥之后——早期跑会拿到空桥的 nil 探针。
+        if LaunchOptions.panelTransitionReport {
+            await PanelTransitionAudit.run(state: state)
+        }
+
+        // 侧栏页签切换自检（`--sidebar-tab-report 1`）。必须在这里跑：
+        // 它要调的是 `selectSidebarTab(_:)`——图标栏 `onSelect` 接的就是它，
+        // 而它是本类型的私有方法，只有这里够得着。绕到 `revealSidebar` 去验等于换了一条路。
+        if LaunchOptions.sidebarTabReport {
+            await runSidebarTabAudit()
+        }
+
+        // 段落抽取自检（`--paragraph-report 1`）。放在这里而不是更早：
+        // 真机那组要读到 `session.document` 已经绑好的路径；但合成行那组不依赖文档，
+        // 所以就算没打开文档，前面那组照跑（`documentPath` 传 nil 即可）。
+        if LaunchOptions.paragraphReport {
+            await ParagraphAudit.run(documentPath: session.document.url.path)
+        }
+
+        // PDF 翻译面板自检（`--translation-report 1`）。必须在这里：
+        // 覆盖「机器/LLM 切换」的字段语义、「点击译文定位正文」的真机跳转、
+        // 以及 `sidebarPane_translation` 的布局探针；需要文档装好、桥接上。
+        if LaunchOptions.translationPanelReport {
+            await TranslationPanelAudit.run(
+                documentPath: session.document.url.path,
+                bridge: bridge,
+                state: state,
+                settings: settings
+            )
+        }
+
         let needsWork = LaunchOptions.sidebarTab != nil
             || LaunchOptions.injectsDemoSelection
             || LaunchOptions.injectsDemoClick
@@ -352,7 +390,7 @@ struct ReaderContainerView: View {
         if LaunchOptions.injectsDemoAnswer {
             // 长文本排版自检：注入一条含长 URL / 长代码行 / 长标识符的假回答。
             // 注入后等一拍再截图，让「跟随到底部」的滚动落定。
-            session.chat.seedDemoAnswer()
+            state.chat.seedDemoAnswer()
             try? await Task.sleep(nanoseconds: 600_000_000)
         }
 
@@ -371,6 +409,158 @@ struct ReaderContainerView: View {
         if let delay = LaunchOptions.exitFullScreenAfter {
             await runImmersiveExitAudit(after: delay)
         }
+    }
+
+    /// 自检：侧栏页签切换（`--sidebar-tab-report 1`）。
+    ///
+    /// **存在的理由**：用户报「左栏图标栏里无论点哪一项，侧栏都不切换」。
+    /// 排查已排除掉一批：图标栏 `LeftRail.railButton` 传的就是被点的那一格；
+    /// `SidebarTab.available(for:)` / `switch bridge.sidebarTab` 的分支对照没错；
+    /// `--run-action showThumbnails`（走 `state.revealSidebar`）**能让侧栏真的换页签**
+    /// —— 也就是说「切换函数」是通的，「发起点击」那侧才是嫌疑。
+    ///
+    /// 所以本通道**直接调 `selectSidebarTab(_:)`**（图标栏 `onSelect` 接的就是它），
+    /// 并盯三件事：
+    ///
+    /// | # | 断言 | 防的是什么 |
+    /// | - | ---- | ---------- |
+    /// | ① | 点击写入的目标通道与图标栏读取的通道是**同一个对象** | 写入落到另一个 bridge（静默失效，不报错） |
+    /// | ② | 走完点击路径后 `bridge.sidebarTab` 等于被点的页签 | 点击根本没到按钮 / 传错页签 |
+    /// | ③ | 该页签的**面板探针在位、其余页签的探针已注销** | 「状态变了但界面没换」这类假绿 |
+    ///
+    /// 外加两条：点已激活的那一格 = 收起面板；以及一个**反向对照**给 ① 证伪。
+    private func runSidebarTabAudit() async {
+        // 等文档装好、侧栏挂载完成
+        try? await Task.sleep(nanoseconds: 1_500_000_000)
+
+        var passed = 0
+        var failures: [String] = []
+        func check(_ name: String, _ ok: Bool, _ detail: String = "") {
+            if ok { passed += 1 } else { failures.append(name) }
+            NSLog("[Lumen][sidebar-tab] \(ok ? "✅" : "❌") \(name)"
+                  + (ok || detail.isEmpty ? "" : " —— \(detail)"))
+        }
+
+        let tabs = SidebarTab.available(for: document.kind)
+        NSLog("[Lumen][sidebar-tab] 本文档可用页签：\(tabs.map(\.rawValue).joined(separator: ", "))"
+              + "；当前 bridge.sidebarTab=\(bridge.sidebarTab.rawValue)"
+              + "；侧栏可见=\(state.isSidebarVisible)")
+
+        // ── ① 通道身份 ──
+        //
+        // 这是本通道最重要的一条：图标栏的选中态读 `bridge.sidebarTab`（本标签的通道），
+        // 而 `selectSidebarTab` → `state.revealSidebar` 写的是 `state.bridge`
+        // （= `activeSession?.bridge ?? idleBridge`）。两者一旦不是同一个对象，
+        // 点下去既不报错、也不见效 —— 正好是用户描述的现象。
+        check("点击写入的通道与图标栏读取的通道是同一个对象",
+              state.bridge === bridge,
+              "state.bridge 与 session.bridge 不是同一个对象"
+                  + "（activeSession \(state.activeSession?.id.uuidString.prefix(8) ?? "nil")"
+                  + " vs session \(session.id.uuidString.prefix(8))，homeTab=\(state.homeTabIsActive)）")
+
+        // ── ②③ 逐页签走真实点击路径 ──
+        for tab in tabs {
+            // 先保证面板展开（收起时点击的语义是「展开并切过去」）
+            if !state.isSidebarVisible { state.setSidebarVisible(true, animated: false) }
+            // 先切到「另一个」页签，保证这次点击是一次**真实的变更**而不是空操作。
+            // 少了这一步，断言可能因为「本来就停在这个页签」而恒真。
+            if let other = tabs.first(where: { $0 != tab }), bridge.sidebarTab == tab {
+                state.revealSidebar(tab: other)
+                try? await Task.sleep(nanoseconds: 250_000_000)
+            }
+
+            selectSidebarTab(tab)
+            try? await Task.sleep(nanoseconds: 450_000_000)
+
+            check("点「\(tab.fullTitle)」后通道页签已切换",
+                  bridge.sidebarTab == tab,
+                  "期望 \(tab.rawValue)，实际 \(bridge.sidebarTab.rawValue)")
+
+            let mine = LayoutAuditLog.shared.frame(named: "sidebarPane_\(tab.rawValue)")
+            let others = tabs.filter { $0 != tab }
+                .compactMap { t -> String? in
+                    LayoutAuditLog.shared.frame(named: "sidebarPane_\(t.rawValue)") != nil ? t.rawValue : nil
+                }
+            check("点「\(tab.fullTitle)」后该页签的面板真的挂载了（探针在位）",
+                  mine != nil,
+                  "sidebarPane_\(tab.rawValue) 探针缺席 —— 通道变了但内容没换")
+            check("点「\(tab.fullTitle)」后其余页签的面板已摘下（反向对照，防恒真）",
+                  others.isEmpty,
+                  "仍在上报的其它页签探针：\(others.joined(separator: ", "))")
+        }
+
+        // ── 点已激活的那一格 = 收起面板 ──
+        if let first = tabs.first {
+            if !state.isSidebarVisible { state.setSidebarVisible(true, animated: false) }
+            state.revealSidebar(tab: first)
+            try? await Task.sleep(nanoseconds: 250_000_000)
+            selectSidebarTab(first)
+            try? await Task.sleep(nanoseconds: 500_000_000)
+            check("点已激活的那一格 = 收起面板",
+                  state.isSidebarVisible == false,
+                  "isSidebarVisible 仍为 \(state.isSidebarVisible)")
+            state.setSidebarVisible(true, animated: false)
+            try? await Task.sleep(nanoseconds: 300_000_000)
+        }
+
+        // ── ④ 反向对照：把「通道身份」这条断言证伪 ──
+        //
+        // 期望 `state.bridge !== bridge` —— 若真出现这种情况，① 会红。
+        // 本组证明 ① 不是恒真：先记下当前是否同源，再从「主页标签」绕一圈回来，
+        // 看 `activate(_:)` 有没有把 homeTabIsActive 清掉。
+        let homeWasActive = state.homeTabIsActive
+        state.addHomeTab()
+        try? await Task.sleep(nanoseconds: 500_000_000)
+        let bridgeWhileHome = state.bridge
+        let homeTabShowsNilSession = state.activeSession == nil
+        state.activate(session)
+        try? await Task.sleep(nanoseconds: 700_000_000)
+        NSLog("[Lumen][sidebar-tab] 主页标签往返：homeTabIsActive \(homeWasActive) → \(state.homeTabIsActive)"
+              + "；主页期间 activeSession 是否为 nil=\(homeTabShowsNilSession)"
+              + "；回来后 state.bridge 与 session.bridge 同源=\(state.bridge === bridge)")
+        check("从主页标签切回文档标签后 homeTabIsActive 被清掉",
+              state.homeTabIsActive == false,
+              "仍为 true —— activate(_:) 没清这个开关，此后 state.bridge 会一直解析成"
+                  + "空通道，图标栏点击与 ⌘1–⌘5 全部静默失效")
+        check("反向对照：主页标签期间 state.bridge 与文档标签的通道不是同一个对象（证明①非恒真）",
+              bridgeWhileHome !== bridge,
+              "主页期间两者竟然同源 —— 说明 ① 可能是恒真的，本通道的因果链需要重查")
+
+        // 收尾：恢复到一个干净的阅读态
+        state.closeHomeTab()
+        state.setSidebarVisible(true, animated: false)
+
+        // ── ⑤ 图标栏**跟着重绘**了吗（用户报的「图标不跟帖」的正面断言）──
+        //
+        // 上面 ②③ 只盯住「通道里的值变了、内容换了」，**盯不住图标栏自己的高亮**：
+        // 那枚高亮读的是 `bridge.sidebarTab`，若读它的视图没观察 `bridge`，
+        // 值变了它也不会重绘——内容换了、图标停在原地，正是用户截图里的样子。
+        //
+        // 所以这里直接数「图标栏 body 被求值了几次」（`Jank.tick(.sidebarRailBody)`，
+        // 由 `--sidebar-tab-report` 打开计数）。做法：**只写 bridge、不碰 AppState**，
+        // 这样除了「图标栏观察了 bridge」之外没有任何理由让它重绘。
+        //
+        // 基线取两次并比对空闲期增量：窗口/布局自身也可能带来重绘，把空闲期的
+        // 自然增量一并打出来，读数被污染时一眼能看出来，而不是让断言侥幸通过。
+        try? await Task.sleep(nanoseconds: 600_000_000)
+        let target = tabs.first(where: { $0 != bridge.sidebarTab }) ?? tabs[0]
+        let idleStart = JankTally.shared.snapshot()[.sidebarRailBody] ?? 0
+        try? await Task.sleep(nanoseconds: 300_000_000)
+        let idleEnd = JankTally.shared.snapshot()[.sidebarRailBody] ?? 0
+        bridge.sidebarTab = target
+        try? await Task.sleep(nanoseconds: 450_000_000)
+        let afterWrite = JankTally.shared.snapshot()[.sidebarRailBody] ?? 0
+        NSLog("[Lumen][sidebar-tab] 图标栏 body 求值：空闲基线 \(idleEnd)"
+              + "（此前 300ms 自然增量 \(idleEnd - idleStart)）"
+              + " → 只写 bridge.sidebarTab=\(target.rawValue) 之后 \(afterWrite)"
+              + "（增量 \(afterWrite - idleEnd)）")
+        check("只改 bridge.sidebarTab（不碰 AppState）也会让图标栏重绘",
+              afterWrite - idleEnd >= 1,
+              "图标栏没有跟着 bridge 重绘 —— 它的选中态读的是 bridge.sidebarTab，"
+                  + "却不观察 bridge，于是「内容换页签、图标不跟帖」")
+
+        NSLog("[Lumen][sidebar-tab] 自检：通过 \(passed) 项，失败 \(failures.count) 项"
+              + (failures.isEmpty ? " ✅" : " ❌ " + failures.joined(separator: "；")))
     }
 
     /// 自检：验证「从系统那一侧退出全屏」能把沉浸状态带回来。

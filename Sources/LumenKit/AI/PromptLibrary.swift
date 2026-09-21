@@ -21,8 +21,8 @@ public enum AITask: Sendable, Equatable {
         case .explain:            return "解释"
         case .translate:          return "翻译"
         case .ask:                return "提问"
-        case .summarize(.currentUnit):     return "总结本节"
-        case .summarize(.wholeDocument):   return "总结全书"
+        case .summarize(.currentUnit):     return "总结当前页/章"
+        case .summarize(.wholeDocument):   return "总结全文"
         case .custom:             return "自定义"
         }
     }
@@ -45,10 +45,13 @@ public enum PromptLibrary {
     ///   而不是替换默认提示——这一点与 `template` 的整段替换语义刻意不同：
     ///   默认提示里的防幻觉、要引用、禁客套话这几条是阅读场景的地基，
     ///   换一个角色不该把它们拆掉。角色改变的是「谁在读」，不是「能不能编」。
+    /// - Parameter skills: 技能库。Agent 上只存技能 id，光给 `agent` 拼不出技能要求，
+    ///   必须把库一起传进来（见下面的兜底日志）。
     public static func systemPrompt(
         readerPersona: String = "",
         template: PromptTemplate? = nil,
-        agent: AgentConfig? = nil
+        agent: AgentConfig? = nil,
+        skills: [AgentSkill] = []
     ) -> String {
         var base: [String]
 
@@ -64,7 +67,14 @@ public enum PromptLibrary {
             base = defaultSystemLines(readerPersona: readerPersona)
         }
 
-        if let section = agent?.promptSection, !section.isEmpty {
+        // 传了 Agent 却没传技能库 = 调用方漏了一步。技能的**全文只在技能库里**，
+        // 这样拼出来的系统提示会静默变短（角色还在、技能没了），界面上完全看不出来，
+        // 所以在出错的地方喊一声。
+        if let agent, !agent.skills.isEmpty, skills.isEmpty {
+            NSLog("[Lumen][prompt] 传了 Agent 但没传技能库，技能段落为空：agent=\(agent.name)")
+        }
+
+        if let section = agent?.promptSection(in: skills), !section.isEmpty {
             base.append("")
             base.append(section)
         }
@@ -131,11 +141,12 @@ public enum PromptLibrary {
         translateTarget: String = "简体中文",
         template: PromptTemplate? = nil,
         agent: AgentConfig? = nil,
+        skills: [AgentSkill] = [],
         webContext: String = ""
     ) -> [AIMessage] {
 
         var messages: [AIMessage] = [
-            .system(systemPrompt(readerPersona: memory, template: template, agent: agent))
+            .system(systemPrompt(readerPersona: memory, template: template, agent: agent, skills: skills))
         ]
 
         // 带上最近几轮，让「追问」能接上前文
@@ -161,7 +172,7 @@ public enum PromptLibrary {
                 material += "\n\n" + selection.contextBlock()
                 instruction = "请解释【选中内容】：它说的是什么，以及它在这段论述里起什么作用。"
             } else {
-                material += "\n\n【当前阅读位置的内容】\n" + truncate(context, limit: 6000)
+                material += "\n\n【用于回答的文档内容】\n" + truncate(context, limit: 6000)
                 instruction = "请解释这段内容的核心意思。"
             }
 
@@ -178,7 +189,7 @@ public enum PromptLibrary {
             if let selection {
                 material += "\n\n" + selection.contextBlock()
             } else {
-                material += "\n\n【当前阅读位置的内容】\n" + truncate(context, limit: 6000)
+                material += "\n\n【用于回答的文档内容】\n" + truncate(context, limit: 6000)
             }
             instruction = "读者的问题：\(question)"
 
@@ -193,6 +204,11 @@ public enum PromptLibrary {
         case .custom(let prompt):
             if let selection {
                 material += "\n\n" + selection.contextBlock()
+            } else if !context.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                // 自定义问题同样必须携带阅读范围。双文档对照和命令行
+                // `--ask` 都走 .custom；旧实现只在有选区时附原文，导致界面虽然
+                // 选了「双文档」，实际请求却只剩一句问题。
+                material += "\n\n【用于回答的文档内容】\n" + truncate(context, limit: 12_000)
             }
             instruction = prompt
         }

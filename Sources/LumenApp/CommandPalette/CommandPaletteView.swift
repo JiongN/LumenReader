@@ -368,12 +368,12 @@ struct CommandPaletteOverlay: View {
         ) { deliver(.translate) })
 
         items.append(PaletteCommand(
-            id: "ai.summarizeUnit", title: "总结本节", icon: "text.append", group: "AI",
+            id: "ai.summarizeUnit", title: "总结当前页/章", icon: "text.append", group: "AI",
             isEnabled: state.document != nil, keywords: "summarize 总结"
         ) { deliver(.summarize) })
 
         items.append(PaletteCommand(
-            id: "ai.summarizeAll", title: "总结全书", icon: "book.closed", group: "AI",
+            id: "ai.summarizeAll", title: "总结全文", icon: "book.closed", group: "AI",
             isEnabled: state.document != nil && bridge.slicesProvider != nil,
             keywords: "summarize whole 整本"
         ) { deliver(.summarizeAll) })
@@ -447,6 +447,8 @@ struct CommandPaletteOverlay: View {
             return isPDF ? "上一页" : "上一章"
         case .copyFullText:
             return state.document?.kind == .epub ? "复制全书为纯文本" : "复制全文为纯文本"
+        case .exportTranscript:
+            return action.title
         default:
             return action.title
         }
@@ -474,6 +476,7 @@ struct CommandPaletteOverlay: View {
         case .fontIncrease:   return "textformat.size.larger"
         case .fontDecrease:   return "textformat.size.smaller"
         case .exportSummary:  return "square.and.arrow.up"
+        case .exportTranscript: return "text.bubble"
         }
     }
 
@@ -483,7 +486,7 @@ struct CommandPaletteOverlay: View {
     /// 免得绕过面板里的上下文组装逻辑（全书检索、引用收集都长在那儿）。
     private func deliver(_ kind: AIRequest.Kind) {
         if !state.isAIPanelVisible {
-            withAnimation(DS.Motion.panel) { state.isAIPanelVisible = true }
+            state.setAIPanelVisible(true)
         }
         state.pendingAIRequest = AIRequest(kind: kind, selection: bridge.selection)
     }

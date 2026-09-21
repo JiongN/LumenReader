@@ -47,7 +47,23 @@ final class ReaderBridge: ObservableObject {
     @Published var metadata: DocumentMetadata = DocumentMetadata()
 
     /// 侧栏当前页签
-    @Published var sidebarTab: SidebarTab = .outline
+    @Published var sidebarTab: SidebarTab = .outline {
+        didSet {
+            guard sidebarTab != oldValue else { return }
+            sidebarTabRevision &+= 1
+        }
+    }
+
+    /// 侧栏页签的「切换代际」。每次 `sidebarTab` 变化都自增。
+    ///
+    /// 给 `SidebarColumn` 的页签内容当 `.id(_:)` 用：SwiftUI 对「同 identity 的视图
+    /// 用 `.transition(.opacity)` 切走后又切回」时，会把它当成**半挂载幽灵**——`onAppear`
+    /// 不重触发（实测踩过：`sidebarPane_outline` 探针切回后永久缺席，非动画切回也救不回）。
+    /// 挂上这个每次切换都变的 id 后，SwiftUI 被迫把页签内容当作全新视图重建，`onAppear`
+    /// 必定触发，布局探针在「切回同页签」时也能可靠重建。
+    /// 注意：这里动的是**视图内容**的 identity，探针**名字仍是静态的**——
+    /// 不落入「动态命名探针读数滞后一整步」那个坑。
+    @Published private(set) var sidebarTabRevision: Int = 0
 
     /// 批注变更计数。侧栏批注页签按它刷新——
     /// 批注存在两种后端里（PDF 写文件、EPUB 存数据目录），没有统一的「已变更」事件，
@@ -57,6 +73,11 @@ final class ReaderBridge: ObservableObject {
     /// 当前被「聚焦」的批注（正文里点中的、或刚新建的）。
     /// 侧栏批注页签据此滚动到对应行并高亮——双向联动的侧栏一侧。
     @Published var focusedAnnotationID: String?
+    @Published private(set) var annotationFocusRevision = 0
+    func focusAnnotation(_ id: String) {
+        focusedAnnotationID = id
+        annotationFocusRevision &+= 1
+    }
 
     /// 当前文档是否为「没有文本层」的扫描件。为真时阅读区会给 OCR 入口。
     @Published var isScannedDocument: Bool = false
@@ -68,12 +89,26 @@ final class ReaderBridge: ObservableObject {
     /// 与设置里的 `epubDoubleColumn`（请求值）是两个数：窗口窄于 760pt 时
     /// 双栏会被排版脚本压回单栏。界面上的单/双栏文案必须按生效值写。
     @Published var epubEffectiveColumns: Int = 1
+    /// PDF 翻译控制器由 PDFReaderView 创建，侧栏只观察并呈现。
+    @Published var pdfTranslationController: PDFTranslationController?
 
     // MARK: 命令（外壳 → 视图）
 
     /// 缩略图提供者（PDF 专用）
     let viewport = PDFViewportState()
+    var closeReader: (() -> Void)?
     var setPanelResizing: ((Bool) -> Void)?
+    /// 面板展开 / 收起过渡的观测点（`--panel-transition-report` 读它）。
+    ///
+    /// 之所以经桥回读而不让自检自己去拿控制器：面板可见性写在 `AppState`，
+    /// 而「动画期间 `autoScales` 到底是不是被钉住了」只有 PDF 控制器看得到；
+    /// 桥是这两层之间既有的唯一通道。
+    ///
+    /// 返回可选：EPUB 标签不装控制器、控制器又用 `weak` 持有，两种情况下
+    /// 「拿不到读数」是**真实结论**而不是要兜掉的异常——宁可让自检看到 nil 并报错，
+    /// 也别塞一个编造的默认值进去（那会造出恒真断言）。
+    var panelTransitionProbe: (() -> PDFController.PanelTransitionProbe?)?
+    var resetPanelTransitionTrace: (() -> Void)?
     var thumbnailProvider: ((Int, CGSize) -> NSImage?)?
     /// 卡顿自检（`--jank-report`）用：真正被滚动的那个视图（PDF 侧是 `PDFView`）。
     ///
@@ -142,6 +177,12 @@ final class ReaderBridge: ObservableObject {
     /// 在当前位置新建一条空白批注，返回清单条目（面板的「新建」按钮用）。
     /// 返回 nil 表示创建失败。
     var addNoteAtCurrentPosition: (() async -> AnnotationItem?)?
+    /// 把文件里已存在的本应用高亮矩形扩到整行（历史数据修正）。返回加宽的条数。
+    /// 只有 PDF 实现提供它；EPUB 侧为 nil（EPUB 的高亮存在数据目录里，
+    /// 本来就是按段落范围记的，不存在「半行」这回事）。
+    var normalizeAnnotationRows: (() -> Int)?
+    /// 侧栏译文 → PDF 正文：定位到段落几何并短暂选中原文。
+    var revealTranslationParagraph: ((PDFParagraph, Int) -> Void)?
 
     // MARK: 便利
 
@@ -164,8 +205,12 @@ final class ReaderBridge: ObservableObject {
         isScannedDocument = false
         ocrRunningPage = nil
         epubEffectiveColumns = 1
+        pdfTranslationController = nil
+        closeReader = nil
         thumbnailProvider = nil
         setPanelResizing = nil
+        panelTransitionProbe = nil
+        resetPanelTransitionTrace = nil
         viewport.snapshot = .init()
         viewport.pageAspects = []
         jankScrollSurface = nil
@@ -193,6 +238,8 @@ final class ReaderBridge: ObservableObject {
         revealAnnotation = nil
         updateAnnotationNote = nil
         addNoteAtCurrentPosition = nil
+        normalizeAnnotationRows = nil
+        revealTranslationParagraph = nil
         focusedAnnotationID = nil
     }
 }
@@ -203,6 +250,7 @@ enum SidebarTab: String, CaseIterable, Identifiable {
     case search
     case annotations
     case thumbnails
+    case translation
 
     var id: String { rawValue }
 
@@ -212,7 +260,7 @@ enum SidebarTab: String, CaseIterable, Identifiable {
     /// 都要它，各写一份的话新增页签时漏改一处，表现是「图标栏有五个、菜单里只有四个」。
     static func available(for kind: DocumentKind?) -> [SidebarTab] {
         kind == .pdf
-            ? [.outline, .smartOutline, .search, .annotations, .thumbnails]
+            ? [.outline, .smartOutline, .search, .annotations, .thumbnails, .translation]
             : [.outline, .smartOutline, .search, .annotations]
     }
 
@@ -225,6 +273,7 @@ enum SidebarTab: String, CaseIterable, Identifiable {
         case .search:       return "搜索"
         case .annotations:  return "批注"
         case .thumbnails:   return "页面"
+        case .translation:  return "翻译"
         }
     }
 
@@ -236,6 +285,7 @@ enum SidebarTab: String, CaseIterable, Identifiable {
         case .search:       return "全文搜索"
         case .annotations:  return "批注与高亮"
         case .thumbnails:   return "页面缩略图"
+        case .translation:  return "段落翻译"
         }
     }
 
@@ -246,6 +296,7 @@ enum SidebarTab: String, CaseIterable, Identifiable {
         case .search:       return "magnifyingglass"
         case .annotations:  return "square.and.pencil"
         case .thumbnails:   return "square.grid.2x2"
+        case .translation:  return "character.book.closed"
         }
     }
 }

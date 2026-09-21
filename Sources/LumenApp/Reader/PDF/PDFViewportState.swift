@@ -12,6 +12,10 @@ final class PDFViewportState: ObservableObject {
         var centerPage = 0
         var centerProgress: CGFloat = 0.5
     }
+    var onTrackingChange: (() -> Void)?
+    var isTracking = false {
+        didSet { if isTracking != oldValue { onTrackingChange?() } }
+    }
     @Published var snapshot = Snapshot()
     @Published var pageAspects: [CGFloat] = []
 }

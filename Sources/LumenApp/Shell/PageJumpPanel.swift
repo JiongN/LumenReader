@@ -8,8 +8,8 @@ import LumenKit
 /// 而跳页必须输入。所以自己做一个小卡片 + 轻遮罩，交互手感与命令面板保持一致。
 struct PageJumpPanel: View {
 
-    @EnvironmentObject private var state: AppState
-    @EnvironmentObject private var bridge: ReaderBridge
+    @ObservedObject var state: AppState
+    @ObservedObject var bridge: ReaderBridge
 
     @State private var input = ""
     @FocusState private var isFocused: Bool
@@ -91,7 +91,7 @@ struct PageJumpPanel: View {
         guard !trimmed.isEmpty, let number = Int(trimmed) else { return nil }
         let total = bridge.unitCount
         guard total > 0 else { return nil }
-        return min(max(number - 1, 0), total - 1)
+        return number <= 1 ? 0 : min(number, total) - 1
     }
 
     /// 输入过程中的提示语。空输入时不占地方。
@@ -100,7 +100,7 @@ struct PageJumpPanel: View {
         guard !trimmed.isEmpty else { return "输入序号后回车即可跳转" }
         guard let number = Int(trimmed) else { return "「\(trimmed)」不是数字" }
         guard let index = parsedIndex else { return "当前文档还没有可跳转的\(unitName)" }
-        if number - 1 != index {
+        if number != index + 1 {
             return "超出范围，将跳到第 \(index + 1) \(unitName)"
         }
         return "跳到第 \(number) \(unitName)"

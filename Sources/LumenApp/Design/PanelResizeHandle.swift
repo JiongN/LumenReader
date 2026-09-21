@@ -93,22 +93,23 @@ enum PanelWidthPolicy {
         sidebarVisible: Bool,
         aiPanelPreferred: Double?
     ) -> PanelLayout {
-        let aiRange = UISettings.PanelWidth.aiRange
-        let sidebarWidth = fixedSidebarWidth
+        let scale = Double(DS.Size.windowScale(for: containerWidth))
+        let aiRange = (UISettings.PanelWidth.aiRange.lowerBound * scale)...(UISettings.PanelWidth.aiRange.upperBound * scale)
+        let sidebarWidth = fixedSidebarWidth * scale
 
         // 容器宽度还没量到（首帧、视图尚未出现）时不做任何压缩：
         // 此时 containerWidth 是 0，按它算会把两侧压成 0pt，界面先闪一下空面板。
         guard containerWidth > 1 else {
             return PanelLayout(
                 sidebar: sidebarVisible ? sidebarWidth : nil,
-                aiPanel: aiPanelPreferred.map { clamped($0, to: aiRange) },
+                aiPanel: aiPanelPreferred.map { clamped($0 * scale, to: aiRange) },
                 reader: 0,
                 isReaderBelowGuarantee: false,
                 isSqueezedBelowMinimum: false
             )
         }
 
-        let railWidth: Double = showsRail ? Double(LeftRail.width) : 0
+        let railWidth: Double = showsRail ? Double(LeftRail.width) * scale : 0
         // 分隔线只算 AI 面板那一条（侧栏没有分隔线了）；handleWidth 现为 0，这一项恒为 0，
         // 保留算式是为了将来若又需要给分隔线留位时只改一处。
         let handleCount = aiPanelPreferred == nil ? 0 : 1
@@ -122,7 +123,7 @@ enum PanelWidthPolicy {
         var belowGuarantee = false
 
         if let wantedAI = aiPanelPreferred {
-            let wantAI = clamped(wantedAI, to: aiRange)
+            let wantAI = clamped(wantedAI * scale, to: aiRange)
             let remaining = available - (sidebar ?? 0)
             if remaining >= aiRange.lowerBound {
                 aiPanel = min(wantAI, remaining)
@@ -170,13 +171,14 @@ enum PanelWidthPolicy {
         showsRail: Bool,
         sidebarVisible: Bool
     ) -> Double {
+        let scale = Double(DS.Size.windowScale(for: containerWidth))
         let upper = UISettings.PanelWidth.aiRange.upperBound
         return resolve(
             containerWidth: containerWidth,
             showsRail: showsRail,
             sidebarVisible: sidebarVisible,
             aiPanelPreferred: upper
-        ).aiPanel ?? upper
+        ).aiPanel ?? upper * scale
     }
 
     private static func clamped(_ value: Double, to range: ClosedRange<Double>) -> Double {

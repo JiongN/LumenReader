@@ -64,6 +64,9 @@ struct EPUBReaderView: View {
         .onChange(of: reader.epubTranslateEnabled) { _, enabled in
             enabled ? startTranslation() : stopTranslation()
         }
+        .onReceive(controller.$chapterLoadRevision.dropFirst()) { _ in
+            refreshTranslationIfEnabled()
+        }
         .onDisappear {
             store?.flush()
             state.recent.updateProgress(
@@ -90,6 +93,7 @@ struct EPUBReaderView: View {
 
         do {
             let source = try await EPUBDocumentSource.open(url: document.url)
+            try Task.checkCancellation()
             self.source = source
 
             document.title = source.metadata.title.isEmpty
@@ -117,6 +121,8 @@ struct EPUBReaderView: View {
             bridge.currentUnitIndex = startChapter
             controller.load(source: source, startAt: startChapter, anchor: startAnchor)
             // isLoading 交给首次 progress 回调关闭——WebKit 首帧渲染完成才算真的可读
+        } catch is CancellationError {
+            return
         } catch {
             bridge.isLoading = false
             let message = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
@@ -132,13 +138,18 @@ struct EPUBReaderView: View {
         let progressThrottle = ProgressThrottle()
         let autoAdvanceGate = AutoAdvanceGate()
 
+        bridge.closeReader = { [weak controller, weak translation] in
+            store.flush()
+            translation?.stop()
+            controller?.webView.stopLoading()
+        }
         controller.onLoadError = { [weak bridge] message in
             bridge?.isLoading = false
             bridge?.loadError = message
         }
 
-        controller.onProgress = { [weak controller] chapter, count, chapterProgress, atEnd in
-            guard count > 0 else { return }
+        controller.onProgress = { [weak controller, weak bridge, weak state] chapter, count, chapterProgress, atEnd in
+            guard let bridge, let state, count > 0 else { return }
 
             bridge.isLoading = false
             bridge.currentUnitIndex = chapter
@@ -174,7 +185,8 @@ struct EPUBReaderView: View {
             }
         }
 
-        controller.onSelection = { (selection: ReaderSelection?) in
+        controller.onSelection = { [weak bridge] (selection: ReaderSelection?) in
+            guard let bridge else { return }
             // 与 PDF 侧同理：划词条自带 transition，但要有动画事务才会跑。
             withAnimation(DS.Motion.reveal) {
                 bridge.selection = selection
@@ -183,17 +195,15 @@ struct EPUBReaderView: View {
 
         // 来源标记（拖动 / 单击）。与选区分开来、先于选区上报，一起写进桥：
         // 划词条只在 `isUsable && selectionFromDrag` 时出现（单击不弹）。
-        controller.onSelectionSourceChange = { fromDrag in
-            bridge.selectionFromDrag = fromDrag
+        controller.onSelectionSourceChange = { [weak bridge] fromDrag in
+            bridge?.selectionFromDrag = fromDrag
         }
 
         // 生效栏数由排版脚本回传（窄窗口会把双栏压回单栏），外壳的文案据此写。
-        controller.onEffectiveColumns = { effective, _ in
-            bridge.epubEffectiveColumns = effective
+        controller.onEffectiveColumns = { [weak bridge] effective, _ in
+            bridge?.epubEffectiveColumns = effective
         }
 
-        // 换章之后 DOM 是新的：译文块与下标标记都没了，开着开关就重翻一遍。
-        controller.onChapterDidLoad = { self.refreshTranslationIfEnabled() }
 
         translation.onFinish = { [weak state] failed in
             if failed > 0 {
@@ -383,7 +393,7 @@ struct EPUBReaderView: View {
         }
         // 正文里点高亮 → 侧栏聚焦对应行（与 PDF 侧的 onAnnotationTapped 对应）
         controller.onHighlightTapped = { [weak bridge, weak state] id in
-            bridge?.focusedAnnotationID = id
+            bridge?.focusAnnotation(id)
             state?.revealSidebar(tab: .annotations)
         }
     }
@@ -417,14 +427,25 @@ struct EPUBReaderView: View {
         }
 
         bridge.slicesProvider = {
-            source.chapters.map { chapter in
-                (
-                    label: chapter.displayTitle,
-                    text: source.text(
+            guard !source.chapters.isEmpty else { return [] }
+            return SummarySlicePlanner.ranges(itemCount: source.chapters.count).map { range in
+                let group = Array(source.chapters[range])
+                let chapterBudget = SummarySlicePlanner.characterBudget(
+                    itemCount: group.count,
+                    minimum: 600
+                )
+                let text = group.map { chapter in
+                    let body = source.text(
                         around: .epub(chapterIndex: chapter.index, anchor: "", charOffset: 0),
                         radius: 0
                     )
-                )
+                    return "【\(chapter.displayTitle)】\n"
+                        + PromptLibrary.truncate(body, limit: chapterBudget)
+                }.joined(separator: "\n\n")
+                let label = group.count == 1
+                    ? group[0].displayTitle
+                    : "\(group.first!.displayTitle) – \(group.last!.displayTitle)"
+                return (label: label, text: text)
             }
         }
 

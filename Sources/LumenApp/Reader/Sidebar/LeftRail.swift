@@ -18,12 +18,13 @@ struct LeftRail: View {
     /// 图标栏宽度。52pt 是「看着窄、点得中」的折中：
     /// 44pt 时手指（触控板光标）落在两个图标之间的空隙概率明显上升，
     /// 60pt 以上则在 920pt 的最小窗口里开始明显吃掉阅读区。
-    static let width: CGFloat = 52
+    static let width: CGFloat = 56
 
     let tabs: [SidebarTab]
     let activeTab: SidebarTab
     /// 内容面板当前是否展开
     let isExpanded: Bool
+    var layoutScale: CGFloat = 1
     let onSelect: (SidebarTab) -> Void
 
     @State private var hoveredTab: SidebarTab?
@@ -37,7 +38,7 @@ struct LeftRail: View {
         }
         .padding(.top, DS.Space.m)
         .padding(.bottom, DS.Space.s)
-        .frame(width: Self.width)
+        .frame(width: Self.width * layoutScale)
         // 右侧一条分隔线，把图标栏与内容面板分开。
         // 用 overlay 而不是在图标栏右侧再叠一个 1pt 的 Rectangle：
         // 少一层布局视图，宽度算式（PanelWidthPolicy）里也就少一个要减的量。
@@ -63,18 +64,18 @@ struct LeftRail: View {
                     // 环点字形与工具栏同形；颜色跟随页签状态，
                     // 不再单独调透明度（单色字形的层级靠颜色本身表达）
                     AIIcon(
-                        size: 14,
+                        size: 16,
                         color: isActive
                             ? DS.Palette.accent
                             : (isHovered ? DS.Palette.textPrimary : DS.Palette.textSecondary)
                     )
                 } else {
                     Image(systemName: tab.systemImage)
-                        .font(DS.Typo.ui(size: 14.5, weight: isActive ? .semibold : .regular))
+                        .font(DS.Typo.ui(size: 15.5, weight: isActive ? .semibold : .regular))
                 }
             }
             .foregroundStyle(iconColor(isActive: isActive, isHovered: isHovered))
-            .frame(width: 36, height: 34)
+            .frame(width: 40 * layoutScale, height: 38 * layoutScale)
             .contentShape(RoundedRectangle(cornerRadius: DS.Radius.m, style: .continuous))
             .background(
                 RoundedRectangle(cornerRadius: DS.Radius.m, style: .continuous)
@@ -118,5 +119,44 @@ struct LeftRail: View {
         if isActive { return DS.Palette.accentSoft }
         if isHovered { return DS.Palette.surfaceRaised.opacity(0.7) }
         return .clear
+    }
+}
+
+/// 把图标栏接到**它自己观察的那份 bridge** 上。
+///
+/// 存在的理由（这是个真 bug 的修复，不是包装）：图标栏的选中态读
+/// `bridge.sidebarTab`，而 `ReaderContainerView` 只观察 `session` /
+/// `AppState` / `SettingsStore`，**不观察 `ReaderBridge`**。于是「侧栏已经展开、
+/// 只切换到另一个页签」这条最常见的路径上——`bridge.sidebarTab` 变了、
+/// `AppState` 什么都没变——容器不会重绘，**高亮就停在原来那一格**，
+/// 而内容面板（`SidebarColumn` 自己 `@EnvironmentObject bridge`）却真的换了。
+/// 用户看到的正是「图标不跟帖」：内容换、图标不动。
+///
+/// 为什么不在 `ReaderContainerView` 上加 `@EnvironmentObject bridge`：
+/// bridge 的 `@Published` 里还有视口快照、选区这类**每帧都在变**的字段，
+/// 让整个容器观察它会把阅读区（PDFKit / WKWebView）一起拖进每帧重排——
+/// 项目里已经为这个坑把视口 snapshot 抽成 `Equatable` 子视图了。
+/// 观察点收在这一层：这里只有 5 枚按钮，重绘代价可以忽略。
+struct SidebarRail: View {
+
+    @EnvironmentObject private var bridge: ReaderBridge
+
+    let tabs: [SidebarTab]
+    /// 内容面板是否展开。由容器传入（容器自己观察 `AppState`，这一项本来就跟着刷新）。
+    let isExpanded: Bool
+    var layoutScale: CGFloat = 1
+    let onSelect: (SidebarTab) -> Void
+
+    var body: some View {
+        // 计数写在 body 里而不是做成修饰符——见 `Jank` 的注释（修饰符会被复用、只跑一次）。
+        // `--sidebar-tab-report` 靠它证明「图标栏确实跟着 bridge 重绘了」。
+        let _ = Jank.tick(.sidebarRailBody)
+        LeftRail(
+            tabs: tabs,
+            activeTab: bridge.sidebarTab,
+            isExpanded: isExpanded,
+            layoutScale: layoutScale,
+            onSelect: onSelect
+        )
     }
 }

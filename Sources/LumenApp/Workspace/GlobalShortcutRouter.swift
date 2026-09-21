@@ -58,7 +58,13 @@ final class GlobalShortcutRouter {
             }
             // 命中用户配置的组合即整包吞掉，不取决于 isEnabled；否则禁用菜单项
             // （如欢迎页无文档时 toggleSidebar 的 keyEquivalent 禁用）会让系统响冲突音。
-            if action.isEnabled(in: workspace) { action.run(workspace) }
+            if action.isEnabled(in: workspace) {
+                action.run(workspace)
+            } else if let hint = action.disabledHint {
+                // 只有主动声明了「禁用原因」的动作才弹提示（如 PDF 下的字号调整），
+                // 其余禁用项维持原样——把「假可用被换成哑巴」变成「有解释的静默」。
+                workspace.showToast(hint)
+            }
             return nil
         }
         return event

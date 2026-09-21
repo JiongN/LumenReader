@@ -12,6 +12,7 @@ import PDFKit
 final class PDFController: NSObject, ObservableObject {
 
     let view: AnnotatedPDFView
+    private let readingDocumentDelegate = ReadingPDFDocumentDelegate()
     private(set) var document: PDFDocument?
     private(set) var documentURL: URL?
     private(set) var pageCount = 0
@@ -22,12 +23,11 @@ final class PDFController: NSObject, ObservableObject {
     private var viewportObserver: NSObjectProtocol?
     private var viewportWork: DispatchWorkItem?
     private var viewportDocumentID = UUID()
-    private var appearanceTheme = ReadingTheme.paper
-    private var originalColors = false
     private var resizeAnchor: (PDFPage, CGPoint, Bool)?
 
     func connectViewport(_ state: PDFViewportState) {
         viewportState = state
+        state.onTrackingChange = { [weak self] in self?.scheduleViewport() }
         viewportDocumentID = UUID()
         state.pageAspects = (0..<pageCount).map { index in
             guard let page = document?.page(at: index) else { return 1.4 }
@@ -42,12 +42,11 @@ final class PDFController: NSObject, ObservableObject {
                 MainActor.assumeIsolated { self?.scheduleViewport() }
             }
         }
-        applyPageFilter()
         publishViewport()
     }
 
     private func scheduleViewport() {
-        guard viewportWork == nil else { return }
+        guard viewportState?.isTracking == true, viewportWork == nil else { return }
         let work = DispatchWorkItem { [weak self] in
             guard let self else { return }
             self.viewportWork = nil
@@ -76,16 +75,78 @@ final class PDFController: NSObject, ObservableObject {
         if state.snapshot != snapshot { state.snapshot = snapshot }
     }
 
+    /// 面板展开 / 收起过渡的观测点（`--panel-transition-report` 读它）。
+    ///
+    /// 记在 PDFController 而不是 AppState：要断言的现象——`autoScales` 在动画期间的实际取值、
+    /// 滚动锚点有没有漂——只有这里看得到。AppState 那边最多能证明「方法被调用了」，
+    /// 证明不了「适宽倍率被钉住了」。
+    struct PanelTransitionTrace {
+        var enters = 0
+        var exits = 0
+        /// 每次进入「调整中」时 autoScales 的**实际值**（期望一律 false）
+        var autoScalesAtEnter: [Bool] = []
+        /// 每次退出时恢复用的目标值（期望等于进入前的实际值）
+        var restoreTargets: [Bool] = []
+        var anchorAtEnter: [(page: Int, progress: Double)] = []
+        var anchorAtExit: [(page: Int, progress: Double)] = []
+        /// 进入请求因「已经在调整中 / 取不到锚点页」被挡掉的次数
+        var ignoredEnters = 0
+    }
+    private(set) var panelTrace = PanelTransitionTrace()
+
+    /// 自检读的**一次性快照**：累计读数 + 此刻的 `autoScales`。
+    ///
+    /// 做成快照而不是暴露两个桥闭包：自检要的是「动画进行中它到底是什么值」，
+    /// 这必须与累计读数在同一瞬间取到，分两次调用可能跨过完成回调。
+    struct PanelTransitionProbe {
+        var trace: PanelTransitionTrace
+        var autoScalesNow: Bool
+    }
+
+    func panelTransitionProbe() -> PanelTransitionProbe {
+        PanelTransitionProbe(trace: panelTrace, autoScalesNow: view.autoScales)
+    }
+
+    func resetPanelTrace() { panelTrace = PanelTransitionTrace() }
+
+    /// 当前滚动锚点：可见区中心落在哪一页、页内归一化位置多少。
+    /// 与 `publishViewport()` 同一套算法——断言量的必须是用户看到的那件事。
+    func panelAnchor() -> (page: Int, progress: Double)? {
+        guard let doc = document else { return nil }
+        let visible = view.bounds
+        guard let page = view.page(for: CGPoint(x: visible.midX, y: visible.midY), nearest: true) else { return nil }
+        let rect = view.convert(page.bounds(for: .cropBox), from: page)
+        let fraction = view.isFlipped
+            ? (visible.midY - rect.minY) / max(1, rect.height)
+            : (rect.maxY - visible.midY) / max(1, rect.height)
+        return (doc.index(for: page), min(1, max(0, fraction)))
+    }
+
     func setPanelResizing(_ active: Bool) {
+        // 只在跑面板过渡自检时留痕：这条路径平时每拖一次分隔线会走两回，
+        // 无条件打印会把正常使用者的日志灌满。
+        if LaunchOptions.panelTransitionReport {
+            NSLog("%@", "[Lumen][panel] setPanelResizing(\(active)) 被调用"
+                  + "：anchor=\(resizeAnchor == nil ? "无" : "有") autoScales=\(view.autoScales)")
+        }
         if active {
             guard resizeAnchor == nil,
-                  let page = view.page(for: CGPoint(x: view.bounds.midX, y: view.bounds.midY), nearest: true) else { return }
+                  let page = view.page(for: CGPoint(x: view.bounds.midX, y: view.bounds.midY), nearest: true) else {
+                panelTrace.ignoredEnters += 1
+                return
+            }
             let point = view.convert(CGPoint(x: view.bounds.midX, y: view.bounds.midY), to: page)
             resizeAnchor = (page, point, view.autoScales)
+            // 记读数必须在把 autoScales 改掉**之前**
+            panelTrace.enters += 1
+            panelTrace.autoScalesAtEnter.append(view.autoScales)
+            if let anchor = panelAnchor() { panelTrace.anchorAtEnter.append(anchor) }
             view.autoScales = false
         } else {
             guard let (page, point, automatic) = resizeAnchor else { return }
             resizeAnchor = nil
+            panelTrace.exits += 1
+            panelTrace.restoreTargets.append(automatic)
             DispatchQueue.main.async { [weak self] in
                 guard let self, self.resizeAnchor == nil else { return }
                 self.view.autoScales = automatic
@@ -97,17 +158,11 @@ final class PDFController: NSObject, ObservableObject {
                     clip.scroll(to: CGPoint(x: target.x - clip.bounds.width / 2, y: target.y - clip.bounds.height / 2))
                     scroll.reflectScrolledClipView(clip)
                 }
+                if let anchor = self.panelAnchor() { self.panelTrace.anchorAtExit.append(anchor) }
                 self.scheduleViewport()
             }
         }
     }
-
-    private func applyPageFilter() {
-        guard let content = view.documentView else { return }
-        content.wantsLayer = true
-        content.contentFilters = originalColors ? [] : PDFReadingAppearance.filter(theme: appearanceTheme).map { [$0] } ?? []
-    }
-
 
     /// OCR 结果缓存。按页存，识别过一次就不再重复花钱——
     /// 同一页在 AI 上下文、复制、整书总结这几条路径上会被反复取用。
@@ -188,12 +243,47 @@ final class PDFController: NSObject, ObservableObject {
     }
 
     func applyAppearance(theme: ReadingTheme, brightness: Double, original: Bool = false) {
-        appearanceTheme = theme
-        originalColors = original
         let base = NSColor(hex: theme.surfaceHex)
         let clamped = min(max(brightness, 0.4), 1.0)
-        view.backgroundColor = base.blended(withFraction: 1 - clamped, of: .black) ?? base
-        applyPageFilter()
+        let target = (base.blended(withFraction: 1 - clamped, of: .black) ?? base).usingColorSpace(.sRGB) ?? base
+        view.backgroundColor = target
+        guard readingDocumentDelegate.tone.update(original ? nil : PDFReadingTone(theme: theme)),
+              let document else { return }
+        // Recreate native tiles only when the theme changes, retaining position and selection.
+        // setNeedsDisplay on the outer PDFView does not invalidate PDFKit's cached page tiles.
+        let destination = view.currentDestination
+        let scrollOrigin = view.documentView?.enclosingScrollView?.contentView.bounds.origin
+        let selection = view.currentSelection
+        let automatic = view.autoScales
+        let scale = view.scaleFactor
+        suppressCallbacks = true
+        view.document = nil
+        view.document = document
+        view.autoScales = automatic
+        view.layoutDocumentView()
+        view.scaleFactor = automatic ? view.scaleFactorForSizeToFit : scale
+        if let scrollOrigin, let scrollView = view.documentView?.enclosingScrollView {
+            scrollView.contentView.scroll(to: scrollOrigin)
+            scrollView.reflectScrolledClipView(scrollView.contentView)
+        } else if let destination, let page = destination.page {
+            let restored = PDFDestination(page: page, at: destination.point)
+            restored.zoom = view.scaleFactor
+            view.go(to: restored)
+        }
+        view.setCurrentSelection(selection, animate: false)
+        // PDFKit queues an initial scroll after assigning the document; restore after that.
+        DispatchQueue.main.async { [weak self, weak document] in
+            guard let self, let document, self.document === document else { return }
+            if let destination { self.view.go(to: destination) }
+            self.view.autoScales = automatic
+            self.view.scaleFactor = automatic ? self.view.scaleFactorForSizeToFit : scale
+            if let scrollOrigin, let scrollView = self.view.documentView?.enclosingScrollView {
+                scrollView.contentView.scroll(to: scrollOrigin)
+                scrollView.reflectScrolledClipView(scrollView.contentView)
+            }
+            self.suppressCallbacks = false
+            if let state = self.viewportState { self.connectViewport(state) }
+        }
     }
 
     func apply(flowMode: ReadingFlowMode) {
@@ -215,14 +305,7 @@ final class PDFController: NSObject, ObservableObject {
                 // 搜索临时高亮与便签自动带的 Popup 影子不是批注条目，点了不响应
                 guard annotation.userName != Self.searchHighlightMarker,
                       annotation.lumenTypeName != "Popup" else { return }
-                guard let doc = self.document else { return }
-                for index in 0..<doc.pageCount {
-                    guard let page = doc.page(at: index) else { continue }
-                    if page.annotations.contains(annotation) {
-                        self.onAnnotationTapped?(Self.entryID(annotation, pageIndex: index))
-                        break
-                    }
-                }
+                self.didTapAnnotation(annotation)
             }
         })
 
@@ -260,6 +343,7 @@ final class PDFController: NSObject, ObservableObject {
     @discardableResult
     func load(url: URL) -> PDFDocument? {
         guard let doc = PDFDocument(url: url) else { return nil }
+        doc.delegate = readingDocumentDelegate
         suppressCallbacks = true
         lastPublishedPage = nil
         document = doc
@@ -275,6 +359,16 @@ final class PDFController: NSObject, ObservableObject {
 
     func unload() {
         suppressCallbacks = true
+        viewportWork?.cancel()
+        viewportWork = nil
+        if let viewportObserver { NotificationCenter.default.removeObserver(viewportObserver) }
+        viewportObserver = nil
+        resizeAnchor = nil
+        if let window = view.window, let responder = window.firstResponder as? NSView,
+           responder === view || responder.isDescendant(of: view) {
+            window.makeFirstResponder(nil)
+        }
+        view.clearSelection()
         view.document = nil
         document = nil
         documentURL = nil
@@ -402,6 +496,21 @@ final class PDFController: NSObject, ObservableObject {
         go(to: locator.pageIndex)
     }
 
+    /// 侧栏译文与正文联动。按当前页片段定位，并用 PDFKit 原生选区暂时标出原文；
+    /// 不创建批注、不写回文件。页面坐标直接交给 `PDFView.go(to:on:)`，旋转页也由 PDFKit 转换。
+    func revealTranslationParagraph(_ paragraph: PDFParagraph, preferredPage: Int) {
+        guard let doc = document else { return }
+        let fragment = paragraph.fragment(on: preferredPage) ?? paragraph.fragments.first
+        guard let fragment, let page = doc.page(at: fragment.pageIndex) else { return }
+        view.go(to: page)
+        view.layoutDocumentView()
+        view.go(to: fragment.bounds.insetBy(dx: -18, dy: -32), on: page)
+        if let selection = page.selection(for: fragment.bounds), !(selection.string ?? "").isEmpty {
+            view.setCurrentSelection(selection, animate: false)
+        }
+        publishPosition()
+    }
+
     func goToNextPage() {
         guard let doc = document else { return }
         let next = currentPageIndex + 1
@@ -515,7 +624,12 @@ final class PDFController: NSObject, ObservableObject {
         searchAnnotations.removeAll()
     }
 
-    private static let searchHighlightMarker = "LumenSearch"
+    /// 搜索临时高亮的作者标记。
+    ///
+    /// `nonisolated`：批注清单的枚举是 `nonisolated` 的（自检要在独立 PDFDocument 上
+    /// 用同一套 id 对账），它要读这个常量。它是一个 `String` 字面量，跨隔离读是安全的；
+    /// 不加会因为「主 actor 隔离的属性被非隔离上下文引用」而在 Swift 6 语言模式下报错。
+    nonisolated private static let searchHighlightMarker = "LumenSearch"
 
     private static func snippet(selection: PDFSelection, pageText: String, radius: Int = 48) -> String {
         guard let match = selection.string, !pageText.isEmpty,
@@ -738,7 +852,11 @@ final class PDFController: NSObject, ObservableObject {
 
         context.scaleBy(x: effectiveScale, y: effectiveScale)
         context.translateBy(x: -bounds.origin.x, y: -bounds.origin.y)
-        page.draw(with: .mediaBox, to: context)
+        if let readingPage = page as? ReadingPDFPage {
+            readingPage.drawOriginal(with: .mediaBox, to: context)
+        } else {
+            page.draw(with: .mediaBox, to: context)
+        }
 
         return context.makeImage()
     }
@@ -748,35 +866,106 @@ final class PDFController: NSObject, ObservableObject {
     /// 我们创建的批注都带这个作者标记，与搜索高亮、外来批注（Preview / Acrobat 画的）区分。
     private static let annotationAuthor = "Lumen"
 
+    /// 把「划线片段」扩成它所在的**整行**。
+    ///
+    /// 为什么必须扩：`selectionsByLine()` 给出的矩形只是**选中片段**的范围。用户从词中间
+    /// 起划、在句中收手时，这段矩形就只有半行——画出来的高亮从词中间断开，清单里的引文
+    /// 也只剩「人）属于哪个群体」这种断头句（实测用户库里 13 条高亮里有 3 条是这样）。
+    /// 批注的语义是「这一行」，不是「这几个字」。
+    ///
+    /// 取整行用整页宽的窄带交给 PDFKit 反查，**不能自己在 `page.string` 里找行边界**：
+    /// 同一页出现多个相同文字时字符串查找会选错位置，而矩形探测自带位置信息。
+    ///
+    /// 竖直方向只取行高的中段（±0.2 起、0.6 高）：相邻行间距小时，压满行高的窄带会把
+    /// 上下相邻行的字一起带进来。
+    ///
+    /// 三道守卫，任一不过就返回 nil（由调用方回退到原片段，保证扫描件与异常版面不会把高亮弄丢）：
+    /// 1. 竖直带必须与片段有足够重叠（真在同一行）；
+    /// 2. 结果高度不得明显大于片段（防 API 把两行并成一行）；
+    /// 3. 结果必须真的**包含**片段（防止给出别的行）。
+    ///
+    /// - Important: **未做分栏检测。** 实测用户库中的文档均为单栏（把页渲染成像素、
+    ///   按列统计墨迹密度，中央 30% 区域密度 64~84 / 峰值 170~240，剖面均匀、无栏沟），
+    ///   整页宽带在那里就是正解。若将来遇到**真正的**双栏 PDF，本扩展可能跨栏。
+    ///   留这条边界是因为本机没有可验证的双栏样本，做一个验不了的检测器等于没做。
+    nonisolated static func fullRowBounds(for fragment: CGRect, on page: PDFPage) -> CGRect? {
+        let media = page.bounds(for: .mediaBox)
+        guard media.width > 1, fragment.height > 0.5 else { return nil }
+        let band = CGRect(
+            x: media.minX,
+            y: fragment.minY + fragment.height * 0.2,
+            width: media.width,
+            height: fragment.height * 0.6
+        )
+        // `page.selection(for:)` 没压到文字时返回的是**空选区而不是 nil**（项目里踩过这个坑）
+        guard let selection = page.selection(for: band),
+              let text = selection.string,
+              !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+        let row = selection.bounds(for: page)
+        guard row.width > 0.5, row.height > 0.5 else { return nil }
+
+        // 守卫 1：竖直方向确实在同一行
+        let overlap = min(row.maxY, fragment.maxY) - max(row.minY, fragment.minY)
+        guard overlap > fragment.height * 0.4 else { return nil }
+        // 守卫 2：高度不能明显超出片段（否则多半把邻行并进来了）
+        guard row.height < fragment.height * 1.8 else { return nil }
+        // 守卫 3：必须真的包含原片段
+        guard row.minX <= fragment.minX + 1, row.maxX >= fragment.maxX - 1 else { return nil }
+        return row
+    }
+
+    /// `NSColor` → `#RRGGBB`。取不到 sRGB 表示时返回 nil。
+    nonisolated static func hexString(from color: NSColor?) -> String? {
+        guard let c = color?.usingColorSpace(.sRGB) else { return nil }
+        let r = Int((c.redComponent * 255).rounded())
+        let g = Int((c.greenComponent * 255).rounded())
+        let b = Int((c.blueComponent * 255).rounded())
+        return String(format: "#%02X%02X%02X", r, g, b)
+    }
+
+    /// 同一页放便签图标时，找一个不与已有 Text 批注重叠的落点。
+    ///
+    /// 原本固定放在 `(width-44, height-44)`，于是**同一页的每条便签原点完全相同**，
+    /// 而 `entryID` 正是「页号 + 原点 + 类型」——同页两条便签必然撞 id，
+    /// 清单里点哪条都跳到第一条。这里按 30pt 逐级下移找空位。
+    nonisolated static func freeNoteIconOrigin(on page: PDFPage, existing: [PDFAnnotation]) -> CGPoint {
+        let pageBounds = page.bounds(for: .mediaBox)
+        let taken = Set(existing
+            .filter { $0.lumenTypeName == "Text" }
+            .map { Int($0.bounds.origin.y.rounded()) })
+        var y = pageBounds.height - 44
+        while taken.contains(Int(y.rounded())) && y > 40 {
+            y -= 30
+        }
+        return CGPoint(x: pageBounds.width - 44, y: y)
+    }
+
     /// 高亮当前选区。
     ///
     /// - Parameter note: 批注正文，可空——纯高亮没有正文。
-    /// 跨页选区按行拆开画：`selectionsByLine()` 给出的每行 bounds 才是能贴住文字的矩形。
+    /// 每页使用一个标准 QuadPoints 高亮，跨行仍属于同一条批注。
     /// - Returns: 是否至少画上了一处（扫描件上没有文本层时选区是空的）。
     @discardableResult
     func addHighlight(fromCurrentSelection note: String) -> Bool {
         guard let selection = view.currentSelection, document != nil else { return false }
 
-        let stamp = Date()
-        var added = 0
-        for line in selection.selectionsByLine() {
-            guard let page = line.pages.first else { continue }
-            let bounds = line.bounds(for: page)
-            guard bounds.width > 0.5, bounds.height > 0.5 else { continue }
-
-            let annotation = PDFAnnotation(bounds: bounds, forType: .highlight, withProperties: nil)
-            annotation.color = NSColor.systemYellow.withAlphaComponent(0.45)
-            annotation.contents = note
-            annotation.userName = Self.annotationAuthor
-            annotation.modificationDate = stamp
-            page.addAnnotation(annotation)
-            added += 1
-        }
-
-        guard added > 0 else { return false }
+        guard addMarkup(selection: selection, note: note, color: NSColor.systemYellow.withAlphaComponent(0.45)) else { return false }
         // 选区已被「用掉」：高亮之后还留着蓝色选区会让人以为没生效
         view.setCurrentSelection(nil, animate: false)
         return saveToFile()
+    }
+
+    private func addMarkup(selection: PDFSelection, note: String, color: NSColor) -> Bool {
+        var added = false
+        for page in selection.pages {
+            let rectangles = selection.selectionsByLine().filter { $0.pages.contains(page) }
+                .map { $0.bounds(for: page) }
+            guard let annotation = PDFAnnotationGeometry.makeHighlight(rectangles: rectangles,
+                note: note, color: color, author: Self.annotationAuthor) else { continue }
+            page.addAnnotation(annotation)
+            added = true
+        }
+        return added
     }
 
     /// 在指定页加一条纯文字批注（页面右上角的便签图标，点开看内容）。
@@ -794,25 +983,15 @@ final class PDFController: NSObject, ObservableObject {
 
         // 锚文本定位：在**本页**范围内找，避免全书 findString 把别的页的同名句抢走
         if trimmedAnchor.count >= 6, let anchorSelection = selection(of: trimmedAnchor, on: pageIndex) {
-            var added = 0
-            for line in anchorSelection.selectionsByLine() {
-                guard let linePage = line.pages.first else { continue }
-                let bounds = line.bounds(for: linePage)
-                guard bounds.width > 0.5, bounds.height > 0.5 else { continue }
-                let annotation = PDFAnnotation(bounds: bounds, forType: .highlight, withProperties: nil)
-                annotation.color = NSColor.systemTeal.withAlphaComponent(0.40)
-                annotation.contents = body
-                annotation.userName = Self.annotationAuthor
-                annotation.modificationDate = stamp
-                linePage.addAnnotation(annotation)
-                added += 1
+            if addMarkup(selection: anchorSelection, note: body, color: NSColor.systemTeal.withAlphaComponent(0.40)) {
+                return saveToFile()
             }
-            if added > 0 { return saveToFile() }
         }
 
-        // 页面便签：放在右上角空白处，图标式批注不遮正文
-        let pageBounds = page.bounds(for: .mediaBox)
-        let iconBounds = CGRect(x: pageBounds.width - 44, y: pageBounds.height - 44, width: 24, height: 24)
+        // 页面便签：放在右上角空白处，图标式批注不遮正文。
+        // 落点要与本页已有便签错开——同页两条便签原点相同会让它们的清单 id 撞车。
+        let origin = Self.freeNoteIconOrigin(on: page, existing: page.annotations)
+        let iconBounds = CGRect(x: origin.x, y: origin.y, width: 24, height: 24)
         let annotation = PDFAnnotation(bounds: iconBounds, forType: .text, withProperties: nil)
         annotation.contents = body
         annotation.userName = Self.annotationAuthor
@@ -922,116 +1101,225 @@ final class PDFController: NSObject, ObservableObject {
     ///
     /// 逐页扫。批注量与页数都大时可能上百毫秒，因此做成 async，
     /// 调用方（侧栏列表）挂到任务里跑，每 24 页让一次主线程。
+    ///
+    /// **顺序按内容位置排**（页号升序 → 页内自上而下 → 从左到右），不再按创建时间倒序。
+    /// 原来的「什么时候划的」排法在真实文件上把清单打成一串碎片——
+    /// 实测用户那份 31 页论文返回的是 `p16 p16 p14 p8 p8 p8 p7 p7 p7 p5 p5 p3 p3 p3`，
+    /// 页码来回跳，读者没法用它对着正文从头看。
     func annotationsList() async -> [AnnotationItem] {
         guard let doc = document else { return [] }
-        var items: [AnnotationItem] = []
+        // 位置信息（页号 / 页内 y / x）只在排序时需要，不塞进 AnnotationItem——
+        // 那是跨格式的展示模型，为排序往里面塞 PDF 专有几何字段会污染 EPUB 侧。
+        var rows: [(item: AnnotationItem, page: Int, y: CGFloat, x: CGFloat)] = []
 
+        for (offset, entry) in enumerateAnnotationEntries().enumerated() {
+            if offset % 24 == 0 { await Task.yield() }
+            let annotation = entry.annotation
+            let isMarkup = annotation.lumenIsMarkup
+            let page = doc.page(at: entry.pageIndex)
+
+            let stored = entry.bounds
+            let row = stored
+            let truncated = isMarkup && entry.members.contains { member in
+                guard member.value(forAnnotationKey: PDFAnnotationGeometry.identityKey) == nil,
+                      (member.quadrilateralPoints?.count ?? 0) <= 4,
+                      let page, let expanded = Self.fullRowBounds(for: member.bounds, on: page) else { return false }
+                return expanded.minX < member.bounds.minX - 0.5 || expanded.maxX > member.bounds.maxX + 0.5
+            }
+            var quote = ""
+            if isMarkup, let page {
+                let rects = entry.members.flatMap { member -> [CGRect] in
+                    if member.value(forAnnotationKey: PDFAnnotationGeometry.identityKey) == nil,
+                       (member.quadrilateralPoints?.count ?? 0) <= 4,
+                       let expanded = Self.fullRowBounds(for: member.bounds, on: page) { return [expanded] }
+                    return PDFAnnotationGeometry.rectangles(of: member)
+                }
+                quote = rects.compactMap { page.selection(for: $0)?.string }.joined(separator: "\n")
+            }
+            // FreeText 的正文就是它显示的字，没有独立引文
+            if quote.isEmpty, annotation.lumenTypeName == "FreeText" {
+                quote = annotation.contents ?? ""
+            }
+
+            let item = AnnotationItem(
+                id: entry.id,
+                locator: .pdf(page: entry.pageIndex, charOffset: 0),
+                quote: String(quote.prefix(400)),
+                note: annotation.contents ?? "",
+                hasHighlight: isMarkup,
+                createdAt: annotation.modificationDate ?? Date.distantPast,
+                // 高亮类才带色：列表里据此显示与页面一致的色块
+                highlightHex: isMarkup ? Self.hexString(from: annotation.color) : nil,
+                truncated: truncated
+            )
+            rows.append((item, entry.pageIndex, row.origin.y, row.origin.x))
+        }
+
+        rows.sort { l, r in
+            if l.page != r.page { return l.page < r.page }
+            // PDF 原点在左下角，y 越大越靠上 ⇒ 阅读顺序越前，故降序
+            if abs(l.y - r.y) > 0.5 { return l.y > r.y }
+            return l.x < r.x
+        }
+        return rows.map(\.item)
+    }
+
+    /// (页号, 批注, 清单 id) 的**唯一枚举源**：列表、删除、更新、定位四处共用。
+    ///
+    /// 抽出来是因为 id 现在带「同基串出现序号」（见 `entryID`）：一旦枚举逻辑分家，
+    /// 列表算出的 id 与按 id 定位时算出的 id 就会不一致，表现为**点删除删错条**。
+    ///
+    /// id 的生成只依赖文档本身，**与展示排序无关**——所以这里页内按 y 升序枚举
+    /// （保证同一基串的出现序号是文档的确定函数），而 `annotationsList()` 另按阅读顺序展示。
+    private struct AnnotationEntry {
+        let id: String
+        let pageIndex: Int
+        let members: [PDFAnnotation]
+        var annotation: PDFAnnotation { members[0] }
+        var bounds: CGRect { members.dropFirst().reduce(annotation.bounds) { $0.union($1.bounds) } }
+    }
+
+    private func enumerateAnnotationEntries() -> [AnnotationEntry] {
+        guard let doc = document else { return [] }
+        var out: [AnnotationEntry] = []
+        var seen: [String: Int] = [:]
         for index in 0..<doc.pageCount {
-            if index % 24 == 0 { await Task.yield() }
             guard let page = doc.page(at: index) else { continue }
-            for annotation in page.annotations {
-                // 搜索高亮不是批注，不能出现在清单里
-                if annotation.userName == Self.searchHighlightMarker { continue }
-                let isMarkup = annotation.lumenIsMarkup
-                let isNote = annotation.lumenIsNote
-                guard isMarkup || isNote else { continue }
-                // 便签类批注里，从属的 Popup 不算独立条目——它是 Text 的影子
-                if annotation.lumenTypeName == "Popup" { continue }
-
-                // 划线原文从页面几何反查：批注 bounds 圈住的文字就是被划的那段
-                var quote = ""
-                if isMarkup, let selection = page.selection(for: annotation.bounds) {
-                    quote = selection.string ?? ""
-                }
-                if quote.isEmpty, annotation.lumenTypeName == "FreeText" {
-                    quote = annotation.contents ?? ""
-                }
-
-                items.append(AnnotationItem(
-                    id: Self.entryID(annotation, pageIndex: index),
-                    locator: .pdf(page: index, charOffset: 0),
-                    quote: String(quote.prefix(400)),
-                    note: annotation.contents ?? "",
-                    hasHighlight: isMarkup,
-                    createdAt: annotation.modificationDate ?? Date.distantPast
-                ))
+            let candidates = page.annotations.filter { Self.isListableAnnotation($0) }.sorted {
+                if abs($0.bounds.maxY - $1.bounds.maxY) > 0.5 { return $0.bounds.maxY > $1.bounds.maxY }
+                return $0.bounds.minX < $1.bounds.minX
+            }
+            var groups: [[PDFAnnotation]] = []
+            for annotation in candidates {
+                if let last = groups.last?.last,
+                   PDFAnnotationGeometry.continuesLegacyGroup(last, annotation, author: Self.annotationAuthor) {
+                    groups[groups.count - 1].append(annotation)
+                } else { groups.append([annotation]) }
+            }
+            for members in groups {
+                let base = Self.entryID(members[0], pageIndex: index)
+                let count = (seen[base] ?? 0) + 1
+                seen[base] = count
+                out.append(AnnotationEntry(id: count == 1 ? base : "\(base)#\(count)", pageIndex: index, members: members))
             }
         }
-        return items.sorted { $0.createdAt > $1.createdAt }
+        return out
+    }
+
+    func annotationID(for annotation: PDFAnnotation) -> String? {
+        enumerateAnnotationEntries().first { $0.members.contains { $0 === annotation } }?.id
+    }
+
+    func didTapAnnotation(_ annotation: PDFAnnotation) {
+        if let id = annotationID(for: annotation) { onAnnotationTapped?(id) }
+    }
+
+    /// 能进清单的批注：排除搜索临时高亮、排除 Popup 影子批注，其余高亮/便签都算。
+    nonisolated static func isListableAnnotation(_ annotation: PDFAnnotation) -> Bool {
+        if annotation.userName == searchHighlightMarker { return false }
+        if annotation.lumenTypeName == "Popup" { return false }
+        return annotation.lumenIsMarkup || annotation.lumenIsNote
     }
 
     /// 按 `annotationsList()` 给出的 id 删除批注。
     @discardableResult
     func deleteAnnotation(id: String) -> Bool {
-        guard let doc = document else { return false }
-        for index in 0..<doc.pageCount {
-            guard let page = doc.page(at: index) else { continue }
-            for annotation in page.annotations {
-                if Self.matchesID(id, annotation: annotation, pageIndex: index) {
-                    page.removeAnnotation(annotation)
-                    return saveToFile()
-                }
-            }
-        }
-        return false
+        guard let doc = document,
+              let entry = enumerateAnnotationEntries().first(where: { $0.id == id }),
+              let page = doc.page(at: entry.pageIndex) else { return false }
+        entry.members.forEach { page.removeAnnotation($0) }
+        return saveToFile()
     }
 
-    /// 清单条目 id 的唯一来源（列表、删除、更新、定位共用）。
+    /// 清单条目 id 的**基串**（列表、删除、更新、定位共用）。
     ///
     /// 组成是「页号 + 原点 + 类型」，**刻意不含时间戳**：
     /// - 跨行高亮会一口气画出多条共享同一个 `modificationDate` 的批注，
     ///   只按时间戳生成 id 必然撞车，ForEach 撞上重复 id 的行为是未定义的；
     /// - 更隐蔽的是精度：PDF 日期格式只存到**秒**，而内存里的 Date 带亚秒——
     ///   写盘再重开 id 就变了，「编辑后从文件里核对」永远对不上账。
-    /// 同一页同一原点还同类型的两条批注实际上不存在，位置足以消歧；
     /// 四舍五入而不是截断，避免存取之间的小数漂移恰好跨过整数边界。
     /// nonisolated：自检的独立 PDFDocument 也要用同一套 id 对账。
+    ///
+    /// ⚠️ 这个基串**并不保证唯一**。原注释断言「同一页同一原点还同类型的两条批注
+    /// 实际上不存在」，但 `addPageNoteAtCurrentPosition` 把便签图标固定放在页面右上角
+    /// （`width-44, height-44`）——同页两条便签原点完全相同，这个前提不成立。
+    /// 真正的唯一 id 由 `enumerateAnnotationEntries()` 在基串后追加出现序号 `#k` 得到；
+    /// 落点冲突本身也已在 `freeNoteIconOrigin(on:existing:)` 里修掉。
     nonisolated static func entryID(_ annotation: PDFAnnotation, pageIndex: Int) -> String {
+        if let identity = annotation.value(forAnnotationKey: PDFAnnotationGeometry.identityKey) as? String {
+            return "\(pageIndex)-lumen-\(identity)"
+        }
         let origin = annotation.bounds.origin
         return "\(pageIndex)-\(Int(origin.x.rounded()))x\(Int(origin.y.rounded()))-\(annotation.lumenTypeName)"
-    }
-
-    private static func matchesID(_ id: String, annotation: PDFAnnotation, pageIndex: Int) -> Bool {
-        // Popup 是 Text 便签自动带的影子批注，不参与按 id 定位——
-        // 它常与正文批注共享时间戳，不排除的话「更新/删除」可能命中影子而不是本体
-        if annotation.lumenTypeName == "Popup" { return false }
-        return id == Self.entryID(annotation, pageIndex: pageIndex)
     }
 
     /// 按 id 更新批注正文并写盘（批注面板的「编辑」走这里）。
     /// 找不到返回 false——比如文档已经换掉了。
     @discardableResult
     func updateNote(id: String, body: String) -> Bool {
-        guard let doc = document else { return false }
-        for index in 0..<doc.pageCount {
-            guard let page = doc.page(at: index) else { continue }
-            for annotation in page.annotations {
-                guard Self.matchesID(id, annotation: annotation, pageIndex: index) else { continue }
-                annotation.contents = body
-                return saveToFile()
-            }
-        }
-        return false
+        guard let entry = enumerateAnnotationEntries().first(where: { $0.id == id }) else { return false }
+        entry.members.forEach { $0.contents = body }
+        return saveToFile()
     }
 
     /// 按 id 定位一条批注：翻到所在页、滚到批注的位置，划线类还会短暂选中原文——
     /// 「是哪一处」要有明确的视觉回应，只翻页是找不到一条便签图标的。
     @discardableResult
     func revealAnnotation(id: String) -> Bool {
-        guard let doc = document else { return false }
-        for index in 0..<doc.pageCount {
-            guard let page = doc.page(at: index) else { continue }
-            for annotation in page.annotations {
-                guard Self.matchesID(id, annotation: annotation, pageIndex: index) else { continue }
-                go(to: index)
-                view.go(to: PDFDestination(page: page, at: annotation.bounds.origin))
-                if annotation.lumenIsMarkup, let selection = page.selection(for: annotation.bounds) {
-                    view.setCurrentSelection(selection, animate: true)
-                }
-                return true
+        guard let doc = document,
+              let entry = enumerateAnnotationEntries().first(where: { $0.id == id }),
+              let page = doc.page(at: entry.pageIndex) else { return false }
+        let annotation = entry.annotation
+        let row = entry.bounds
+        view.go(to: page)
+        view.layoutDocumentView()
+        // Rect-based navigation handles page rotation and keeps the target inside the viewport.
+        view.go(to: row.insetBy(dx: -24, dy: -48), on: page)
+        if annotation.lumenIsMarkup {
+            let selection = PDFSelection(document: doc)
+            for rect in entry.members.flatMap({ PDFAnnotationGeometry.rectangles(of: $0) }) {
+                if let fragment = page.selection(for: rect) { selection.add(fragment) }
             }
+            view.setCurrentSelection(selection, animate: false)
         }
-        return false
+        return true
+    }
+
+    /// 把**文件里已存在的** Lumen 高亮矩形扩到整行（历史数据修正）。
+    ///
+    /// 读取侧（清单引文、定位高亮）已经会补算整行，但存进 PDF 的矩形还是半行：
+    /// 用系统「预览」或 Acrobat 打开同一个文件看到的仍是半行，本应用重开时
+    /// 页面上画的也是那个半行矩形。这个方法把文件里的矩形真正改宽，两边才一致。
+    ///
+    /// 边界（都写在这里，因为它动的是用户的文件）：
+    /// - 只动 **Lumen 自己画的划线类批注**（`userName == annotationAuthor`），
+    ///   Preview / Acrobat 画的批注一律不碰；
+    /// - **只加宽，不删除、不改任何文字内容**（`contents` 原样保留）；
+    /// - 扩不动（扫描件无文本层、多行高亮等被三道守卫拦下）的保持原样；
+    /// - 全过程只写一次盘（大文件上这一次序列化约 0.5s，见 `saveToFile` 的说明）。
+    ///
+    /// - Returns: 实际被加宽的条数；0 表示无需修正或写盘失败。
+    @discardableResult
+    func normalizeAnnotationRows() -> Int {
+        guard let doc = document else { return 0 }
+        var changed = 0
+        for entry in enumerateAnnotationEntries() {
+            guard let page = doc.page(at: entry.pageIndex) else { continue }
+            var groupChanged = false
+            for annotation in entry.members {
+                guard annotation.lumenIsMarkup, annotation.userName == Self.annotationAuthor,
+                      annotation.value(forAnnotationKey: PDFAnnotationGeometry.identityKey) == nil,
+                      (annotation.quadrilateralPoints?.count ?? 0) <= 4,
+                      let row = Self.fullRowBounds(for: annotation.bounds, on: page),
+                      row.minX < annotation.bounds.minX - 0.5 || row.maxX > annotation.bounds.maxX + 0.5 else { continue }
+                annotation.bounds = row
+                groupChanged = true
+            }
+            if groupChanged { changed += 1 }
+        }
+        guard changed > 0 else { return 0 }
+        return saveToFile() ? changed : 0
     }
 
     /// 在当前页加一条空白便签并返回它的清单条目（批注面板「新建」走这里）。
@@ -1042,8 +1330,10 @@ final class PDFController: NSObject, ObservableObject {
         guard let page = doc.page(at: pageIndex) else { return nil }
 
         let stamp = Date()
-        let pageBounds = page.bounds(for: .mediaBox)
-        let iconBounds = CGRect(x: pageBounds.width - 44, y: pageBounds.height - 44, width: 24, height: 24)
+        // 落点要避开本页已有便签：固定右上角会让同页两条便签的原点完全相同，
+        // 而清单 id 是「页号 + 原点 + 类型」，撞 id 后点哪条都跳到第一条。
+        let origin = Self.freeNoteIconOrigin(on: page, existing: page.annotations)
+        let iconBounds = CGRect(x: origin.x, y: origin.y, width: 24, height: 24)
         let annotation = PDFAnnotation(bounds: iconBounds, forType: .text, withProperties: nil)
         annotation.contents = ""
         annotation.userName = Self.annotationAuthor
@@ -1052,8 +1342,13 @@ final class PDFController: NSObject, ObservableObject {
         page.addAnnotation(annotation)
         guard saveToFile() else { return nil }
 
+        // id 必须走与清单**同一个**枚举源：直接算 entryID 会漏掉 #k 序号，
+        // 于是新建出来的那条 id 与列表里的对不上，紧接着的「编辑」会找不到它。
+        guard let entry = enumerateAnnotationEntries().first(where: { $0.annotation === annotation }) else {
+            return nil
+        }
         return AnnotationItem(
-            id: Self.entryID(annotation, pageIndex: pageIndex),
+            id: entry.id,
             locator: .pdf(page: pageIndex, charOffset: 0),
             quote: "",
             note: "",
@@ -1066,15 +1361,8 @@ final class PDFController: NSObject, ObservableObject {
     /// 返回的 Bool 表示是否已删除并写盘成功。
     @discardableResult
     func delete(annotation: PDFAnnotation) -> Bool {
-        guard let doc = document else { return false }
-        for index in 0..<doc.pageCount {
-            guard let page = doc.page(at: index) else { continue }
-            if page.annotations.contains(annotation) {
-                page.removeAnnotation(annotation)
-                return saveToFile()
-            }
-        }
-        return false
+        guard let id = annotationID(for: annotation) else { return false }
+        return deleteAnnotation(id: id)
     }
 
     /// 把当前文档（含批注）写回**原文件**。
@@ -1088,7 +1376,7 @@ final class PDFController: NSObject, ObservableObject {
         detachSearchHighlights()
         defer { reattachSearchHighlights() }
 
-        guard let data = doc.dataRepresentation() else {
+        guard let data = PDFOriginalRendering.data(of: doc) else {
             onFileSaved?(false, "无法生成 PDF 数据")
             return false
         }
@@ -1307,6 +1595,16 @@ final class AnnotatedPDFView: PDFView {
         // 手势结束后补发一次选区：PDFKit 在拖动过程中已经发过 selectionChanged，
         // 那一轮的来源标记可能还没越过阈值；松手这一刻再发布，保证最终状态同步到桥。
         controller?.refreshSelectionFromGesture()
+        if !lastGestureWasDrag {
+            let location = convert(event.locationInWindow, from: nil)
+            if let page = page(for: location, nearest: false) {
+                let point = convert(location, to: page)
+                if let annotation = page.annotations.reversed().first(where: {
+                    PDFController.isListableAnnotation($0)
+                        && PDFAnnotationGeometry.rectangles(of: $0).contains { $0.insetBy(dx: -2, dy: -2).contains(point) }
+                }) { controller?.didTapAnnotation(annotation) }
+            }
+        }
     }
 
     // MARK: 右键菜单

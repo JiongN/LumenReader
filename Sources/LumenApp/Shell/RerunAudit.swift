@@ -27,7 +27,8 @@ enum RerunAudit {
                   + (ok || detail.isEmpty ? "" : " —— \(detail)"))
         }
 
-        let chat = session.chat
+        // 全局共享会话：不再从 session 取（session 上已无 chat），统一走 state.chat。
+        let chat = state.chat
         let bridge = session.bridge
 
         guard let config = state.settingsStore.activeProvider, config.isConfigured else {
@@ -61,7 +62,9 @@ enum RerunAudit {
             memory: state.aiMemoryPayload,
             translateTarget: state.settingsStore.ai.translateTarget,
             template: nil,
-            agent: nil
+            agent: nil,
+            sourcePath: session.document.id,
+            sourceTitle: session.document.displayTitle
         )
         await waitUntilIdle(chat)
 

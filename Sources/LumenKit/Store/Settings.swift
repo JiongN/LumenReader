@@ -125,6 +125,16 @@ public struct ReaderSettings: Codable, Sendable, Equatable {
     public var readingFontFamilyName: String?
     /// 字号倍率，1.0 = 基准 17pt
     public var fontScale: Double = 1.0
+    /// 字号倍率下限。`FontScale.min` 对齐到这里，避免两处各抄一份字面量。
+    public static let fontScaleMin: Double = 0.6
+    /// 字号倍率上限。`FontScale.max` 对齐到这里，避免两处各抄一份字面量。
+    public static let fontScaleMax: Double = 2.4
+    /// 字号作用范围说明：只描述事实边界，不依赖任何文档上下文，供多处复用。
+    ///
+    /// 为何是 `static let` 而非实例字段：它是给界面文案用的常量，不是用户设置；
+    /// 加实例字段会进 `CodingKeys`，动到 settings.json 的编码，容易踩到上面的
+    /// 容错解码硬约束。纯静态常量不参与编码，安全。
+    public static let fontScaleScopeNote = "字号仅对 EPUB 正文生效；PDF 使用文档自带字号，不可调整"
     /// 行高倍数
     public var lineHeight: Double = 1.7
     /// 字距（em）。中文排版 0 或极小正值观感最好，调大主要给西文用。
@@ -147,6 +157,20 @@ public struct ReaderSettings: Codable, Sendable, Equatable {
     public var epubTranslateEnabled: Bool = false
     /// 逐段翻译的目标语言（必应语言标签）。默认 `zh-Hans`。
     public var translationTargetLanguage: String = "zh-Hans"
+    /// 逐段翻译用的引擎 id（见 `TranslationEngineCatalog`）。
+    ///
+    /// 存 id 而不是存枚举：以后加引擎（离线语言包 / 收费 API）时老配置不用迁移，
+    /// 认不出来的值会在解码时退回默认。
+    public var translationEngineID: String = TranslationEngineCatalog.defaultID
+    /// 切换到 LLM 之前正在用的「机器」引擎 id。
+    ///
+    /// 面板的机器/LLM 分段开关在切成 LLM 前把当前机器引擎记在这里，
+    /// 切回「机器翻译」时恢复它 —— 否则 URL 只会回到默认的 Apple 系统翻译，
+    /// 用户显式选过的微软翻译会在一次 LLM 往返后被悄悄丢掉。
+    /// 不在目录里的值会在解码时退回默认（见容错解码），所以它安全。
+    public var translationMachineEngineID: String = AppleSystemTranslation.engineID
+    /// PDF 翻译术语表。机器翻译保留这些条目但不承诺采用；LLM 翻译会把它们写进提示词。
+    public var translationGlossary: [TranslationGlossaryEntry] = []
     /// EPUB 滚动到章末时自动进入下一章
     public var autoAdvanceOnScrollEnd: Bool = true
 
@@ -180,6 +204,17 @@ public struct ReaderSettings: Codable, Sendable, Equatable {
         // 空串也会让翻译请求白跑一趟，所以这里兜回默认。
         let target = (try? container.decode(String.self, forKey: .translationTargetLanguage)) ?? "zh-Hans"
         self.translationTargetLanguage = target.isEmpty ? "zh-Hans" : target
+        // 引擎 id 同理，而且多一层校验：必须**在目录里存在**才认。
+        // 直接照抄字符串的话，配置里留着一个已下线的引擎名会让取引擎时落到兜底分支，
+        // 而设置界面显示的值与实际用的引擎不一致 —— 那是骗人的。
+        self.translationEngineID = TranslationEngineCatalog
+            .descriptor(for: try? container.decode(String.self, forKey: .translationEngineID))
+            .id
+        self.translationMachineEngineID = TranslationEngineCatalog.descriptor(
+            for: try? container.decode(String.self, forKey: .translationMachineEngineID)
+        ).id
+        self.translationGlossary = (try? container.decode([TranslationGlossaryEntry].self,
+                                                           forKey: .translationGlossary)) ?? []
     }
 }
 
@@ -211,8 +246,15 @@ public struct AIProviderConfig: Codable, Sendable, Equatable, Identifiable {
         self.id = id
         self.name = name
         self.baseURL = baseURL
-        self.models = models
-        self.selectedModel = selectedModel
+        self.models = []
+        for raw in models {
+            let model = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !model.isEmpty, !self.models.contains(model) { self.models.append(model) }
+        }
+        self.selectedModel = selectedModel.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !self.selectedModel.isEmpty, !self.models.contains(self.selectedModel) {
+            self.models.append(self.selectedModel)
+        }
         self.temperature = temperature
         self.maxTokens = maxTokens
         self.extendedThinking = extendedThinking
@@ -223,8 +265,17 @@ public struct AIProviderConfig: Codable, Sendable, Equatable, Identifiable {
         self.id = (try? container.decode(UUID.self, forKey: .id)) ?? UUID()
         self.name = (try? container.decode(String.self, forKey: .name)) ?? "未命名服务商"
         self.baseURL = (try? container.decode(String.self, forKey: .baseURL)) ?? ""
-        self.models = (try? container.decode([String].self, forKey: .models)) ?? []
-        self.selectedModel = (try? container.decode(String.self, forKey: .selectedModel)) ?? ""
+        let decodedModels = (try? container.decode([String].self, forKey: .models)) ?? []
+        self.models = []
+        for raw in decodedModels {
+            let model = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !model.isEmpty, !self.models.contains(model) { self.models.append(model) }
+        }
+        self.selectedModel = ((try? container.decode(String.self, forKey: .selectedModel)) ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if !self.selectedModel.isEmpty, !self.models.contains(self.selectedModel) {
+            self.models.append(self.selectedModel)
+        }
         self.temperature = (try? container.decode(Double.self, forKey: .temperature)) ?? 0.7
         self.maxTokens = (try? container.decode(Int.self, forKey: .maxTokens)) ?? 2048
         self.extendedThinking = (try? container.decode(Bool.self, forKey: .extendedThinking)) ?? false
@@ -398,10 +449,21 @@ public struct AISettings: Codable, Sendable, Equatable {
     /// 让「不加东西」成为默认，用户的现状就不会被这次改动悄悄改变。
     public var activeTemplateID: UUID?
 
-    /// 可选的 Agent（角色 + 技能 + 是否联网检索）。首次启动填入内置预设。
+    /// 可选的 Agent（角色 + 勾选的技能 + 是否联网检索）。首次启动填入内置预设。
     public var agents: [AgentConfig] = AgentConfig.presets
     /// 当前选中的 Agent。`nil` = 不加角色，走默认助手行为。
     public var activeAgentID: String?
+
+    /// 全局技能库：所有 Agent 共用的一份「可选技能」清单。
+    ///
+    /// 为什么是全局而不是每个 Agent 各存一份：技能是**读法**（「论据回原文」这类规矩），
+    /// 不是某个角色的私产。各存一份的话，用户在 A 里调好的技能切到 B 就没了，
+    /// 只能重写一遍；而这里改一处，用它的所有 Agent 一起变。
+    /// 代价是不能给某个 Agent 留特例——界面上如实写着「改的是共用样式」。
+    ///
+    /// 首次启动灌入 `AgentSkill.catalog`；用户删掉的内置技能不会自己长回来
+    /// （与 `agents` 同一条规则，见下面的解码）。
+    public var skillLibrary: [AgentSkill] = AgentSkill.catalog
 
     /// 输入框上的「联网检索」手动开关。
     ///
@@ -440,10 +502,76 @@ public struct AISettings: Codable, Sendable, Equatable {
         self.templates = (try? container.decode([PromptTemplate].self, forKey: .templates))
             ?? PromptTemplate.presets
         self.activeTemplateID = try? container.decode(UUID.self, forKey: .activeTemplateID)
+        // 只有磁盘上**完全没有 agents 这个键**时才灌预设（首次启动，或该功能上线前的旧配置）。
+        //
+        // 原先这里是「缺哪个预设就补哪个」，那是为了让新版本增加的内置 Agent 自动出现在
+        // 老用户那里。但编辑器现在允许删除**任意** Agent，两套规则并存就会出现
+        // 「删掉的 Agent 下次启动自己长回来」——比「新预设不自动出现」糟得多。
+        // 取舍已如实写下：以后新增内置预设，老用户需要自己新建一份。
         self.agents = (try? container.decode([AgentConfig].self, forKey: .agents))
             ?? AgentConfig.presets
+        // 产品层面下线的预设按稳定 id 清掉：用户磁盘上那份副本不会自己消失，
+        // 不清理的话「已经下线的功能」会以旧数据的形态继续活在编辑器里。
+        self.agents.removeAll { AgentConfig.retiredPresetIDs.contains($0.id) }
+
+        // 技能库与 agents 同一条规则：只有磁盘上**完全没有**这个键才灌内置技能。
+        // 写成「缺哪条内置技能就补哪条」的话，用户删掉的技能下次启动会自己长回来。
+        self.skillLibrary = (try? container.decode([AgentSkill].self, forKey: .skillLibrary))
+            ?? AgentSkill.catalog
+        // 旧配置把技能全文存在 Agent 上（技能库里没有对应条目），这里并进技能库。
+        // 不并的话用户自己写的技能会在升级那一刻**静默**消失——系统提示变短，界面看不出来。
+        Self.migrateCarriedSkills(library: &self.skillLibrary, agents: &self.agents)
+
         self.activeAgentID = try? container.decode(String.self, forKey: .activeAgentID)
+        // 选中的那个 Agent 被删掉（或被下线清理掉）之后这个 id 会悬空：面板显示「Agent」
+        // 却不带勾选，内部状态自相矛盾。退回「不用 Agent」，与编辑器里删除时的处理一致。
+        if let id = self.activeAgentID, !self.agents.contains(where: { $0.id == id }) {
+            self.activeAgentID = nil
+        }
         self.webSearchEnabled = (try? container.decode(Bool.self, forKey: .webSearchEnabled)) ?? false
+    }
+}
+
+// MARK: - 技能库迁移
+
+extension AISettings {
+
+    /// 把 Agent 上捎出来的旧技能定义并进技能库。
+    ///
+    /// 两条规则都不是可选的：
+    /// ① **同名的认领到库里那条**。老配置里「论证链」「术语变化」是用户自建技能
+    ///    （各自带一个 UUID），而它们现在是内置技能；不认领的话技能库里会出现两张
+    ///    同名卡片，用户看到的是「怎么有两个论证链」。
+    /// ② 只有「库里既没有这个 id、也没有这个名字」才新增一项。只按 id 判定的话，
+    ///    用户自己写的技能会被静默丢掉——它在库里没有对应条目。
+    ///
+    /// 认领是全局的：两个 Agent 各自攒了一份同名的「论证链」也会归到同一条上，
+    /// 同名不同义的技能本来就该合并。
+    static func migrateCarriedSkills(library: inout [AgentSkill], agents: inout [AgentConfig]) {
+        var remap: [String: String] = [:]
+
+        for index in agents.indices {
+            for definition in agents[index].carriedSkills {
+                if library.contains(where: { $0.id == definition.id }) { continue }
+                if !definition.name.isEmpty,
+                   let match = library.first(where: { $0.name == definition.name }) {
+                    remap[definition.id] = match.id
+                    continue
+                }
+                library.append(definition)
+            }
+        }
+
+        let known = Set(library.map(\.id))
+        for index in agents.indices {
+            // 认领之后可能撞出重复（Agent 同时勾着新旧两个 id），去重但保序；
+            // 库里没有的 id 是悬空引用，界面上会显示成一张勾不掉的空卡，一并清掉。
+            var seen = Set<String>()
+            agents[index].skills = agents[index].skills
+                .map { remap[$0] ?? $0 }
+                .filter { seen.insert($0).inserted && known.contains($0) }
+            agents[index].carriedSkills = []
+        }
     }
 }
 

@@ -51,6 +51,10 @@ enum LaunchOptions {
     }
 
     static var openPath: String? { value(for: "--open") }
+    /// 自检：在同一窗口再开一份文档，用于双文档对话。
+    static var comparisonOpenPath: String? { value(for: "--compare-open") }
+    /// 自检：AI 输入范围（current / whole / compare）。正常启动始终默认 current。
+    static var aiQuestionScope: String? { value(for: "--ai-scope")?.lowercased() }
     /// 自检：启动 N 秒后把当前标签拆到独立窗口（验证「在独立窗口打开」）。
     static var detachAfter: Double? { Double(value(for: "--detach-after") ?? "") }
 
@@ -62,6 +66,10 @@ enum LaunchOptions {
     static var opensPalette: Bool { flag("--palette") }
     /// 打开文档后自动对当前页做一次 OCR（自检扫描件链路用）：`--ocr 1`
     static var autoOCR: Bool { flag("--ocr") }
+    /// 打开 PDF 后自动启动段落对照翻译（自检用）。
+    static var autoPDFTranslation: Bool { flag("--pdf-translate") }
+    /// 自检时临时指定 PDF 翻译引擎，不写入用户设置。
+    static var translationEngine: String? { value(for: "--translation-engine") }
     /// 启动后自动打开「设置」窗口（自检设置页视觉用）：`--settings 1`
     static var opensSettings: Bool { flag("--settings") }
     /// 直接落在指定的设置页签上（自检各页视觉用）：`--settings-tab interface`
@@ -93,7 +101,7 @@ enum LaunchOptions {
     /// 自检用：直接设定 AI 面板宽度，`--panel-width 400x300`。
     ///
     /// 和 `--window-size` 一样走 `x` 分隔，但**只有第二个数（AI 面板）生效**：
-    /// 侧栏宽度自本批起固定为 248pt、不再从设置读取，第一个数（侧栏）仍被解析
+    /// 侧栏基准宽度固定为 248pt、再随窗口比例缩放且不从设置读取；第一个数（侧栏）仍被解析
     /// 只为不破坏既有脚本，**不产生任何效果**。
     ///
     /// 值会经过与拖动分隔线相同的钳制，所以故意传越界值（如 `9999x10`）
@@ -153,14 +161,6 @@ enum LaunchOptions {
     /// 自检用：启动后直接进入沉浸模式，核对「面板全收 + 正文居中限宽」。
     static var startsImmersive: Bool { flag("--immersive") }
 
-    /// 自检用：沉浸模式下强制翻出底部控制条：`--hud-reveal 1`。
-    ///
-    /// 那条控制条平时只在鼠标压进底部 90pt 感应带时才浮现，无头截图碰不到它；
-    /// 而它是全应用读 `@EnvironmentObject` 最多的视图（state / bridge / keyBindings
-    /// 三个都读），缺任何一个都会当场崩溃。历史上「沉浸条一浮现就闪退」的崩溃
-    /// 就发生在这里——不强制翻出来，这条路径在自检里永远是盲区。
-    static var hudRevealed: Bool { flag("--hud-reveal") }
-
     /// 打印缩略图的渲染/跳过明细：`--thumb-report 1`。
     ///
     /// 用来证明「滚出可视区的页不再被渲染」确实生效——这是缩略图侧栏流畅与否的关键，
@@ -184,6 +184,7 @@ enum LaunchOptions {
     /// 很容易只做一半的地方——枚举删了但 `all` 里还留着（界面上还能选到），
     /// 或者 `all` 删了但旧配置解码时掉进 `?? .paper`（把深色用户变成纸白）。
     /// 这条通道把两边都打出来，一眼能看出是哪一半没做。
+    static var pdfToneReport: Bool { flag("--pdf-tone-report") }
     static var themeReport: Bool { flag("--theme-report") }
 
     /// 批注自检：在 /tmp 的副本上跑一遍「高亮 → 页面批注 → 写盘 → 重开核对 → 删除」。
@@ -195,6 +196,18 @@ enum LaunchOptions {
     /// 截图也拍不到原生菜单），所以把「该出现哪些项、该叫什么文案、该不该禁用」抽成
     /// 纯函数 `PDFContextMenuPlanner.items`，在这里做表驱动断言。改错任一处立刻红。
     static var ocrMenuReport: Bool { flag("--ocr-menu-report") }
+
+    /// 入口归属自检：`--entry-report 1`。
+    ///
+    /// 存在的理由：本轮问题的根因是「同一个动作被分别写进多个菜单」——「导出摘要」一度同时
+    /// 出现在顶栏复制菜单、AI 面板 ⋯ 菜单与菜单栏「文件 > 导出」。这类重复读代码发现不了
+    /// （三处各自都像是对的），菜单又没法自动化点击核对。所以把「谁归属哪个入口组」抽成
+    /// 纯数据 `ActionEntries`，在这里断言它的性质；三个菜单都从那份数据长出条目，
+    /// 于是对数据的断言就是对菜单的断言。改错立刻红（见 `EntryAudit`）。
+    ///
+    /// 已核对：`isAuditRun` 的判据含 `argument.hasSuffix("-report")`，覆盖了本开关
+    /// （`--entry-report` 以 `-report` 结尾），故自检不会污染「最近打开」。
+    static var entryReport: Bool { flag("--entry-report") }
 
     /// 面板宽度响应式自检：`--resize-report 1`。
     ///
@@ -227,14 +240,6 @@ enum LaunchOptions {
     /// 断言气泡被**替换**（条数不变）且两次请求体规模一致（history 未被叠加）。
     /// ⚠️ 同样必须与 `--capture` 同用。
     static var rerunReport: Bool { flag("--rerun-report") }
-
-    /// 自检钥匙串访问成本：`--keychain-report 1`。
-    ///
-    /// 起因是「每重编译一次就疯狂弹钥匙串授权框」。这件事只有一条通道能验：
-    /// 存在性判断是走属性通道（不解密，永不弹窗）还是走密文通道（每次解密都要授权）。
-    /// 两者都会返回一个 Bool，从终值上看不出区别，差别全在**耗时与钥匙串调用次数**上。
-    /// 所以这条通道连打两次并分别计时——第二次的耗时差就是「缓存是否生效」的证据。
-    static var keychainReport: Bool { flag("--keychain-report") }
 
     /// 自检 AI 智能目录：`--smart-outline 1`。
     ///
@@ -275,11 +280,30 @@ enum LaunchOptions {
     /// 存在的理由：自检会把 /tmp 里的测试书写进「最近打开」，把用户真实的阅读
     /// 记录顶下去——跑几次自检之后欢迎页就只剩测试书了。真实用户数据被
     /// 诊断流程改掉，是最难被察觉的一类副作用。
+    ///
+    /// **凡「只在自检里生效的启动覆盖」都应列进来**（见 `auditOnlyOverrides`）。
+    /// 否则它们单独使用时是**哑的**——看起来像个能单独用的开关，实际既不生效、
+    /// 也不防落盘，正是「以为设置了、其实没设置」的陷阱。反过来，列进来意味着
+    /// 这次启动**不落盘、也不写「最近打开」**：被归入自检的启动绝不污染用户数据。
     static var isAuditRun: Bool {
         CommandLine.arguments.contains { argument in
-            argument.hasSuffix("-report") || argument == "--capture" || argument == "--mock-ai"
+            argument.hasSuffix("-report")
+                || argument == "--capture"
+                || argument == "--mock-ai"
+                || auditOnlyOverrides.contains(argument)
         }
     }
+
+    /// 只应在自检里使用的启动覆盖。
+    ///
+    /// 这些开关的语义是「临时把阅读状态钉死到某个值，供自检取证」；用户正常阅读
+    /// 时用不到（用户走设置页）。它们必须计入 `isAuditRun`：否则单独传
+    /// `--reading-theme warm` 时，`WindowManager` 里那扇 `if LaunchOptions.isAuditRun`
+    /// 的门不会开，覆盖**根本不生效**（同时也就不置 `suppressSave`）。
+    static let auditOnlyOverrides: Set<String> = [
+        "--reading-theme", "--epub-columns", "--pdf-original", "--pdf-translate",
+        "--translation-engine",
+    ]
 
     /// 是否需要在启动后自动截图并退出
     static var shouldCapture: Bool { capturePath != nil }
@@ -291,6 +315,22 @@ enum LaunchOptions {
     /// 的 frame 之内。与其靠肉眼看截图，不如让视图自己把 frame 打出来做断言。
     /// 浮层与阅读区的 frame 都按窗口内容区坐标（`.global`）上报。
     static var layoutReport: Bool { flag("--layout-report") }
+
+    /// 侧栏页签切换自检：`--sidebar-tab-report 1`。
+    ///
+    /// 存在的理由：用户报「左栏图标栏里无论点哪一项，侧栏都不切换」。
+    /// 已证实**切换函数本身是通的**（`--run-action showThumbnails` 能让侧栏真的换页签），
+    /// 所以嫌疑落在「发起点击那一侧」。本通道因此**不走 `revealSidebar`**，
+    /// 而是直接调 `ReaderContainerView.selectSidebarTab(_:)`——那正是图标栏
+    /// `onSelect` 接的那个函数；走别的入口等于验一段死代码。
+    static var sidebarTabReport: Bool { flag("--sidebar-tab-report") }
+
+    /// 布局探针是否需要上报并保留读数。
+    ///
+    /// 抽成一个开关，而不是在 `LayoutProbe` 与 `LayoutAuditLog.record` 里各写一遍
+    /// `a || b || c`：两处守卫必须一致，否则会得到「探针装了但不记」或
+    /// 「记了但 dump 不打印」这种半通不通的状态——比彻底不工作更难查。
+    static var layoutProbesEnabled: Bool { layoutReport || resizeReport || sidebarTabReport || translationPanelReport }
 
     /// PDF 浏览性能自检：`--perf-report 1`。
     ///
@@ -444,7 +484,7 @@ struct LayoutProbe: ViewModifier {
     let name: String
 
     func body(content: Content) -> some View {
-        if LaunchOptions.layoutReport || LaunchOptions.resizeReport {
+        if LaunchOptions.layoutProbesEnabled {
             content.background(
                 GeometryReader { proxy in
                     let frame = proxy.frame(in: .global)
@@ -485,7 +525,7 @@ final class LayoutAuditLog {
     /// 从第一次上报起算，2s 后统一打印。演示选区要等文档装好才注入，
     /// 所以划词条的首次上报会晚于状态条，用一个稍长的窗口把两者都收进来。
     func record(_ name: String, _ frame: CGRect) {
-        guard LaunchOptions.layoutReport || LaunchOptions.resizeReport else { return }
+        guard LaunchOptions.layoutProbesEnabled else { return }
         frames[name] = frame
 
         guard !dumpScheduled else { return }

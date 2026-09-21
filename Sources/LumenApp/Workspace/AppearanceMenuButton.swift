@@ -68,6 +68,10 @@ private struct AppearancePanel: View {
                     set: { store.reader.pdfOriginalColors = $0 }
                 ))
                 .font(DS.Typo.ui(size: 12))
+                Text(ReaderSettings.fontScaleScopeNote)
+                    .font(DS.Typo.ui(size: 10))
+                    .foregroundStyle(DS.Palette.textTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
         .padding(DS.Space.m)
@@ -108,7 +112,7 @@ private struct AppearancePanel: View {
                 get: { store.reader.fontScale },
                 set: { store.reader.fontScale = $0 }
             ),
-            range: 0.6...2.4,
+            range: ReaderSettings.fontScaleMin...ReaderSettings.fontScaleMax,
             step: 0.05,
             display: "\(Int((store.reader.fontScale * 100).rounded()))%"
         )
@@ -233,9 +237,9 @@ private struct AppearancePanel: View {
             .controlSize(.small)
 
             HStack(spacing: DS.Space.xs) {
-                ForEach(Self.targetLanguages, id: \.0) { code, name in
-                    let isActive = store.reader.translationTargetLanguage == code
-                    Button(name) { store.reader.translationTargetLanguage = code }
+                ForEach(Self.quickTargets) { option in
+                    let isActive = store.reader.translationTargetLanguage == option.id
+                    Button(option.displayName) { store.reader.translationTargetLanguage = option.id }
                         .buttonStyle(.plain)
                         .font(DS.Typo.ui(size: 11, weight: isActive ? .semibold : .regular))
                         .foregroundStyle(isActive ? DS.Palette.accent : DS.Palette.textSecondary)
@@ -247,16 +251,24 @@ private struct AppearancePanel: View {
                         )
                 }
             }
-            Text("走微软（必应）在线翻译的免密钥通道，逐段请求；失败会原地标注。")
+            // 引擎名从目录读，不在这里写死「走微软…」：
+            // 引擎现在是可切换的，写死的说明在换引擎之后就成了假话。
+            Text("当前引擎：\(engineName)。在「设置 › 阅读 › 翻译」里更换引擎与目标语言。")
                 .font(DS.Typo.ui(size: 10))
                 .foregroundStyle(DS.Palette.textTertiary)
                 .fixedSize(horizontal: false, vertical: true)
         }
     }
 
-    private static let targetLanguages: [(String, String)] = [
-        ("zh-Hans", "译为中文"),
-        ("en", "译为英文")
+    private var engineName: String {
+        TranslationEngineCatalog.descriptor(for: store.reader.translationEngineID).displayName
+    }
+
+    /// 菜单里只放两个最常用的目标语言——这里是个快捷开关，不是设置面板，
+    /// 五个语言横排会把这一行挤爆。完整列表在设置页。
+    private static let quickTargets: [TranslationLanguage.Option] = [
+        TranslationLanguage.target(for: "zh-Hans"),
+        TranslationLanguage.target(for: "en")
     ]
 
     private func sectionTitle(_ text: String) -> some View {

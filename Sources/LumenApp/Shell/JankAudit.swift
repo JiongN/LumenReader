@@ -14,6 +14,7 @@ enum JankCounter: String, CaseIterable {
     case containerBody = "ReaderContainerView.body"
     case aiPanelBody = "AIPanelView.body"
     case sidebarBody = "SidebarColumn.body"
+    case sidebarRailBody = "SidebarRail.body"
     case thumbnailPaneBody = "ThumbnailPane.body"
     case updateNSView = "updateNSView(PDFKit)"
     case pdfViewLayout = "PDFView.layout"
@@ -27,6 +28,7 @@ enum JankCounter: String, CaseIterable {
         case .containerBody: return "body"
         case .aiPanelBody: return "ai"
         case .sidebarBody: return "side"
+        case .sidebarRailBody: return "rail"
         case .thumbnailPaneBody: return "thumbBody"
         case .updateNSView: return "update"
         case .pdfViewLayout: return "layout"
@@ -68,8 +70,12 @@ final class JankTally {
 /// 复用上一次的 `body(content:)` 结果，修饰符里的 tick 只在首次构造时跑一次，
 /// 计数恒为 0（本轮踩过）；直接写在 body 里的语句才每次求值都执行。
 enum Jank {
+    /// `--sidebar-tab-report` 也打开计数：那条通道要用 `sidebarRailBody` 的次数
+    /// 证明「图标栏确实跟着 `bridge.sidebarTab` 重绘了」——只断言状态变量是恒真的
+    /// （状态变了、界面没变的假绿，项目里踩过好几次）。
     static let isEnabled = CommandLine.arguments.contains("--jank-report")
         || CommandLine.arguments.contains("--jank-watch")
+        || CommandLine.arguments.contains("--sidebar-tab-report")
 
     static func tick(_ counter: JankCounter) {
         guard isEnabled else { return }

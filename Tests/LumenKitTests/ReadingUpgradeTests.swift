@@ -32,9 +32,15 @@ struct ReadingUpgradeTests {
         #expect(reader.fontScale == 1.2)
         #expect(!reader.epubDoubleColumn)
         #expect(!reader.pdfOriginalColors)
+        #expect(reader.translationEngineID == AppleSystemTranslation.engineID)
+        #expect(reader.translationGlossary.isEmpty)
         var changed = reader
         changed.epubDoubleColumn = true
         changed.pdfOriginalColors = true
+        changed.translationEngineID = LLMTranslation.engineID
+        changed.translationGlossary = [
+            TranslationGlossaryEntry(source: "platformization", target: "平台化")
+        ]
         #expect(try JSONDecoder().decode(ReaderSettings.self, from: JSONEncoder().encode(changed)) == changed)
     }
     @Test func credentialPermissionsAndPersistence() throws {

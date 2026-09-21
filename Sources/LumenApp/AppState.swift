@@ -79,7 +79,6 @@ final class AppState: ObservableObject {
     /// 欢迎页（一个标签都没有）时给窗口级视图兜底的空通道，
     /// 保证 `@EnvironmentObject` 永远能解析到对象。
     let idleBridge = ReaderBridge()
-    let idleChat = AIChatModel()
     let idleSmartOutline = SmartOutlineModel()
 
     /// 当前标签变化时，把它的对象变更转发成工作区的变更——
@@ -97,7 +96,10 @@ final class AppState: ObservableObject {
 
     var document: OpenDocument? { activeSession?.document }
     var bridge: ReaderBridge { activeSession?.bridge ?? idleBridge }
-    var chat: AIChatModel { activeSession?.chat ?? idleChat }
+    /// 全局共享会话之后，对话不再绑定到某一本书 / 某个标签，而是进程里固定那一份
+    /// （见 `ConversationStore` / `AIChatModel`）。所以 `chat` 永远指向共享的活动会话控制器，
+    /// 不再按当前标签解析——切标签只是切换「活动会话」落在哪条历史里。
+    var chat: AIChatModel { services.activeChat }
     var smartOutline: SmartOutlineModel { activeSession?.smartOutline ?? idleSmartOutline }
 
     var documentMetadata: DocumentMetadata {
@@ -155,6 +157,13 @@ final class AppState: ObservableObject {
     /// 进入沉浸之前两块面板的可见性，退出时原样恢复。
     private var sidebarBeforeImmersive = true
     private var aiPanelBeforeImmersive = true
+
+    /// 正在进行的「面板展开 / 收起」过渡计数。
+    ///
+    /// 用计数而不是布尔：动画可以叠加（连着按两次快捷键），
+    /// 只有**最后一个** completion 回来时才该结束「调整中」；
+    /// 用布尔的话第一次 completion 就把 autoScales 放开了，第二次动画期间又在每帧重算适宽。
+    private var panelTransitionsInFlight = 0
 
     /// 本窗口。全屏是**窗口级**操作，必须有个明确的施力对象。
     private weak var mainWindow: NSWindow?
@@ -235,7 +244,18 @@ final class AppState: ObservableObject {
     }
 
     /// 切到指定标签（懒挂载在这里发生）。
+    ///
+    /// **必须清 `homeTabIsActive`**：它的语义是「当前正显示主页标签」，而
+    /// 「切到某个文档标签」与它互斥。此前这里漏了这一步，`add(_:)` / `adopt(_:)`
+    /// 都清了、唯独本方法没清，于是出现这条静默失效链：
+    ///
+    /// 点 `+` 开主页标签（`homeTabIsActive = true`）→ 再点文档标签 → `syncActiveSession()`
+    /// 里 `target = homeTabIsActive ? nil : …` 仍解析成 `nil` → `activeSession = nil`
+    /// → `state.bridge` 退回 `idleBridge`（`AppState.swift:98`）→ **图标栏点击、
+    /// ⌘1–⌘5、`revealSidebar`、引用跳转、新建便签全部写进一个空通道**：
+    /// 不崩溃、不报错、界面纹丝不动。自检 `--sidebar-tab-report` 抓到的就是它。
     func activate(_ session: ReaderSession) {
+        homeTabIsActive = false
         loadedSessionIDs.insert(session.id)
         if activeSessionID != session.id {
             activeSessionID = session.id
@@ -256,7 +276,7 @@ final class AppState: ObservableObject {
         if let index = sessions.firstIndex(where: { $0 === session }) {
             let wasActive = activeSessionID == session.id
             sessions.remove(at: index)
-            session.busyCancel?()
+            session.close()
             // 最后一个文档标签也关掉时顺手收掉主页标签：没有文档标签却留着一枚
             // 「主页」芯片，标签栏上就只剩一个点不掉也没处可去的按钮。
             if sessions.isEmpty { homeTabIsActive = false }
@@ -276,7 +296,7 @@ final class AppState: ObservableObject {
 
     func closeOthers(keeping kept: ReaderSession) {
         for session in sessions where session !== kept {
-            session.busyCancel?()
+            session.close()
         }
         sessions.removeAll { $0 !== kept }
         activate(kept)
@@ -302,7 +322,6 @@ final class AppState: ObservableObject {
         if let index = sessions.firstIndex(where: { $0 === session }) {
             let wasActive = activeSessionID == session.id
             sessions.remove(at: index)
-            session.busyCancel?()
             if wasActive {
                 let neighbor = min(index, sessions.count - 1)
                 if sessions.indices.contains(neighbor) {
@@ -432,7 +451,7 @@ final class AppState: ObservableObject {
         activeSessionObservation?.cancel()
         activeSessionObservation = nil
         for session in sessions {
-            session.busyCancel?()
+            session.close()
         }
     }
 
@@ -493,12 +512,78 @@ final class AppState: ObservableObject {
             self.isAIPanelVisible = on ? false : self.aiPanelBeforeImmersive
         }
         if animated {
-            withAnimation(DS.Motion.panel) { apply() }
+            beginPanelTransition()
+            withAnimation(DS.Motion.panel) { apply() } completion: { [weak self] in
+                self?.endPanelTransition()
+            }
         } else {
             apply()
         }
         // 沉浸（zoom）模式不再进系统全屏：用户要求「不必全屏，只收起左侧工具栏和
         // 顶部标签栏」。隐藏顶栏/侧栏由 RootView 与 ReaderContainerView 按 isImmersive 处理。
+    }
+
+    // MARK: 面板可见性（展开 / 收起的唯一入口）
+
+    /// 侧栏可见性。**所有**写入点都必须走这里，不要再直接写 `isSidebarVisible`。
+    ///
+    /// 为什么必须收敛到一个入口：面板展开 / 收起会让阅读区宽度在动画期间**每帧都在变**，
+    /// 而 PDFView 的 `autoScales == true` 会让 PDFKit 每帧重算「适宽倍率」、丢掉并重新
+    /// 栅格化整页瓦片——大文件上就是肉眼可见的屏闪。已有的 `setPanelResizing` 正是为
+    /// 这件事写的（拖分隔线那条路一直在用），但展开 / 收起这条路**从来没调用过它**。
+    /// 状态写入点散在 7 处时，任何一处漏调都会重新长出这个 bug，所以收敛。
+    func setSidebarVisible(_ visible: Bool, animated: Bool = true) {
+        guard isSidebarVisible != visible else { return }
+        if animated {
+            beginPanelTransition()
+            withAnimation(DS.Motion.panel) { isSidebarVisible = visible } completion: { [weak self] in
+                self?.endPanelTransition()
+            }
+        } else {
+            isSidebarVisible = visible
+        }
+    }
+
+    func toggleSidebar() { setSidebarVisible(!isSidebarVisible) }
+
+    /// AI 面板可见性。理由同 `setSidebarVisible(_:animated:)`。
+    func setAIPanelVisible(_ visible: Bool, animated: Bool = true) {
+        guard isAIPanelVisible != visible else { return }
+        if animated {
+            beginPanelTransition()
+            withAnimation(DS.Motion.panel) { isAIPanelVisible = visible } completion: { [weak self] in
+                self?.endPanelTransition()
+            }
+        } else {
+            isAIPanelVisible = visible
+        }
+    }
+
+    func toggleAIPanel() { setAIPanelVisible(!isAIPanelVisible) }
+
+    /// 让当前标签的阅读视图进入「面板正在调整」状态：钉住 autoScales、记下滚动锚点。
+    ///
+    /// 必须在**改状态之前**调用。写在 `onChange` 里就晚了——那时状态已经变了、
+    /// 动画已经跑了一帧，锚点已经漂了。
+    private func beginPanelTransition() {
+        panelTransitionsInFlight += 1
+        if LaunchOptions.panelTransitionReport {
+            NSLog("%@", "[Lumen][panel] beginPanelTransition：飞行中 \(panelTransitionsInFlight)"
+                  + "，setPanelResizing 闭包\(bridge.setPanelResizing == nil ? "缺失" : "在位")")
+        }
+        if panelTransitionsInFlight == 1 { bridge.setPanelResizing?(true) }
+    }
+
+    /// 动画真正结束后放开，`setPanelResizing(false)` 内部会恢复 autoScales 并补偿滚动位置。
+    ///
+    /// 用 `withAnimation(_:completion:)` 而不是「延时一个估算的动画时长」：
+    /// 后者要靠猜 spring 的收敛时刻，而 completion 是 SwiftUI 自己算准的。
+    private func endPanelTransition() {
+        panelTransitionsInFlight = max(0, panelTransitionsInFlight - 1)
+        if LaunchOptions.panelTransitionReport {
+            NSLog("%@", "[Lumen][panel] endPanelTransition：飞行中 \(panelTransitionsInFlight)")
+        }
+        if panelTransitionsInFlight == 0 { bridge.setPanelResizing?(false) }
     }
 
     private func driveFullScreen(_ on: Bool, animated: Bool) {

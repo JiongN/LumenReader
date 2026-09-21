@@ -100,10 +100,15 @@ struct ReadingSettingsPane: View {
                 LabeledSlider(
                     title: "字号",
                     value: $settings.reader.fontScale,
-                    range: 0.6...2.4,
+                    range: ReaderSettings.fontScaleMin...ReaderSettings.fontScaleMax,
                     step: 0.05,
                     valueText: { String(format: "%.0f%%", $0 * 100) }
                 )
+
+                Text(ReaderSettings.fontScaleScopeNote)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
 
                 LabeledSlider(
                     title: "行高",
@@ -166,9 +171,43 @@ struct ReadingSettingsPane: View {
 
                 Toggle("EPUB 滚动到章末自动进入下一章", isOn: $settings.reader.autoAdvanceOnScrollEnd)
             }
+
+            Section("翻译") {
+                Picker("翻译引擎", selection: $settings.reader.translationEngineID) {
+                    ForEach(TranslationEngineCatalog.all) { engine in
+                        Text(engine.displayName).tag(engine.id)
+                    }
+                }
+
+                // 引擎说明从引擎自己的描述符长出来，不在这里再手写一份：
+                // 写两份的话，以后加引擎时必然出现「界面说的和实际用的不一样」。
+                Text(currentEngineNote)
+                    .font(DS.Typo.ui(size: 11))
+                    .foregroundStyle(DS.Palette.textTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                Picker("目标语言", selection: $settings.reader.translationTargetLanguage) {
+                    ForEach(TranslationLanguage.targets) { option in
+                        Text(option.displayName).tag(option.id)
+                    }
+                }
+
+                Toggle("EPUB 逐段翻译", isOn: $settings.reader.epubTranslateEnabled)
+                    .help("译文显示在每段原文上方，可随时关闭。")
+
+                Text("EPUB 译文显示在原文上方；PDF 在阅读区右上角开启段落对照翻译。"
+                     + "Apple 系统翻译首次使用某个语言对时可能需要下载语言包。")
+                    .font(DS.Typo.ui(size: 11))
+                    .foregroundStyle(DS.Palette.textTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
         .formStyle(.grouped)
         .scrollContentBackground(.hidden)
+    }
+
+    private var currentEngineNote: String {
+        TranslationEngineCatalog.descriptor(for: settings.reader.translationEngineID).note
     }
 }
 

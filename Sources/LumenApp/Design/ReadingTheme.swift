@@ -30,9 +30,16 @@ public struct ReadingTheme: Sendable, Equatable {
         textHex: 0x292D30, secondaryTextHex: 0x62686A, accentHex: 0x38657B, isDark: false
     )
 
+    /// 暖黄（护眼）——本批降饱和后的取值（用户选定 B 档）。
+    ///
+    /// 换算依据：**色相不变**，饱和度 ×0.60、明度 +2%。压的是「视觉刺激」而不是「暖意」——
+    /// 旧值在长时间阅读下偏「扎眼」，降的是刺激度，暖调本身保留（色相未动）。
+    /// 换算后对比度（WCAG 相对亮度）：正文/背景 10.2:1、次要 4.6:1、强调 4.1:1。
+    /// 旧值（供 `--theme-report` 的「只调了一个主题」断言核对）：
+    /// 0xF3EBDD / 0xE8DFCF / 0x393229 / 0x71634F / 0x806344。
     public static let warm = ReadingTheme(
-        id: .warm, backgroundHex: 0xF3EBDD, surfaceHex: 0xE8DFCF,
-        textHex: 0x393229, secondaryTextHex: 0x71634F, accentHex: 0x806344, isDark: false
+        id: .warm, backgroundHex: 0xF8F3EB, surfaceHex: 0xEDE8DE,
+        textHex: 0x3E3A34, secondaryTextHex: 0x766D61, accentHex: 0x857360, isDark: false
     )
 
     public static let sage = ReadingTheme(

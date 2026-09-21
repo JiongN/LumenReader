@@ -1,0 +1,314 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>效果图 · PDF 逐段对照翻译 · LumenReader</title>
+<style>
+  :root{
+    --bg:#F5F4EF; --surface:#EAECE8; --page:#FEFDFA;
+    --text:#292D30; --text2:#5A6165; --text3:#8E9498;
+    --accent:#38657B; --accent-soft:#DCE6EA; --border:#D6D8D2;
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0; padding:36px 28px 72px; background:var(--bg); color:var(--text);
+    font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Helvetica Neue",Arial,sans-serif;
+    font-size:14px; line-height:1.7;
+  }
+  .wrap{max-width:900px;margin:0 auto}
+  h1{font-size:21px;font-weight:650;margin:0 0 6px;letter-spacing:.2px}
+  .sub{color:var(--text3);font-size:13px;margin-bottom:28px}
+  h2{font-size:15px;font-weight:650;margin:36px 0 10px;padding-top:22px;border-top:1px solid var(--border)}
+  h2.first{border-top:0;padding-top:0;margin-top:0}
+  .frame{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:16px;margin:14px 0}
+  .frame svg{display:block;width:100%;height:auto}
+  p{margin:10px 0;color:var(--text2)}
+  ul{margin:10px 0;padding-left:22px;color:var(--text2)}
+  li{margin:5px 0}
+  strong{color:var(--text);font-weight:650}
+  code{background:var(--surface);border:1px solid var(--border);border-radius:4px;
+       padding:1px 5px;font-size:12.5px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+  table{border-collapse:collapse;width:100%;margin:14px 0;font-size:13px}
+  th,td{border:1px solid var(--border);padding:7px 10px;text-align:left;vertical-align:top}
+  th{background:var(--surface);font-weight:650}
+  .warn{border-left:3px solid #A8503C;background:#FBEEEA;padding:10px 14px;border-radius:0 6px 6px 0;margin:14px 0;color:#7A4335}
+  .ok{border-left:3px solid #38657B;background:#EDF2F4;padding:10px 14px;border-radius:0 6px 6px 0;margin:14px 0;color:#22414F}
+  .muted{color:var(--text3);font-size:12.5px}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <h1>PDF 逐段对照翻译 · 完成后效果图</h1>
+  <div class="sub">LumenReader · <code>paper</code> 主题 · 界面尺寸按真实规格（图标栏 56pt／侧栏 248pt／标签栏 36pt）· 原文取自 Selwyn 等 2025 第 4 页真实段落</div>
+
+  <h2 class="first">一、整窗效果</h2>
+  <p>译文以<strong>段落块</strong>形式紧跟在原文段之后，不改变阅读动线；悬浮条控制整篇开关与进度；页面左侧的小圆球标出<strong>段落状态</strong>。</p>
+  <div class="frame">
+<svg viewBox="0 0 680 590" width="100%" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', 'Helvetica Neue', Arial, sans-serif">
+  <defs>
+    <clipPath id="rdrClip"><rect x="318" y="52" width="348" height="494"/></clipPath>
+    <filter id="softShadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="2" stdDeviation="4" flood-color="#000000" flood-opacity="0.10"/>
+    </filter>
+    <filter id="winShadow" x="-10%" y="-10%" width="120%" height="120%">
+      <feDropShadow dx="0" dy="6" stdDeviation="10" flood-color="#000000" flood-opacity="0.16"/>
+    </filter>
+  </defs>
+
+  <text x="14" y="14" font-size="9" fill="#6B7276">效果图 · LumenReader · paper 主题 · 素材：Selwyn 2025 第 4 页原文</text>
+
+  <g filter="url(#winShadow)">
+    <rect x="14" y="24" width="652" height="540" rx="10" fill="#F5F4EF" stroke="#D6D8D2"/>
+  </g>
+
+  <!-- 标签栏 -->
+  <path d="M14 34 a10 10 0 0 1 10-10 h632 a10 10 0 0 1 10 10 v28 h-652 z" fill="#EAECE8"/>
+  <circle cx="34" cy="43" r="4.2" fill="#E8827A"/>
+  <circle cx="48" cy="43" r="4.2" fill="#E4B96A"/>
+  <circle cx="62" cy="43" r="4.2" fill="#8CC08A"/>
+  <rect x="86" y="34" width="168" height="28" rx="6" fill="#F5F4EF"/>
+  <text x="96" y="52" font-size="7.5" fill="#292D30">Selwyn 等 — When the prompting…</text>
+  <text x="242" y="52" font-size="8" fill="#8E9498">×</text>
+  <text x="264" y="52" font-size="7.5" fill="#6B7276">Lamont — Toward a Comparative…</text>
+  <rect x="598" y="35" width="18" height="18" rx="5" fill="#DFE2DC"/>
+  <rect x="602" y="41" width="3" height="6" rx="1" fill="#38657B"/>
+  <rect x="607" y="39" width="6" height="10" rx="1" fill="#38657B"/>
+  <rect x="628" y="35" width="18" height="18" rx="5" fill="#DFE2DC"/>
+  <rect x="631" y="39" width="6" height="10" rx="1" fill="#38657B"/>
+  <rect x="639" y="41" width="3" height="6" rx="1" fill="#38657B"/>
+  <line x1="14" y1="62" x2="666" y2="62" stroke="#D6D8D2"/>
+
+  <!-- 左栏图标栏 -->
+  <rect x="14" y="62" width="56" height="502" fill="#E6E8E3"/>
+  <line x1="70" y1="62" x2="70" y2="564" stroke="#D6D8D2"/>
+  <rect x="31" y="80" width="22" height="22" rx="6" fill="#DCE6EA"/>
+  <line x1="36" y1="86" x2="48" y2="86" stroke="#38657B" stroke-width="1.4" stroke-linecap="round"/>
+  <line x1="36" y1="91" x2="48" y2="91" stroke="#38657B" stroke-width="1.4" stroke-linecap="round"/>
+  <line x1="36" y1="96" x2="44" y2="96" stroke="#38657B" stroke-width="1.4" stroke-linecap="round"/>
+  <path d="M42 114 l1.9 4.6 4.6 1.9 -4.6 1.9 -1.9 4.6 -1.9-4.6 -4.6-1.9 4.6-1.9 z" fill="none" stroke="#7C8388" stroke-width="1.2" stroke-linejoin="round"/>
+  <circle cx="40.5" cy="155" r="5" fill="none" stroke="#7C8388" stroke-width="1.4"/>
+  <line x1="44.4" y1="158.9" x2="48" y2="162.5" stroke="#7C8388" stroke-width="1.4" stroke-linecap="round"/>
+  <path d="M36 190 h12 v7 l-6 4 -6-4 z" fill="none" stroke="#7C8388" stroke-width="1.3" stroke-linejoin="round"/>
+  <line x1="38.5" y1="193.5" x2="45.5" y2="193.5" stroke="#7C8388" stroke-width="1.1"/>
+  <rect x="36" y="218" width="5" height="6" rx="1" fill="none" stroke="#7C8388" stroke-width="1.1"/>
+  <rect x="43" y="218" width="5" height="6" rx="1" fill="none" stroke="#7C8388" stroke-width="1.1"/>
+  <rect x="36" y="226" width="5" height="6" rx="1" fill="none" stroke="#7C8388" stroke-width="1.1"/>
+  <rect x="43" y="226" width="5" height="6" rx="1" fill="none" stroke="#7C8388" stroke-width="1.1"/>
+  <circle cx="42" cy="540" r="5.5" fill="none" stroke="#9AA0A2" stroke-width="1.3"/>
+  <circle cx="42" cy="540" r="2" fill="#9AA0A2"/>
+
+  <!-- 侧栏 -->
+  <rect x="70" y="62" width="248" height="502" fill="#F5F4EF"/>
+  <line x1="318" y1="62" x2="318" y2="564" stroke="#D6D8D2"/>
+  <text x="86" y="84" font-size="10.5" font-weight="600" fill="#292D30">目录</text>
+  <line x1="86" y1="94" x2="302" y2="94" stroke="#E2E4DF"/>
+  <rect x="78" y="102" width="232" height="24" rx="5" fill="#DCE6EA"/>
+  <text x="88" y="118" font-size="8" font-weight="600" fill="#38657B">1   Introduction</text>
+  <text x="88" y="144" font-size="8" fill="#4A5054">2   Technological breakdown</text>
+  <text x="88" y="170" font-size="8" fill="#4A5054">3   Method and data</text>
+  <text x="88" y="196" font-size="8" fill="#4A5054">4   Findings</text>
+  <text x="102" y="220" font-size="7.5" fill="#6B7276">4.1   When the prompting stops</text>
+  <text x="102" y="242" font-size="7.5" fill="#6B7276">4.2   Workarounds and repairs</text>
+  <text x="88" y="268" font-size="8" fill="#4A5054">5   Discussion</text>
+  <text x="88" y="294" font-size="8" fill="#4A5054">6   Conclusion</text>
+  <text x="88" y="320" font-size="8" fill="#4A5054">Notes</text>
+  <text x="88" y="346" font-size="8" fill="#4A5054">References</text>
+  <line x1="86" y1="520" x2="302" y2="520" stroke="#E2E4DF"/>
+  <text x="86" y="536" font-size="7" fill="#8E9498">共 47 行 · 当前第 4 页</text>
+
+  <!-- 阅读区 -->
+  <rect x="318" y="62" width="348" height="502" fill="#DFE1DB"/>
+  <g clip-path="url(#rdrClip)">
+    <g filter="url(#softShadow)">
+      <rect x="332" y="68" width="320" height="700" fill="#FEFDFA"/>
+    </g>
+    <rect x="332" y="68" width="320" height="700" fill="none" stroke="#E6E4DE"/>
+
+    <text x="348" y="88" font-size="6" fill="#9AA0A2" letter-spacing="0.7">312    N. SELWYN ET AL.</text>
+    <line x1="348" y1="94" x2="636" y2="94" stroke="#E6E4DE"/>
+
+    <circle cx="340" cy="104" r="5.5" fill="#38657B"/>
+    <text x="340" y="106.5" font-size="6" fill="#FFFFFF" text-anchor="middle">1</text>
+    <text x="352" y="108" font-size="7.5" fill="#292D30">Focusing on the work that teachers do in (and around) the</text>
+    <text x="352" y="119" font-size="7.5" fill="#292D30">moment 'when the prompting stops' allows us to do just this. One</text>
+    <text x="352" y="130" font-size="7.5" fill="#292D30">potentially useful way of making this extra-prompting work…</text>
+    <rect x="348" y="136" width="288" height="50" rx="4" fill="#EDF2F4"/>
+    <rect x="348" y="136" width="2.5" height="50" rx="1.25" fill="#38657B"/>
+    <text x="358" y="151" font-size="8.5" fill="#22414F">聚焦于教师在「提示停止之后」那一刻所做的工</text>
+    <text x="358" y="163" font-size="8.5" fill="#22414F">作，使我们得以把这种提示之外的工作显性化。一</text>
+    <text x="358" y="175" font-size="8.5" fill="#22414F">个有用的做法是借用 STS 的「技术故障」概念。</text>
+    <circle cx="625" cy="146" r="6" fill="#38657B"/>
+    <text x="625" y="148.5" font-size="6" fill="#FFFFFF" text-anchor="middle">译</text>
+
+    <circle cx="340" cy="196" r="5.5" fill="#FFFFFF" stroke="#38657B" stroke-width="1.1"/>
+    <text x="340" y="198.5" font-size="6" fill="#38657B" text-anchor="middle">2</text>
+    <text x="352" y="200" font-size="7.5" fill="#292D30">For STS scholars, such breakdowns 'demonstrate the</text>
+    <text x="352" y="211" font-size="7.5" fill="#292D30">inextricability of the so-called social and technical dimensions</text>
+    <text x="352" y="222" font-size="7.5" fill="#292D30">of technology' (Denis and Pontille 2023, 210). In particular…</text>
+    <rect x="348" y="228" width="288" height="50" rx="4" fill="#EDF2F4" stroke="#8FB0C0" stroke-width="1" stroke-dasharray="4 3"/>
+    <rect x="348" y="228" width="2.5" height="50" rx="1.25" fill="#38657B"/>
+    <text x="358" y="243" font-size="8.5" fill="#22414F">对 STS 学者而言，这类故障「证明了所谓技术的</text>
+    <circle cx="363" cy="261" r="5" fill="none" stroke="#B9C9D1" stroke-width="1.6"/>
+    <path d="M363 256 a5 5 0 0 1 4.3 7.5" fill="none" stroke="#38657B" stroke-width="1.6" stroke-linecap="round"/>
+    <text x="373" y="264" font-size="7" fill="#38657B">翻译中…</text>
+    <rect x="410" y="257" width="112" height="6" rx="3" fill="#D3DDE1"/>
+    <text x="628" y="264" font-size="6" fill="#8FB0C0" text-anchor="end">2 / 12</text>
+
+    <circle cx="340" cy="288" r="5.5" fill="#38657B"/>
+    <text x="340" y="290.5" font-size="6" fill="#FFFFFF" text-anchor="middle">3</text>
+    <text x="352" y="292" font-size="7.5" fill="#292D30">Drawing on this set of conceptual concerns, the present paper</text>
+    <text x="352" y="303" font-size="7.5" fill="#292D30">focuses on teachers' engagements with GenAI tools…</text>
+    <rect x="348" y="309" width="288" height="50" rx="4" fill="#EDF2F4"/>
+    <rect x="348" y="309" width="2.5" height="50" rx="1.25" fill="#38657B"/>
+    <text x="358" y="324" font-size="8.5" fill="#22414F">基于上述概念关切，本文聚焦于教师如何使用</text>
+    <text x="358" y="336" font-size="8.5" fill="#22414F">GenAI 工具产出课堂与行政工作所需的各类成</text>
+    <text x="358" y="348" font-size="8.5" fill="#22414F">果。具体而言，它回答以下研究问题：</text>
+    <circle cx="625" cy="319" r="6" fill="#38657B"/>
+    <text x="625" y="321.5" font-size="6" fill="#FFFFFF" text-anchor="middle">译</text>
+
+    <circle cx="340" cy="369" r="5.5" fill="#38657B"/>
+    <text x="340" y="371.5" font-size="6" fill="#FFFFFF" text-anchor="middle">4</text>
+    <text x="352" y="373" font-size="7.5" fill="#292D30">At the same time, any instance of technology breakdown is</text>
+    <text x="352" y="384" font-size="7.5" fill="#292D30">also seen to make underpinning infrastructures visible…</text>
+    <rect x="348" y="390" width="288" height="50" rx="4" fill="#EDF2F4"/>
+    <rect x="348" y="390" width="2.5" height="50" rx="1.25" fill="#38657B"/>
+    <text x="358" y="405" font-size="8.5" fill="#22414F">同时，任何一次技术故障也被视为使底层基础</text>
+    <text x="358" y="417" font-size="8.5" fill="#22414F">设施「显形」的时刻——即「基础设施反转」</text>
+    <text x="358" y="429" font-size="8.5" fill="#22414F">（Bowker 1994）。</text>
+    <circle cx="625" cy="400" r="6" fill="#38657B"/>
+    <text x="625" y="402.5" font-size="6" fill="#FFFFFF" text-anchor="middle">译</text>
+
+    <circle cx="340" cy="450" r="5.5" fill="#C9CFD2"/>
+    <text x="340" y="452.5" font-size="6" fill="#FFFFFF" text-anchor="middle">5</text>
+    <text x="352" y="454" font-size="7.5" fill="#292D30">There are, for example, numerous accounts within the STS</text>
+    <text x="352" y="465" font-size="7.5" fill="#292D30">literature around technology failures covering everything…</text>
+    <rect x="348" y="471" width="288" height="50" rx="4" fill="#F2F4F1" stroke="#DDE0DA" stroke-width="1"/>
+    <text x="358" y="488" font-size="7.5" fill="#8E9498">未翻译 · 队列中</text>
+    <text x="552" y="488" font-size="6.5" fill="#8E9498">6 / 12</text>
+
+    <text x="360" y="535" font-size="7.5" fill="#292D30">failures covering everything from catastrophic events such</text>
+    <text x="360" y="546" font-size="7.5" fill="#292D30">as the US Challenger space shuttle disaster (Vaughan 1996)…</text>
+  </g>
+
+  <g filter="url(#softShadow)">
+    <rect x="500" y="74" width="150" height="24" rx="12" fill="#FFFFFF" stroke="#D6D8D2"/>
+  </g>
+  <circle cx="518" cy="86" r="5.5" fill="none" stroke="#38657B" stroke-width="1.2"/>
+  <ellipse cx="518" cy="86" rx="2.3" ry="5.5" fill="none" stroke="#38657B" stroke-width="1"/>
+  <line x1="512.5" y1="86" x2="523.5" y2="86" stroke="#38657B" stroke-width="1"/>
+  <text x="530" y="89" font-size="7.5" fill="#292D30">对照翻译</text>
+  <rect x="580" y="81" width="20" height="11" rx="5.5" fill="#38657B"/>
+  <circle cx="594.5" cy="86.5" r="4" fill="#FFFFFF"/>
+  <line x1="606" y1="79" x2="606" y2="93" stroke="#E2E4DF"/>
+  <text x="612" y="89" font-size="6.5" fill="#5A6165">4 / 12 段</text>
+
+  <text x="14" y="580" font-size="8.5" fill="#6B7276">① 译文紧跟原文段（段落堆叠），不改动阅读动线 ② 悬浮条可整篇开关 ③ 序号球＝段落状态：实心=已译／空心=进行中／灰=排队</text>
+</svg>
+  </div>
+
+  <h2>二、译文块的四种状态</h2>
+  <p>这四种状态能不能一眼分清，直接决定这个功能好不好用。失败态<strong>必须写出原因</strong>并给「只重试这一段」——免密钥通道有限流，这是必须有的止损。</p>
+  <div class="frame">
+<svg viewBox="0 0 680 470" width="100%" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', 'Helvetica Neue', Arial, sans-serif">
+  <text x="20" y="14" font-size="9.5" font-weight="600" fill="#292D30">译文块的四种状态 · 按 1:1 尺寸放大</text>
+  <text x="248" y="14" font-size="8" fill="#8E9498">原文用小字保留，译文块紧跟其下，不遮原文</text>
+
+  <rect x="20" y="26" width="640" height="92" rx="8" fill="#FBFBF8" stroke="#E2E4DF"/>
+  <text x="34" y="46" font-size="9.5" font-weight="600" fill="#38657B">已完成</text>
+  <text x="34" y="63" font-size="7.5" fill="#8E9498">浅强调底色 + 左侧强调竖条</text>
+  <text x="34" y="75" font-size="7.5" fill="#8E9498">右上角「译」圆标</text>
+  <text x="34" y="87" font-size="7.5" fill="#8E9498">译文 8.5pt，比原文略大</text>
+  <line x1="172" y1="38" x2="172" y2="106" stroke="#EAECE8"/>
+  <text x="186" y="46" font-size="7.5" fill="#292D30">For STS scholars, such breakdowns 'demonstrate the inextricability of the</text>
+  <text x="186" y="57" font-size="7.5" fill="#292D30">so-called social and technical dimensions of technology' (Denis and</text>
+  <rect x="186" y="64" width="460" height="34" rx="4" fill="#EDF2F4"/>
+  <rect x="186" y="64" width="2.5" height="34" rx="1.25" fill="#38657B"/>
+  <text x="196" y="79" font-size="8.5" fill="#22414F">对 STS 学者而言，这类故障「证明了所谓技术的社会维度与技术</text>
+  <text x="196" y="92" font-size="8.5" fill="#22414F">维度无法分离」（Denis and Pontille 2023, 210）。</text>
+  <circle cx="632" cy="74" r="7" fill="#38657B"/>
+  <text x="632" y="77" font-size="6.5" fill="#FFFFFF" text-anchor="middle">译</text>
+
+  <rect x="20" y="130" width="640" height="92" rx="8" fill="#FBFBF8" stroke="#E2E4DF"/>
+  <text x="34" y="150" font-size="9.5" font-weight="600" fill="#B07A28">翻译中</text>
+  <text x="34" y="167" font-size="7.5" fill="#8E9498">虚线框 = 尚未定稿</text>
+  <text x="34" y="179" font-size="7.5" fill="#8E9498">已到达的译文照常显示</text>
+  <text x="34" y="191" font-size="7.5" fill="#8E9498">后半段用占位条 + 进度环</text>
+  <line x1="172" y1="142" x2="172" y2="210" stroke="#EAECE8"/>
+  <text x="186" y="150" font-size="7.5" fill="#292D30">In particular, research around this topic often focuses on how a</text>
+  <text x="186" y="161" font-size="7.5" fill="#292D30">technology breakdown disrupts the sociomaterial 'order' that has…</text>
+  <rect x="186" y="168" width="460" height="34" rx="4" fill="#EDF2F4" stroke="#8FB0C0" stroke-width="1" stroke-dasharray="4 3"/>
+  <rect x="186" y="168" width="2.5" height="34" rx="1.25" fill="#38657B"/>
+  <text x="196" y="183" font-size="8.5" fill="#22414F">尤其关注一次技术故障如何打断（从而让人注意到）围绕该技术</text>
+  <circle cx="201" cy="194" r="5" fill="none" stroke="#B9C9D1" stroke-width="1.6"/>
+  <path d="M201 189 a5 5 0 0 1 4.3 7.5" fill="none" stroke="#B07A28" stroke-width="1.6" stroke-linecap="round"/>
+  <text x="211" y="197" font-size="7" fill="#B07A28">翻译中…</text>
+  <rect x="266" y="190" width="222" height="6" rx="3" fill="#D3DDE1"/>
+  <text x="632" y="197" font-size="7" fill="#8FB0C0" text-anchor="end">第 2 / 12 段</text>
+
+  <rect x="20" y="234" width="640" height="92" rx="8" fill="#FBFBF8" stroke="#E2E4DF"/>
+  <text x="34" y="254" font-size="9.5" font-weight="600" fill="#A8503C">失败</text>
+  <text x="34" y="271" font-size="7.5" fill="#8E9498">暖色底 + 明确写出原因</text>
+  <text x="34" y="283" font-size="7.5" fill="#8E9498">右侧给「重试」按钮</text>
+  <text x="34" y="295" font-size="7.5" fill="#8E9498">原文一字不动，照常可读</text>
+  <line x1="172" y1="246" x2="172" y2="314" stroke="#EAECE8"/>
+  <text x="186" y="254" font-size="7.5" fill="#292D30">At the same time, any instance of technology breakdown is also seen</text>
+  <text x="186" y="265" font-size="7.5" fill="#292D30">to make underpinning infrastructures visible – a revealing moment…</text>
+  <rect x="186" y="272" width="460" height="34" rx="4" fill="#FBEEEA" stroke="#E3B9AC" stroke-width="1"/>
+  <rect x="186" y="272" width="2.5" height="34" rx="1.25" fill="#A8503C"/>
+  <text x="196" y="287" font-size="7.5" fill="#A8503C">译文获取失败 · 必应通道返回 429（请求过于频繁）</text>
+  <text x="196" y="300" font-size="7" fill="#B98C7E">已自动退避 30 秒，稍后可重试；本次不计入段落进度</text>
+  <rect x="566" y="283" width="66" height="18" rx="5" fill="#FFFFFF" stroke="#E3B9AC"/>
+  <text x="599" y="295.5" font-size="7.5" fill="#A8503C" text-anchor="middle">重试这一段</text>
+
+  <rect x="20" y="338" width="640" height="92" rx="8" fill="#FBFBF8" stroke="#E2E4DF"/>
+  <text x="34" y="358" font-size="9.5" font-weight="600" fill="#8E9498">跳过</text>
+  <text x="34" y="375" font-size="7.5" fill="#8E9498">纯灰、不吸引注意</text>
+  <text x="34" y="387" font-size="7.5" fill="#8E9498">明确写出「为什么没译」</text>
+  <text x="34" y="399" font-size="7.5" fill="#8E9498">图注 / 公式 / 扫描页</text>
+  <line x1="172" y1="350" x2="172" y2="418" stroke="#EAECE8"/>
+  <text x="186" y="358" font-size="7.5" fill="#292D30">Figure 2. Distribution of reported breakdowns (n = 148).</text>
+  <text x="186" y="369" font-size="7" fill="#9AA0A2">［上图：条形图，PDF 内为位图，无文字层］</text>
+  <rect x="186" y="376" width="460" height="34" rx="4" fill="#F2F4F1" stroke="#DDE0DA" stroke-width="1"/>
+  <text x="196" y="397" font-size="7.5" fill="#8E9498">已跳过 —— 该段落为图注 / 无文本层，不产生译文</text>
+
+  <text x="20" y="450" font-size="8" fill="#6B7276">入口：阅读区右上角悬浮条（整篇开关 + N / M 段进度）。译文只在叠加层显示，任何时候都不写回你的 PDF。</text>
+  <text x="20" y="463" font-size="8" fill="#8E9498">「重试这一段」只重发失败的那一段，不重跑整篇 —— 免密钥通道有限流，这是必须有的止损。</text>
+</svg>
+  </div>
+
+  <h2>三、这张图里哪些是真的、哪些是画的</h2>
+  <table>
+    <tr><th style="width:34%">项目</th><th>来源</th></tr>
+    <tr><td>界面尺寸（56 / 248 / 36pt）</td><td><strong>真实</strong>：取自 <code>LeftRail.width</code>、<code>layout_assert.py</code> 的 <code>SIDEBAR_FIXED_WIDTH</code>、<code>TabBar.height</code></td></tr>
+    <tr><td>配色（#F5F4EF / #EAECE8 / #292D30 / #38657B）</td><td><strong>真实</strong>：<code>ReadingTheme</code> 的 <code>paper</code> 主题，你当前正在用</td></tr>
+    <tr><td>英文原文</td><td><strong>真实</strong>：从你那份 Selwyn 2025 PDF 第 4 页抽出的段落（当页 4083 字符）</td></tr>
+    <tr><td>中文译文</td><td><strong>我写的</strong>。用来示意排版与字数，<em>不代表实际翻译质量</em></td></tr>
+    <tr><td>段落序号球、进度 2/12</td><td><strong>示意</strong>。实际段数按正文段落抽取结果算</td></tr>
+    <tr><td>批注层</td><td>图里没画。真实实现中译文叠加层与批注层是<strong>两个独立图层</strong>，需额外验证是否互相干扰</td></tr>
+  </table>
+
+  <h2>四、做这个之前，三条我必须提醒的硬约束</h2>
+  <div class="warn">
+    <strong>① 段落抽取是本机唯一没验过的一环。</strong>整行高亮那轮我实测发现：<code>page.selection(for:)</code> <strong>不按矩形横向裁剪</strong>（中线缝宽恒为 0.0），<code>selectionForLine(at:)</code> 在两栏版面上左右栏返回<strong>完全相同</strong>的 bounds。这些 PDFKit 行为会直接影响段落聚类。你库里的文档实测全是单栏，所以单栏能过；<strong>分栏版面本机拿不到可验证样本</strong>。
+  </div>
+  <div class="warn">
+    <strong>② 结构化版面识别（表格 / 段落合并）本机做不了。</strong>你系统是 macOS 26.6.2，但<strong>本机 SDK 只到 15.5</strong>（没有 Xcode，只有 CommandLineTools），Vision 的 <code>RecognizeDocumentsRequest</code>（macOS 26.0+）<strong>编不出来</strong>——我实跑 <code>swiftc -typecheck</code> 报 <code>cannot find in scope</code>。要拿它得更新 SDK，不是抬部署目标。
+  </div>
+  <div class="ok">
+    <strong>③ Apple Translation 通道实测成立，可作离线兜底。</strong><code>LanguageAvailability</code> 在本机 SDK 下编译通过并实跑读数：<code>en→zh-Hans</code> 与 <code>zh-Hans→en</code> 都是「受支持、模型未下载」——<strong>首次使用会弹系统下载框</strong>，界面上必须如实告知。且它的 <code>TranslationSession</code> 只能从 SwiftUI 的 <code>translationTask</code> 拿到，与「LumenKit 不许 import SwiftUI」冲突，调用点只能落在界面层。
+  </div>
+
+  <h2>五、建议的开工方式</h2>
+  <p>先做<strong>第一批</strong>：段落抽取纯函数 + 表驱动断言。不打网络、不改界面、不动你的 PDF。</p>
+  <ul>
+    <li>先在 <code>text.pdf</code> 与你几份真实论文上量出「抽出来的段落」对不对（段落数、边界、有没有把页眉页脚混进去）；</li>
+    <li>这一关不过，后面叠加层与引擎全是白搭；</li>
+    <li>过了再决定引擎（必应主 + Apple 兜底）与呈现细节。</li>
+  </ul>
+
+  <p class="muted">本文件与 <code>docs/RESEARCH-pdf-contrast-translation.md</code> 配套阅读，后者含完整调研、分级建议与未验证边界。</p>
+
+</div>
+</body>
+</html>

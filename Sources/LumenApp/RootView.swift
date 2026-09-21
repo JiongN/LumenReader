@@ -1,7 +1,6 @@
 import SwiftUI
 import AppKit
 import LumenKit
-import LumenKit
 
 struct RootView: View {
 
@@ -43,15 +42,6 @@ struct RootView: View {
         // 标题栏透明（fullSizeContentView）后，让整棵树延伸到窗口最顶，标签栏才能与
         // 红黄绿交通灯落在同一行（Obsidian 式）。交通灯悬浮在最左，TabBar 已预留空位。
         .ignoresSafeArea(edges: .top)
-        // 窗口级浮层与菜单动作一律作用于「当前标签」：这里注入当前会话的对象，
-        // 各标签宿主内部还会再注入自己的会话，保证后台标签不串台。
-        .environmentObject(state.bridge)
-        .environmentObject(state.chat)
-        .environmentObject(state.smartOutline)
-        // 沉浸 HUD（ImmersiveHUD）在 overlay 里 `@EnvironmentObject` 读 AppState 与
-        // KeyBindingStore；这里必须注入，否则沉浸条一浮现就因缺环境对象崩溃（EnvironmentObject.error）。
-        .environmentObject(state)
-        .environmentObject(state.keyBindings)
         // 欢迎页 ↔ 阅读器之间交叉淡入。
         .animation(DS.Motion.content, value: state.document?.id)
         // 主题过渡**只挂在这块垫色上**（见 ThemeBackdrop 注释）。
@@ -67,7 +57,7 @@ struct RootView: View {
         }
         .overlay {
             if state.isPageJumpVisible {
-                PageJumpPanel()
+                PageJumpPanel(state: state, bridge: state.bridge)
                     .transition(.opacity)
             }
         }
@@ -83,6 +73,12 @@ struct RootView: View {
                 .environmentObject(state.bridge)
                 .environmentObject(state.keyBindings)
         }
+        // These injections must wrap the overlays, not only their underlying content.
+        .environmentObject(state)
+        .environmentObject(state.bridge)
+        .environmentObject(state.chat)
+        .environmentObject(state.smartOutline)
+        .environmentObject(state.keyBindings)
         .windowAppearance(isDark: effectiveIsDark)
         .windowState(state)
         .task {
@@ -103,7 +99,11 @@ struct RootView: View {
 
             if let prompt = LaunchOptions.askPrompt {
                 // 等阅读视图与聊天模型完成绑定
-                try? await Task.sleep(nanoseconds: 1_200_000_000)
+                // 双文档自检要等两个保活阅读器都填好检索闭包；大 PDF
+                // 在 1.2 秒时仍可能只装好当前标签，那会让自检误退化成单文档。
+                let delay: UInt64 = LaunchOptions.comparisonOpenPath == nil
+                    ? 1_200_000_000 : 3_000_000_000
+                try? await Task.sleep(nanoseconds: delay)
                 state.pendingAIRequest = AIRequest(kind: .custom, customPrompt: prompt)
             }
 
@@ -200,12 +200,14 @@ struct RootView: View {
 struct SessionHostView: View {
 
     @ObservedObject var session: ReaderSession
+    /// 共享工作区：全局对话从这里取（不再取 session.chat，见 `AppState.chat`）。
+    @EnvironmentObject private var state: AppState
 
     var body: some View {
         ReaderContainerView(session: session)
             .environmentObject(session)
             .environmentObject(session.bridge)
-            .environmentObject(session.chat)
+            .environmentObject(state.chat)
             .environmentObject(session.smartOutline)
     }
 }

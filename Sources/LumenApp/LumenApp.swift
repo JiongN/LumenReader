@@ -59,11 +59,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         if LaunchOptions.themeReport {
-            let ids = ReadingTheme.all.map { "\($0.id.rawValue)/\($0.id.displayName)" }
-            NSLog("[Lumen][theme] 可选主题 \(ReadingTheme.all.count) 个：\(ids.joined(separator: "、"))")
-            NSLog("[Lumen][theme] 是否含纯黑 oled：\(ReadingTheme.all.contains { $0.id == .oled })")
-            NSLog("[Lumen][theme] theme(for: .oled) → \(ReadingTheme.theme(for: .oled).id.rawValue)")
-            NSLog("[Lumen][theme] ReadingThemeID.oled.migrated → \(ReadingThemeID.oled.migrated.rawValue)")
+            // 主题自检搬进了 ThemeAudit：五套主题的 hex / 饱和度 / 对比度读数，
+            // 以及「暖黄降饱和」「其余四套一个字节没动」两组建言（可证伪）。
+            ThemeAudit.run()
         }
 
         // 快捷键自检：打印当前表并实跑一遍改绑规则（用临时文件，不碰用户配置）
@@ -71,6 +69,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         // OCR 右键菜单自检：纯函数表驱动断言（菜单本身没法自动化验证）
         OCRMenuAudit.run()
+
+        // 入口归属自检：断言语义「每个动作只归一个入口组」
+        EntryAudit.run()
 
         // Agent 自检：预设、提示词拼装、一次真实的联网文献检索
         if LaunchOptions.agentReport {
@@ -92,12 +93,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // 必须在截图自检注册之前：窗口是同步创建的，不再依赖 SwiftUI 场景的异步装配。
         WindowManager.shared.startup()
 
+        // 字号快捷键与边界自检（纯函数 + 格式分发 + 行为回读 + md5 自证）。
+        // 放在建窗之后：需要 services（其 SettingsStore 已因 isAuditRun 开 suppressSave）。
+        if LaunchOptions.fontScaleReport {
+            FontScaleAudit.run(services: WindowManager.shared.services)
+        }
+
+        // 全局共享会话自检：菜单规划器 / 跨文档引用降级 / 新建 / 切换 / 磁盘往返 / 流式不变量。
+        // 同样放在建窗之后取 services。audit 模式下落盘都在临时目录，不污染真实数据。
+        if LaunchOptions.conversationReport {
+            ConversationAudit.run(services: WindowManager.shared.services)
+        }
+
         // AppKit 显式建窗后 SwiftUI 命令菜单的快捷键不落地，在这里装全局按键路由。
         GlobalShortcutRouter.shared.install(services: WindowManager.shared.services)
         // 标题栏透明 + 没有系统工具栏后，AppKit 仍会给「帮助」菜单自动塞一个
         // 「Toggle Sidebar ⌘S」。它与我们的自定义 ⌘S 抢键，正是冲突音来源。清掉它的键等价物。
         stripSystemToggleSidebarShortcut()
 
+        if LaunchOptions.flag("--lifecycle-report") {
+            SessionLifecycleAudit.run(services: WindowManager.shared.services)
+        }
         WindowCapture.scheduleCaptureIfRequested()
 
         // 快捷键自检：合成 ⌘⌥S 喂给全局路由，验证面板切换真正响应。
@@ -260,10 +276,13 @@ struct LumenCommands: Commands {
 
             Divider()
 
+            // 「文件 > 导出」是导出类动作的**唯一入口**。两项都从 `ActionEntries`
+            // 长出（含文案、顺序与可用性），不再手写——手写正是上一轮「同一个导出动作
+            // 散落在顶栏 / AI 面板 / 文件菜单三处」的来源。
             Menu("导出") {
-                item(.exportSummary)
-                Button("对话记录为 Markdown…") { state?.exportTranscriptToFile() }
-                    .disabled(state?.chat.bubbles.isEmpty ?? true)
+                ForEach(ActionEntries.entries(in: .fileExport)) { entry in
+                    exportItem(entry)
+                }
             }
 
             Divider()
@@ -373,6 +392,20 @@ struct LumenCommands: Commands {
 
             Button("查看 AI 智能目录") { state?.revealSidebar(tab: .smartOutline) }
                 .disabled(state?.document == nil || state?.smartOutline.outline == nil)
+        }
+    }
+
+    /// 「文件 > 导出」里的一项：文案取自 planner，可用性与执行取自它挂着的 `LumenAction`。
+    /// 没有阅读器窗口时（极少数时序）菜单项可见但不可点。
+    @ViewBuilder
+    private func exportItem(_ entry: ActionEntry) -> some View {
+        let title = entry.title
+        if let state, let action = entry.action {
+            Button(title) { action.run(state) }
+                .disabled(!action.isEnabled(in: state))
+        } else {
+            Button(title) {}
+                .disabled(true)
         }
     }
 

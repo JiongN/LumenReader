@@ -207,12 +207,17 @@ struct AISettingsPane: View {
 
     private func modelSection(_ binding: Binding<AIProviderConfig>) -> some View {
         Section("模型") {
-            LabeledField(label: "模型名") {
+            LabeledField(label: "当前模型") {
                 HStack(spacing: DS.Space.s) {
                     TextField("deepseek-chat", text: binding.selectedModel)
                         .textFieldStyle(.roundedBorder)
                         .font(DS.Typo.ui(size: 12, design: .monospaced))
                         .labelsHidden()
+                        .onSubmit { addSelectedModel(to: binding) }
+
+                    Button("加入列表") { addSelectedModel(to: binding) }
+                        .disabled(binding.wrappedValue.selectedModel
+                            .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
 
                     Button {
                         Task { await fetchModels(binding.wrappedValue) }
@@ -229,37 +234,42 @@ struct AISettingsPane: View {
             }
 
             if !binding.wrappedValue.models.isEmpty {
-                LabeledField(label: "已获取") {
-                    ScrollView(.horizontal, showsIndicators: false) {
-                        HStack(spacing: DS.Space.xs) {
-                            ForEach(binding.wrappedValue.models, id: \.self) { model in
+                LabeledField(label: "可用模型") {
+                    VStack(spacing: 2) {
+                        ForEach(binding.wrappedValue.models, id: \.self) { model in
+                            HStack(spacing: DS.Space.s) {
                                 Button {
                                     binding.wrappedValue.selectedModel = model
                                 } label: {
-                                    Text(model)
-                                        .font(DS.Typo.ui(size: 11))
-                                        .padding(.horizontal, 7)
-                                        .padding(.vertical, 3)
-                                        .background(
-                                            Capsule().fill(
-                                                model == binding.wrappedValue.selectedModel
-                                                    ? DS.Palette.accent
-                                                    : DS.Palette.surfaceSunken
-                                            )
-                                        )
-                                        .foregroundStyle(
-                                            model == binding.wrappedValue.selectedModel
-                                                ? Color.white
-                                                : DS.Palette.textSecondary
-                                        )
-                                }
-                                .buttonStyle(.plain)
+                                    Image(systemName: model == binding.wrappedValue.selectedModel
+                                          ? "largecircle.fill.circle" : "circle")
+                                        .foregroundStyle(model == binding.wrappedValue.selectedModel
+                                            ? DS.Palette.accent : DS.Palette.textTertiary)
                             }
+                            .buttonStyle(.plain)
+                            Text(model)
+                                .font(DS.Typo.ui(size: 11.5, design: .monospaced))
+                                .foregroundStyle(DS.Palette.textPrimary)
+                                .lineLimit(1)
+                            Spacer(minLength: 0)
+                            Button {
+                                removeModel(model, from: binding)
+                            } label: {
+                                Image(systemName: "xmark.circle.fill")
+                                    .foregroundStyle(DS.Palette.textTertiary)
+                            }
+                            .buttonStyle(.plain)
+                            .help("从这个服务商移除模型")
                         }
-                        .padding(.vertical, 1)
                     }
                 }
             }
+            }
+
+            Text("一个服务商可以保存并切换多个模型。可以用“获取”从接口读取，也可以输入模型名后加入列表。")
+                .font(DS.Typo.ui(size: 10.5))
+                .foregroundStyle(DS.Palette.textTertiary)
+                .fixedSize(horizontal: false, vertical: true)
 
             LabeledSlider(
                 title: "温度",
@@ -444,6 +454,23 @@ struct AISettingsPane: View {
         keyInput = ""
         hasStoredKey = false
         feedback = nil
+    }
+
+    private func addSelectedModel(to binding: Binding<AIProviderConfig>) {
+        let model = binding.wrappedValue.selectedModel
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !model.isEmpty else { return }
+        binding.wrappedValue.selectedModel = model
+        if !binding.wrappedValue.models.contains(model) {
+            binding.wrappedValue.models.append(model)
+        }
+    }
+
+    private func removeModel(_ model: String, from binding: Binding<AIProviderConfig>) {
+        binding.wrappedValue.models.removeAll { $0 == model }
+        if binding.wrappedValue.selectedModel == model {
+            binding.wrappedValue.selectedModel = binding.wrappedValue.models.first ?? ""
+        }
     }
 
     private func refreshKeyState() {

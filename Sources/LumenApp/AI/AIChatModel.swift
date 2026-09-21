@@ -1,6 +1,34 @@
 import SwiftUI
 import LumenKit
 
+// MARK: - Bubble 的容错解码
+
+/// `Bubble` 的容错解码必须写在 **extension** 里，不能写进 struct 本体。
+///
+/// 这不是风格问题，是 Swift 的硬规则：**类型本体里只要声明了任何一个初始化器，
+/// 逐成员初始化器就不再合成**。`init(from:)` 一旦写进 `Bubble` 本体，全仓所有
+/// `Bubble(role:text:…)` 立刻报「missing argument for parameter 'from' in call」
+/// —— 本轮真的这么踩了一次，62 个编译错误全部由这一处级联而来。
+/// 放进 extension 则保留逐成员构造器，`CodingKeys` 与 `encode(to:)` 照常合成。
+///
+/// 之所以要容错解码（README 硬约束第 2 条）：**数组里只要有一个气泡缺字段，
+/// 整条 `[Bubble]` 就会解码失败、用户整本对话全丢**。所以每个字段都写成
+/// `(try? decode) ?? 默认值`，任一键缺失都不影响其余气泡。
+extension AIChatModel.Bubble {
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = (try? c.decode(UUID.self, forKey: .id)) ?? UUID()
+        role = (try? c.decode(Role.self, forKey: .role)) ?? .user
+        text = (try? c.decode(String.self, forKey: .text)) ?? ""
+        reasoning = (try? c.decode(String.self, forKey: .reasoning)) ?? ""
+        progress = (try? c.decode(String.self, forKey: .progress)) ?? ""
+        citations = (try? c.decode([DocumentLocator].self, forKey: .citations)) ?? []
+        taskTitle = (try? c.decode(String.self, forKey: .taskTitle)) ?? ""
+        failed = (try? c.decode(Bool.self, forKey: .failed)) ?? false
+        sourceDocPath = try? c.decodeIfPresent(String.self, forKey: .sourceDocPath)
+    }
+}
+
 /// AI 面板的对话模型。
 ///
 /// 刻意不持有 `SettingsStore`：面板由环境对象驱动，如果模型自己再存一份设置，
@@ -28,6 +56,13 @@ final class AIChatModel: ObservableObject {
         var citations: [DocumentLocator] = []
         var taskTitle: String = ""
         var failed: Bool = false
+        /// 这条气泡是由「哪一份文档」的提问产生的。
+        ///
+        /// 全局共享会话之后，一条回答的引用很可能指向**另一本书**——光看回答本身分不出。
+        /// 把来源记到**每一条气泡**上，才能在 `citationRow` 精确判断「这个引用是不是指向当前这本书」，
+        /// 决定引用按钮能不能点（见 `ConversationCitationPolicy`）。`nil` 表示来源未知
+        /// （比如从旧版本迁移来的会话、或是一段没有文档上下文的整书总结）。
+        var sourceDocPath: String?
 
         static func == (lhs: Bubble, rhs: Bubble) -> Bool {
             lhs.id == rhs.id
@@ -36,6 +71,7 @@ final class AIChatModel: ObservableObject {
                 && lhs.progress == rhs.progress
         }
     }
+
 
     // MARK: 状态
 
@@ -67,6 +103,9 @@ final class AIChatModel: ObservableObject {
         var translateTarget: String
         var template: PromptTemplate?
         var agent: AgentConfig?
+        /// 请求发生时的那份技能库。Agent 上只存技能 id，回放时要靠**当时**这一份
+        /// 才知道技能要求是什么——不记的话，重跑出来的回答会和第一次不一样。
+        var skills: [AgentSkill] = []
         /// 输入框上的「联网检索」手动开关
         var webSearchEnabled: Bool
     }
@@ -86,7 +125,11 @@ final class AIChatModel: ObservableObject {
 
     private var history: [AIMessage] = []
     private var streamTask: Task<Void, Never>?
-    private var documentPath: String?
+
+    /// 全局共享的会话仓库。本模型是「活动会话控制器」：
+    /// `bubbles` 是活动会话的内存活副本（流式期间每 40ms 改一次，不能直接从 store 算，
+    /// 否则每秒 25 次写盘），只有落到几个固定「落盘点」时才会写穿 `store`。
+    let store: ConversationStore
 
     // 流式输出节流。模型每秒可能吐几十个 token，若每个 token 都写一次 `@Published`，
     // SwiftUI 会在一帧内重排多次，滚动立刻掉帧。这里按约 25Hz 合并刷新，
@@ -102,35 +145,128 @@ final class AIChatModel: ObservableObject {
 
     // MARK: - 绑定文档
 
-    func bind(to document: OpenDocument?) {
-        stop()
-        streamTask = nil
-        history = []
-        bubbles = []
-        draft = ""
-        pendingDelta = ""
-        // 换书之后「上一条请求」指向的是另一本书的内容，重跑它没有意义
-        lastRequest = nil
-        documentPath = document?.url.standardizedFileURL.path
-        loadPersistedChat()
+    // MARK: - 初始化
+
+    init(store: ConversationStore) {
+        self.store = store
     }
 
-    private func loadPersistedChat() {
-        guard let documentPath else { return }
-        let url = AppPaths.chatHistoryFile(forPath: documentPath)
-        guard let data = try? Data(contentsOf: url),
-              let saved = try? JSONDecoder().decode([Bubble].self, from: data) else { return }
-        bubbles = saved.filter { $0.role != .notice }
+    // MARK: - 活动会话控制
 
-        // 复原历史时只收「一问一答都完整」的对子。
-        //
-        // 上一轮如果因为网络错误或用户点了停止而失败，存档里就只剩一条 user 消息。
-        // 把它单独放进 history，模型会看到一个没人回答的问题，于是在新一轮里
-        // 又把那个旧问题答一遍——用户会觉得"我明明问了别的，它却答非所问"。
+    /// 从 `store` 载入当前活动会话的 `bubbles` + `history`，并清掉草稿等瞬时状态。
+    ///
+    /// 取代了原 `bind(to:)` 的载入职责——全局共享会话之后不再「按文档绑定」，
+    /// 而是在切换活动会话 / 新建会话后从这里把对应的那一份拉进来。
+    func showActiveConversation() {
+        let conv = store.activeConversation
+        bubbles = conv?.bubbles ?? []
+        // 载入时按「只收完整对子」规则从气泡重建 history（见 `rebuildHistory`）。
+        history = Self.rebuildHistory(from: bubbles)
+        draft = ""
+        pendingDelta = ""
+        lastRequest = nil
+        streamingID = nil
+        isStreaming = false
+    }
+
+    /// 开启一个全新会话：先 flush 当前（写盘），再建、切过去、载入空副本。
+    /// 返回新会话 id，供自检回读。
+    @discardableResult
+    func newConversation(sourcePath: String?, sourceTitle: String?) -> UUID {
+        flushActiveToStore()
+        let id = store.createConversation(sourcePath: sourcePath, sourceTitle: sourceTitle)
+        store.setActive(id)
+        showActiveConversation()
+        return id
+    }
+
+    /// 切到指定历史会话：先 flush 当前，再切。
+    func switchTo(_ id: UUID) {
+        guard store.conversation(id: id) != nil else { return }
+        flushActiveToStore()
+        store.setActive(id)
+        showActiveConversation()
+    }
+
+    /// 只清当前会话的内容，会话本身留在列表里。
+    func clearActive() {
+        stop()
+        bubbles = []
+        history = []
+        lastRequest = nil
+        pendingDelta = ""
+        draft = ""
+        flushActiveToStore()
+    }
+
+    /// 删除当前会话（删除项走二次确认，见 AIPanelView / ActionEntries）。
+    func deleteActive() {
+        guard let id = store.activeID else { return }
+        flushActiveToStore()
+        store.delete(id: id)
+        showActiveConversation()
+    }
+
+    /// 重命名当前会话（`nil` 表示清除自定义标题、回退到自动标题）。
+    func renameActive(_ title: String?) {
+        guard let id = store.activeID else { return }
+        store.rename(id: id, title)
+    }
+
+    /// 这条引用在当前文档里能不能跳（跨文档引用降级，正确性红线）。
+    ///
+    /// 直接调纯函数 `ConversationCitationPolicy`（便于自检表驱动断言）。
+    /// 这里不传气泡级来源（传 `nil`），只用会话的出身文档判定——
+    /// 适用于「整个活动会话」粒度的查询。
+    func isCitationActive(_ locator: DocumentLocator, currentDocPath: String?) -> Bool {
+        let conv = store.activeConversation
+        return ConversationCitationPolicy.isActive(
+            locator: locator,
+            bubbleDocPath: nil,
+            conversationDocPath: conv?.sourceDocPath,
+            currentDocPath: currentDocPath
+        )
+    }
+
+    /// 气泡 footer 引用编号按钮用：带上这条气泡自己的来源文档路径，
+    /// 比会话级判定更精确（一次会话里可能从不同书问过，逐条气泡的出处才准）。
+    func isCitationActive(
+        _ locator: DocumentLocator,
+        bubbleDocPath: String?,
+        currentDocPath: String?
+    ) -> Bool {
+        let conv = store.activeConversation
+        return ConversationCitationPolicy.isActive(
+            locator: locator,
+            bubbleDocPath: bubbleDocPath,
+            conversationDocPath: conv?.sourceDocPath,
+            currentDocPath: currentDocPath
+        )
+    }
+
+    /// 把当前内存里的气泡 + history 写穿到 store（并落盘）。
+    ///
+    /// **不变量**：只有这几个「落盘点」会调用它——`submit`（用户气泡已追加后）、
+    /// `finishStreaming`、`stop`、`clearActive`、`deleteActive`、`switchTo`、`newConversation`。
+    /// 流式过程中（每 40ms 一次的 `appendDelta`）**绝不**调用它，否则会变成每秒 25 次写盘。
+    private func flushActiveToStore() {
+        guard let id = store.activeID else { return }
+        store.replaceContent(id: id, bubbles: bubbles, history: history)
+    }
+
+    /// 复原历史时只收「一问一答都完整」的对子。
+    ///
+    /// 上一轮如果因为网络错误或用户点了停止而失败，存档里就只剩一条 user 消息。
+    /// 把它单独放进 history，模型会看到一个没人回答的问题，于是在新一轮里
+    /// 又把那个旧问题答一遍——用户会觉得"我明明问了别的，它却答非所问"。
+    ///
+    /// `AIChatModel` 与 `ConversationStore` 共用**同一份**实现：迁移旧 `chats.json` 与
+    /// 载入活动会话都走这里，不抄两遍，避免两处规则慢慢漂移。
+    static func rebuildHistory(from bubbles: [AIChatModel.Bubble]) -> [AIMessage] {
         var restored: [AIMessage] = []
         var pendingQuestion: String?
 
-        for bubble in saved where bubble.role != .notice {
+        for bubble in bubbles where bubble.role != .notice {
             switch bubble.role {
             case .user:
                 pendingQuestion = bubble.text
@@ -146,15 +282,7 @@ final class AIChatModel: ObservableObject {
             }
         }
 
-        history = restored
-    }
-
-    private func persistChat() {
-        guard let documentPath else { return }
-        let url = AppPaths.chatHistoryFile(forPath: documentPath)
-        let snapshot = bubbles.filter { $0.role != .notice }
-        guard let data = try? JSONEncoder().encode(snapshot) else { return }
-        PersistFile.write(data, to: url, label: "chat-history.json")
+        return restored
     }
 
     // MARK: - 单轮任务
@@ -172,7 +300,10 @@ final class AIChatModel: ObservableObject {
         translateTarget: String,
         template: PromptTemplate? = nil,
         agent: AgentConfig? = nil,
-        webSearchEnabled: Bool = false
+        skills: [AgentSkill] = [],
+        webSearchEnabled: Bool = false,
+        sourcePath: String? = nil,
+        sourceTitle: String? = nil
     ) {
         guard !isStreaming else { return }
         guard let config else {
@@ -199,17 +330,32 @@ final class AIChatModel: ObservableObject {
             translateTarget: translateTarget,
             template: template,
             agent: agent,
+            skills: skills,
             webSearchEnabled: webSearchEnabled
         )
         lastRequest = snapshot
 
         // ⚠️ 这里是 `citations` 的默认值解析点：重跑时必须沿用第一次算出来的引用，
         // 否则「重新生成」之后引用会变（第一次带选区、重跑时选区已经没了）。
-        bubbles.append(Bubble(
+        var userBubble = Bubble(
             role: .user,
             text: Self.userDisplayText(task: task, selection: selection),
             taskTitle: task.title
-        ))
+        )
+        // 把发起文档路径记到这条气泡上：跨文档引用降级依赖它精确判定
+        // 「这个引用是不是指向当前这本书」（见 `ConversationCitationPolicy`）。
+        userBubble.sourceDocPath = sourcePath
+        bubbles.append(userBubble)
+
+        // 会话本身的 sourceDocPath 只在第一次提问时记下（它的「出身」文档）；
+        // 之后即使切到别的书问，会话的出身也保持不变——逐条气泡的 sourceDocPath 才记录每次提问的真实出处。
+        if let path = sourcePath, let id = store.activeID,
+           store.conversation(id: id)?.sourceDocPath == nil {
+            store.setSourceDocPath(id: id, path: path, title: sourceTitle)
+        }
+
+        // 落盘点：用户气泡已追加，写穿 store（含自动标题更新）。
+        flushActiveToStore()
         startAnswer(snapshot)
     }
 
@@ -252,6 +398,11 @@ final class AIChatModel: ObservableObject {
     private func startAnswer(_ snapshot: RequestSnapshot) {
         var answer = Bubble(role: .assistant, text: "", taskTitle: snapshot.task.title)
         answer.citations = snapshot.citations
+        // 把「提问出自哪份文档」传递到回答气泡上：回答里的引用应当按提问时的那本书判定
+        // 能否跳回（见 `ConversationCitationPolicy`）。否则一份会话里从不同书问过之后，
+        // 会按会话「出身」文档误判，把本可跳的引用关掉、或把该关的放过去。
+        answer.sourceDocPath = bubbles.last(where: { $0.role == .user })?.sourceDocPath
+            ?? store.activeConversation?.sourceDocPath
         bubbles.append(answer)
         streamingID = answer.id
         isStreaming = true
@@ -294,6 +445,7 @@ final class AIChatModel: ObservableObject {
                 translateTarget: snapshot.translateTarget,
                 template: snapshot.template,
                 agent: snapshot.agent,
+                skills: snapshot.skills,
                 webContext: webContext
             )
 
@@ -359,7 +511,10 @@ final class AIChatModel: ObservableObject {
         translateTarget: String,
         template: PromptTemplate? = nil,
         agent: AgentConfig? = nil,
-        webSearchEnabled: Bool = false
+        skills: [AgentSkill] = [],
+        webSearchEnabled: Bool = false,
+        sourcePath: String? = nil,
+        sourceTitle: String? = nil
     ) {
         let trimmed = question.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
@@ -377,7 +532,10 @@ final class AIChatModel: ObservableObject {
             translateTarget: translateTarget,
             template: template,
             agent: agent,
-            webSearchEnabled: webSearchEnabled
+            skills: skills,
+            webSearchEnabled: webSearchEnabled,
+            sourcePath: sourcePath,
+            sourceTitle: sourceTitle
         )
     }
 
@@ -404,8 +562,8 @@ final class AIChatModel: ObservableObject {
             return
         }
 
-        bubbles.append(Bubble(role: .user, text: "总结全书", taskTitle: "总结全书"))
-        var answer = Bubble(role: .assistant, text: "", taskTitle: "总结全书")
+        bubbles.append(Bubble(role: .user, text: "总结全文", taskTitle: "总结全文"))
+        var answer = Bubble(role: .assistant, text: "", taskTitle: "总结全文")
         answer.citations = []
         bubbles.append(answer)
         streamingID = answer.id
@@ -438,7 +596,7 @@ final class AIChatModel: ObservableObject {
                     )
                     try await self.streamIntoBubble(messages: messages, config: config)
                 } else {
-                    let capped = Array(slices.prefix(self.maxMapSlices))
+                    let capped = Self.balancedSummarySlices(slices, limit: self.maxMapSlices)
                     var summaries: [String] = []
 
                     for (index, slice) in capped.enumerated() {
@@ -466,14 +624,12 @@ final class AIChatModel: ObservableObject {
                     var reduceConfig = config
                     reduceConfig.maxTokens = max(config.maxTokens, 3000)
 
-                    let skipped = slices.count - capped.count
-                    let note = skipped > 0 ? "\n（另有 \(skipped) 段因篇幅未逐一分析，总述仅基于上述部分。）" : ""
                     let messages = PromptLibrary.messages(
                         task: .summarize(scope: .wholeDocument),
                         selection: nil,
                         metadata: metadata,
                         locatorLabel: "",
-                        context: summaries.joined(separator: "\n\n") + note,
+                        context: summaries.joined(separator: "\n\n"),
                         memory: memory,
                         history: []
                     )
@@ -495,6 +651,28 @@ final class AIChatModel: ObservableObject {
         slices.map { "【\($0.label)】\n\($0.text)" }.joined(separator: "\n\n")
     }
 
+    /// 超长文档不再截掉第 31 段以后内容；将相邻切片均衡并组，保证首尾与中部都覆盖。
+    private static func balancedSummarySlices(
+        _ slices: [(label: String, text: String)],
+        limit: Int
+    ) -> [(label: String, text: String)] {
+        guard slices.count > limit, limit > 0 else { return slices }
+        return SummarySlicePlanner.ranges(itemCount: slices.count, maximumGroups: limit).map { range in
+            let group = Array(slices[range])
+            let label = group.count == 1
+                ? group[0].label
+                : "\(group.first!.label) – \(group.last!.label)"
+            let perSlice = SummarySlicePlanner.characterBudget(
+                itemCount: group.count,
+                total: 8_500
+            )
+            let text = group.map {
+                "【\($0.label)】\n" + PromptLibrary.truncate($0.text, limit: perSlice)
+            }.joined(separator: "\n\n")
+            return (label, text)
+        }
+    }
+
     // MARK: - 控制
 
     func stop() {
@@ -504,12 +682,12 @@ final class AIChatModel: ObservableObject {
         finishStreaming(failure: nil)
     }
 
+    /// 清除当前会话内容（旧名，保留作兼容别名）。
+    ///
+    /// 语义已收窄为「只清内容、会话仍留在列表里」，与 ActionEntries 里的
+    /// 「清空当前会话」文案一致——不再像旧 `clearChat` 那样「清空对话」让人误以为整个会话没了。
     func clear() {
-        stop()
-        bubbles = []
-        history = []
-        lastRequest = nil
-        persistChat()
+        clearActive()
     }
 
     /// 最近一条「有实质内容」的 AI 回答。导出摘要时用它，
@@ -617,7 +795,8 @@ final class AIChatModel: ObservableObject {
             if history.count > 12 { history.removeFirst(history.count - 12) }
         }
 
-        persistChat()
+        // 落盘点：回答完成（成功或失败）后写穿 store。流式过程中不在此，见 `flushActiveToStore` 注释。
+        flushActiveToStore()
     }
 
     private func appendNotice(_ text: String) {
@@ -667,6 +846,33 @@ final class AIChatModel: ObservableObject {
 
     // MARK: - 展示文本
 
+    // MARK: - 自检专用（不变量验证）
+
+    /// 自检专用：在不走真实网络的前提下造出「流式进行中」的状态。
+    ///
+    /// 起一个空的 assistant 气泡并标记 streaming，使后续 `appendFakeDelta` 有落点。
+    /// 用途：验证「流式期间不写盘」这条不变量（见 `ConversationAudit`）。
+    func beginFakeStream() {
+        guard streamingID == nil else { return }
+        let bubble = Bubble(role: .assistant, text: "", taskTitle: "自检")
+        bubbles.append(bubble)
+        streamingID = bubble.id
+        isStreaming = true
+        pendingDelta = ""
+        lastFlush = Date.distantPast
+    }
+
+    /// 自检专用：模拟一次流式增量（只进内存 `pendingDelta`，**不写盘**）。
+    func appendFakeDelta(_ text: String) {
+        appendDelta(text)
+    }
+
+    /// 自检专用：结束假流式，走与真实 `finishStreaming` 同一条落盘路径。
+    func endFakeStream() {
+        flushDelta(force: true)
+        finishStreaming(failure: nil)
+    }
+
     private static func userDisplayText(task: AITask, selection: ReaderSelection?) -> String {
         let quoted: String = {
             guard let selection else { return "" }
@@ -683,9 +889,9 @@ final class AIChatModel: ObservableObject {
         case .ask(let question):
             return question
         case .summarize(.currentUnit):
-            return "总结本节"
+            return "总结当前页/章"
         case .summarize(.wholeDocument):
-            return "总结全书"
+            return "总结全文"
         case .custom(let prompt):
             return prompt
         }

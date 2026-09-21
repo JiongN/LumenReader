@@ -271,7 +271,7 @@ final class SmartOutlineModel: ObservableObject {
 
     /// 中止全部在跑的任务。切文档、丢弃目录时用——
     /// 那时旧文档的摘要即使跑完也写不到任何地方去，白白花钱。
-    private func cancelAllWork() {
+    func cancelAllWork() {
         generationTask?.cancel()
         generationTask = nil
         for (_, task) in summaryTasks { task.cancel() }

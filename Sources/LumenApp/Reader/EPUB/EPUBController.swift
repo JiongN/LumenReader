@@ -38,7 +38,7 @@ final class EPUBController: NSObject, ObservableObject {
     ///
     /// 逐段翻译要挂在这上面：换章之后 DOM 是一份新的，之前插的译文块和下标
     /// 标记全没了，必须按新 DOM 重来一遍。
-    var onChapterDidLoad: (() -> Void)?
+    @Published private(set) var chapterLoadRevision = 0
 
     /// 取某一章的批注（id + 引文）。由阅读视图提供（批注存在应用数据目录里）。
     ///
@@ -631,7 +631,7 @@ extension EPUBController: WKNavigationDelegate {
         }
         onProgress?(currentChapterIndex, chapterCount, 0, false)
         // 放在最后：翻译要按「已经上好样式、画好高亮」的 DOM 来取段落。
-        onChapterDidLoad?()
+        chapterLoadRevision &+= 1
     }
 
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {

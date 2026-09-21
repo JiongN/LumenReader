@@ -14,7 +14,10 @@ enum AgentAudit {
     /// 温度覆盖的两条断言：盖得住、且不改回写服务商设置。
     @MainActor
     private static func checkTemperatureOverride(_ check: (String, Bool, String) -> Void) {
-        let model = AIChatModel()
+        // 自检里要建一个模型做温度覆盖断言：现在 AIChatModel 不再有裸 init，
+        // 必须传一个 store。这里用一份临时 store（自检模式 supportRoot 已被重定向到临时目录，
+        // 不会污染真实对话数据）。
+        let model = AIChatModel(store: ConversationStore())
         let provider = AIProviderConfig(
             name: "自检服务商",
             baseURL: "http://127.0.0.1:1/v1",
@@ -66,6 +69,12 @@ enum AgentAudit {
         return try? JSONDecoder().decode(T.self, from: data)
     }
 
+    /// 编码再解码一遍，用来验「新格式存下去还读得回来」。
+    private static func roundTrip(_ agent: AgentConfig) -> AgentConfig? {
+        guard let data = try? JSONEncoder().encode(agent) else { return nil }
+        return try? JSONDecoder().decode(AgentConfig.self, from: data)
+    }
+
     static func run() async {
         var passed = 0
         var failures: [String] = []
@@ -74,11 +83,23 @@ enum AgentAudit {
             NSLog("[Lumen][agent] \(ok ? "✅" : "❌") \(name)\(detail.isEmpty ? "" : " —— \(detail)")")
         }
 
+        let library = AgentSkill.catalog
+        NSLog("[Lumen][agent] 内置技能：\(library.count) 条"
+            + "（" + library.map(\.name).joined(separator: "、") + "）")
+
         NSLog("[Lumen][agent] 预设 Agent：\(AgentConfig.presets.count) 个")
         for agent in AgentConfig.presets {
-            NSLog("[Lumen][agent]   \(agent.name)｜技能=\(agent.skills.map(\.title).joined(separator: "/"))"
+            let names = agent.resolvedSkills(in: library).map(\.name).joined(separator: "/")
+            NSLog("[Lumen][agent]   \(agent.name)｜技能=\(names)"
                 + "｜联网=\(agent.usesWebSearch)｜id=\(agent.id.prefix(8))…")
         }
+
+        // 预设里写错一个技能 id 的后果是那条技能**静默**不生效（系统提示里少一行，
+        // 界面上完全看不出来），所以逐条对一遍。
+        let unknownSkillIDs = AgentConfig.presets.flatMap(\.skills)
+            .filter { AgentSkill.catalogEntry(id: $0) == nil }
+        check("预设引用的技能都在内置技能里", unknownSkillIDs.isEmpty,
+              "找不到：\(Set(unknownSkillIDs).sorted())")
 
         // 预设 id 必须稳定：写死字面量，否则「配置里没有 agents 时退回预设」这条路径
         // 每次都得到新 id，用户选中的 Agent 会静默丢失。
@@ -86,12 +107,28 @@ enum AgentAudit {
         let secondRun = AgentConfig.presets.map(\.id)
         check("预设 id 稳定（可被配置引用）", firstRun == secondRun)
 
+        // 已下线的预设：不在预设表里 + 已登记（登记了才会在读盘时把用户那份旧副本清掉）。
+        // 两条一起断言，是因为只删预设表而漏登记，用户那边的「批判审稿人」会一直活着。
+        check("预设表里已经没有「批判审稿人」",
+              !AgentConfig.presets.contains { $0.name == "批判审稿人" })
+        check("批判审稿人的 id 已登记为下线预设",
+              AgentConfig.retiredPresetIDs.contains("3C9D5F71-2B8E-4A63-9F07-1E5A8C4B6D22"))
+        check("没有预设用着下线名单里的 id",
+              !AgentConfig.presets.contains { AgentConfig.retiredPresetIDs.contains($0.id) })
+
+        // 原先是两条独立的自定义技能，现在并进了内置技能目录 ——
+        // 断言名字而不只是条数：条数对了但内容是别的，从终值上看不出来。
+        check("「论证链」「术语变化」已并入内置技能目录",
+              ["论证链", "术语变化"].allSatisfy { name in
+                  AgentSkill.catalog.contains { $0.name == name }
+              })
+
         // 角色 + 技能是否真的进了系统提示，且没有顶掉默认约束
         guard let socratic = AgentConfig.presets.first(where: { $0.name == "苏格拉底导师" }) else {
             check("找得到苏格拉底预设", false)
             return
         }
-        let system = PromptLibrary.systemPrompt(readerPersona: "自检读者背景", agent: socratic)
+        let system = PromptLibrary.systemPrompt(readerPersona: "自检读者背景", agent: socratic, skills: library)
         check("系统提示里含角色设定", system.contains("善于提问的导师"))
         check("系统提示里含苏格拉底技能", system.contains("不要直接给出结论"))
         check("默认的防幻觉约束仍在", system.contains("原文没有提到"))
@@ -100,22 +137,134 @@ enum AgentAudit {
         let withoutAgent = PromptLibrary.systemPrompt(readerPersona: "")
         check("不选 Agent 时不出现角色段落", !withoutAgent.contains("角色设定"))
 
-        // 自定义指令：拼接位置必须**可预期**——排在技能之后。
-        // 顺序反了从终值上看不出来（同一段系统提示、同样都含这些字），
-        // 所以立一条断言钉住它。
-        var withInstruction = socratic
-        withInstruction.customInstruction = "每次都要给出一条可证伪的反对意见"
-        let systemWithInstruction = PromptLibrary.systemPrompt(agent: withInstruction)
-        if let skillIndex = systemWithInstruction.range(of: "不要直接给出结论")?.lowerBound,
-           let customIndex = systemWithInstruction.range(of: "可证伪的反对意见")?.lowerBound {
-            check("自定义指令排在技能之后", skillIndex < customIndex,
-                  "技能位置 \(skillIndex) 应在自定义指令 \(customIndex) 之前")
+        // 技能库是**共用样式**：改一处，用它的所有 Agent 一起变。
+        // 这是这次改动的核心语义，也是「改了只对自己那个 Agent 生效」这种半生效状态的守门断言。
+        var editedLibrary = library
+        if let index = editedLibrary.firstIndex(where: { $0.id == "concepts" }) {
+            editedLibrary[index].instruction = "自检改写的概念界定要求。"
+        }
+        let conceptAgents = [
+            AgentConfig(name: "甲", skills: ["concepts"]),
+            AgentConfig(name: "乙", skills: ["concepts"])
+        ]
+        check("改一条技能，用它的所有 Agent 一起变",
+              conceptAgents.allSatisfy { $0.promptSection(in: editedLibrary).contains("自检改写的概念界定要求。") })
+        check("没改到的技能不受影响",
+              conceptAgents[0].promptSection(in: library).contains("自检改写的概念界定要求。") == false)
+
+        // MARK: 技能：id 往返 + 三条旧格式的迁移
+        //
+        // 迁移断言是这个改动里最要紧的：技能全文原先存在 Agent 上，
+        // 现在只有技能库里有全文。搬错一步，用户自己写的技能就会**静默**消失
+        // ——系统提示变短了，界面上却看不出少了什么。
+        let roundTripAgent = AgentConfig(name: "往返", skills: ["socratic", "concepts"])
+        check("技能按 id 存取往返不丢",
+              roundTrip(roundTripAgent).map { agent in
+                  agent.skills == ["socratic", "concepts"]
+                      && agent.promptSection(in: library).contains("不要直接给出结论")
+              } ?? false)
+
+        // 旧格式 ②：`skills` 是带全文的对象数组（2026-09-21 一度用过）。
+        // 全文要经 `AISettings` 并进技能库，Agent 上只留 id。
+        let legacyFull = """
+        {"providers":[],"streaming":true,"templates":[],
+         "agents":[{"id":"LEGACY-FULL","name":"旧技能 Agent","persona":"",
+                    "skills":[{"id":"socratic","name":"苏格拉底式","instruction":"不要直接给出结论。"},
+                              {"id":"C1","name":"因果检查","instruction":"区分相关关系与因果关系。"}],
+                    "usesWebSearch":false,"isBuiltIn":false}]}
+        """
+        if let migrated = decode(AISettings.self, from: legacyFull) {
+            check("旧的对象数组技能只留 id",
+                  migrated.agents.first?.skills == ["socratic", "C1"],
+                  "实得 \(migrated.agents.first?.skills ?? [])")
+            check("带全文的自建技能被并进技能库",
+                  migrated.skillLibrary.contains { $0.id == "C1" && $0.name == "因果检查" },
+                  "实得 \(migrated.skillLibrary.map(\.name))")
+            check("并库之后它照样进系统提示",
+                  migrated.agents.first?
+                      .promptSection(in: migrated.skillLibrary)
+                      .contains("【因果检查】区分相关关系与因果关系。") ?? false)
         } else {
-            check("系统提示里同时含技能与自定义指令", false)
+            check("旧的对象数组技能能解码", false)
         }
 
-        // 容错解码：旧配置里没有 `customInstruction` / `temperatureOverride` /
-        // `webSearchEnabled` 这几个键。缺一个键就整份解码失败的话，
+        // 旧格式 ③：`skills` 是枚举 rawValue + 另一块 `customSkills`。
+        let legacyMerged = """
+        {"providers":[],"streaming":true,"templates":[],
+         "agents":[{"id":"LEGACY-BOTH","name":"旧混合 Agent","persona":"","skills":["socratic","critique"],
+                    "customSkills":[{"id":"C2","name":"因果检查","instruction":"区分相关关系与因果关系。"}],
+                    "usesWebSearch":false,"isBuiltIn":false}]}
+        """
+        if let merged = decode(AISettings.self, from: legacyMerged) {
+            check("旧的字符串技能与自定义技能并进同一条清单",
+                  merged.agents.first?.skills == ["socratic", "critique", "C2"],
+                  "实得 \(merged.agents.first?.skills ?? [])")
+            check("还原出来的技能带着名字与要求",
+                  merged.agents.first?.resolvedSkills(in: merged.skillLibrary).first?.name == "苏格拉底式")
+        } else {
+            check("旧的字符串技能能解码", false)
+        }
+
+        // 同名的认领到库里那条：老配置里「论证链」「术语变化」是用户自建技能（各自带 UUID），
+        // 而它们现在是内置技能。不认领的话技能库里会出现两张同名卡，用户看到的是
+        // 「怎么有两个论证链」。
+        let legacySameName = """
+        {"providers":[],"streaming":true,"templates":[],
+         "agents":[{"id":"LEGACY-SAME","name":"同名","persona":"","skills":[],
+                    "customSkills":[{"id":"X1","name":"论证链","instruction":"把核心论证写成链条。"}],
+                    "usesWebSearch":false,"isBuiltIn":false}]}
+        """
+        if let claimed = decode(AISettings.self, from: legacySameName) {
+            check("同名的旧技能认领到内置那条，不新增重复卡",
+                  claimed.skillLibrary.filter { $0.name == "论证链" }.count == 1
+                      && claimed.agents.first?.skills == ["argumentChain"],
+                  "同名卡 \(claimed.skillLibrary.filter { $0.name == "论证链" }.count) 张，"
+                      + "勾选 \(claimed.agents.first?.skills ?? [])")
+        } else {
+            check("同名旧技能能解码", false)
+        }
+
+        // 悬空 id：技能库里没有的 id 在界面上是一张勾不掉的空卡，读盘时清掉。
+        let dangling = """
+        {"providers":[],"streaming":true,"templates":[],"skillLibrary":[],
+         "agents":[{"id":"DANGLE","name":"悬空","persona":"","skills":["ghost"],
+                    "usesWebSearch":false,"isBuiltIn":false}]}
+        """
+        check("库里没有的技能 id 被清掉",
+              decode(AISettings.self, from: dangling)?.agents.first?.skills.isEmpty == true)
+
+        // 刚点「新建技能」还没写要求的空条目不该发出去——发一条空白要求只会让模型困惑，
+        // 而这种失败在界面上完全看不出来（用户看到的是「技能已添加」）。
+        let blankLibrary = library + [AgentSkill(id: "blank", name: "还没写", instruction: "   ")]
+        let blankAgent = AgentConfig(name: "空技能", skills: ["blank"])
+        check("空要求不会变成一条空白约束发出去",
+              !PromptLibrary.systemPrompt(agent: blankAgent, skills: blankLibrary).contains("还没写"))
+
+        // 「列文献」只在开了联网检索时才发出去；判定看 id，不看名字。
+        // 改名字就失效的话，用户给技能改个名会莫名其妙地改变行为。
+        if AgentSkill.catalogEntry(id: AgentSkill.literatureID) != nil {
+            let searchOff = AgentConfig(name: "联网关", skills: [AgentSkill.literatureID], usesWebSearch: false)
+            let searchOn = AgentConfig(name: "联网开", skills: [AgentSkill.literatureID], usesWebSearch: true)
+            let marker = "联网检索结果"
+            check("没开联网时「列文献」的要求不发给模型",
+                  !searchOff.promptSection(in: library).contains(marker)
+                      && searchOn.promptSection(in: library).contains(marker),
+                  "关=\(searchOff.promptSection(in: library).contains(marker))"
+                      + " 开=\(searchOn.promptSection(in: library).contains(marker))")
+
+            // 把库里那条的名字改掉，按 id 判定的实现照样拦得住
+            var renamedLibrary = library
+            if let index = renamedLibrary.firstIndex(where: { $0.id == AgentSkill.literatureID }) {
+                renamedLibrary[index].name = "找文献"
+            }
+            check("「列文献」的判定看 id 不看名字",
+                  !AgentConfig(name: "改了名的联网关", skills: [AgentSkill.literatureID], usesWebSearch: false)
+                      .promptSection(in: renamedLibrary).contains("找文献"))
+        } else {
+            check("内置技能里有「列文献」", false)
+        }
+
+        // 容错解码：旧配置里没有 `temperatureOverride` 这个键。缺一个键就整份解码失败的话，
         // 用户自己建的 Agent 会被静默重置成预设——这属于最糟的那类降级。
         let legacyAgent = """
         {"id":"LEGACY-1","name":"旧 Agent","persona":"旧角色","skills":["socratic"],
@@ -123,7 +272,6 @@ enum AgentAudit {
         """
         let legacyAgentOK = decode(AgentConfig.self, from: legacyAgent).map { agent in
             agent.name == "旧 Agent"
-                && agent.customInstruction.isEmpty
                 && agent.temperatureOverride == nil
                 && agent.skills.count == 1
         } ?? false
@@ -135,7 +283,59 @@ enum AgentAudit {
         let legacyAIOK = decode(AISettings.self, from: legacyAI).map { settings in
             settings.webSearchEnabled == false && settings.agents.isEmpty
         } ?? false
-        check("旧 AI 配置缺 webSearchEnabled 时默认为关", legacyAIOK)
+        check("旧 AI 配置缺 webSearchEnabled 时默认为关；agents 为空就保持为空", legacyAIOK)
+
+        // 删除 Agent 之后它不能自己长回来：以前这里是「缺哪个预设就补哪个」，
+        // 与「允许删除任意 Agent」并存就会出现「删掉的 Agent 下次启动自己长回来」。
+        // （上面那条 `agents: []` 的断言就是这条规则本身。）
+        let freshInstall = """
+        {"providers":[],"streaming":true,"templates":[]}
+        """
+        check("配置里完全没有 agents 键时才灌预设",
+              decode(AISettings.self, from: freshInstall).map {
+                  Set($0.agents.map(\.id)) == Set(AgentConfig.presets.map(\.id))
+              } ?? false)
+
+        // 已下线预设留在用户磁盘上：读盘必须把它清掉，且不能留下悬空的 activeAgentID
+        // （悬空的表现是面板显示「Agent」却不带勾选，从界面上看不出所以然）。
+        if let retiredID = AgentConfig.retiredPresetIDs.first {
+            let staleRetired = """
+            {"providers":[],"streaming":true,"templates":[],
+             "agents":[{"id":"\(retiredID)","name":"批判审稿人","persona":"","skills":["critique"],
+                        "usesWebSearch":false,"isBuiltIn":true}],
+             "activeAgentID":"\(retiredID)"}
+            """
+            let cleaned = decode(AISettings.self, from: staleRetired)
+            check("磁盘上残留的下线预设读盘时被清掉",
+                  cleaned?.agents.contains { $0.id == retiredID } == false,
+                  "实得 \(cleaned?.agents.map(\.name) ?? [])")
+            check("清掉之后 activeAgentID 不悬空", cleaned?.activeAgentID == nil,
+                  "实得 \(cleaned?.activeAgentID ?? "nil")")
+        } else {
+            check("下线预设名单不为空", false)
+        }
+
+        // 技能库：首次启动灌内置技能；用户删掉的不自己长回来（与 agents 同一条规则，
+        // 否则「删了又回来」会让用户以为删除功能坏了）。
+        let freshAI = """
+        {"providers":[],"streaming":true,"templates":[]}
+        """
+        check("首次启动灌入内置技能库",
+              decode(AISettings.self, from: freshAI).map {
+                  Set($0.skillLibrary.map(\.id)) == Set(AgentSkill.catalog.map(\.id))
+              } ?? false)
+        let emptiedAI = """
+        {"providers":[],"streaming":true,"templates":[],"skillLibrary":[]}
+        """
+        check("技能库被清空后不会自动补回",
+              decode(AISettings.self, from: emptiedAI)?.skillLibrary.isEmpty == true)
+
+        let customSkill = AgentSkill(name: "因果检查", instruction: "区分相关与因果。")
+        check("用户自建技能进入系统提示",
+              PromptLibrary.systemPrompt(
+                  agent: AgentConfig(name: "自建", skills: [customSkill.id]),
+                  skills: library + [customSkill]
+              ).contains("【因果检查】区分相关与因果。"))
 
         // 温度覆盖：Agent 上那个值要盖掉服务商的，且**不能**回头改掉服务商设置本身。
         // 这是纯输入→输出的规则，可以直接实跑断言；不这么验的话，
@@ -198,6 +398,7 @@ enum AgentAudit {
             context: "自检正文",
             memory: "",
             agent: socratic,
+            skills: library,
             webContext: block
         )
         if let last = messages.last {

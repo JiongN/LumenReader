@@ -271,6 +271,7 @@ public enum LumenAction: String, CaseIterable, Codable, Sendable, Identifiable {
 
     // AI
     case exportSummary
+    case exportTranscript
 
     public var id: String { rawValue }
 
@@ -296,6 +297,7 @@ public enum LumenAction: String, CaseIterable, Codable, Sendable, Identifiable {
         case .fontIncrease:   return "放大字号"
         case .fontDecrease:   return "缩小字号"
         case .exportSummary:  return "导出 AI 摘要为 Markdown…"
+        case .exportTranscript: return "导出对话记录为 Markdown…"
         }
     }
 
@@ -310,7 +312,7 @@ public enum LumenAction: String, CaseIterable, Codable, Sendable, Identifiable {
             return .reading
         case .fontIncrease, .fontDecrease:
             return .typography
-        case .exportSummary:
+        case .exportSummary, .exportTranscript:
             return .ai
         }
     }
@@ -353,6 +355,13 @@ public enum LumenAction: String, CaseIterable, Codable, Sendable, Identifiable {
         case .fontDecrease:   return KeyCombo(key: "-", modifiers: [.command])
 
         case .exportSummary:  return KeyCombo(key: "e", modifiers: [.command, .shift])
+        // 「导出对话记录」的默认组合。取 ⇧⌘T（T = Transcript / 对话记录）：
+        // 与既有全部默认均不冲突（⇧⌘E 摘要、⇧⌘C 复制全文、⇧⌘A AI 面板、⇧⌘R 最近打开、
+        // ⌥⌘C 复制文件、⌥⌘S 侧栏、⌥⌘F 沉浸、⌥⌘←/→、⌘1–5、⌘K/G/O/W、⌘±），
+        // 也不是系统保留键。
+        // **不用候选的 ⇧⌘J**：它与 `KeyBindingsAudit.verifyRules` 里当作「一个空闲组合」的
+        // 夹具 ⇧⌘J 撞车，会让「合法改绑被接受」等 5 条规则断言变红——夹具假定它是空的。
+        case .exportTranscript: return KeyCombo(key: "t", modifiers: [.command, .shift])
         }
     }
 
@@ -379,6 +388,7 @@ public enum LumenAction: String, CaseIterable, Codable, Sendable, Identifiable {
         case .fontIncrease:   return "font bigger 字号 放大"
         case .fontDecrease:   return "font smaller 字号 缩小"
         case .exportSummary:  return "export markdown 导出 摘要"
+        case .exportTranscript: return "export transcript 导出 对话 记录"
         }
     }
 }

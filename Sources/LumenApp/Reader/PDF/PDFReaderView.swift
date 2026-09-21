@@ -2,6 +2,7 @@ import SwiftUI
 import AppKit
 import LumenKit
 import PDFKit
+import Translation
 
 /// 把 PDFKit 的视图塞进 SwiftUI。视图实例由 Controller 持有，
 /// 这里只负责挂载，不做任何状态 diff，避免每帧重建 PDFView。
@@ -32,22 +33,21 @@ struct PDFReaderView: View {
     @EnvironmentObject private var bridge: ReaderBridge
 
     @StateObject private var controller = PDFController()
+    @StateObject private var translation = PDFTranslationController()
     @State private var store: ReadingStateStore?
     /// 识别结果弹层
     @State private var ocrSheet: OCRSheetPayload?
     @State private var isOCRRunning = false
+    @State private var translationConfiguration: TranslationSession.Configuration?
 
     var body: some View {
         ZStack {
             theme.background
-
             PDFKitRepresentable(controller: controller)
                 .opacity(bridge.isLoading ? 0 : 1)
-
             if bridge.isLoading {
                 LoadingStateView(title: "正在打开 PDF", subtitle: document.displayTitle)
             }
-
             if let error = bridge.loadError {
                 ErrorStateView(title: "无法打开", message: error) {
                     Task { await prepare() }
@@ -61,10 +61,24 @@ struct PDFReaderView: View {
                 .environmentObject(state)
         }
         .task(id: document.id) { await prepare() }
-        .onChange(of: theme.id) { _, _ in applyAppearance() }
+        .translationTask(translationConfiguration) { session in
+            await translation.runApple(session: session, target: reader.translationTargetLanguage)
+        }
+        .onChange(of: theme.id) { _, _ in
+            applyAppearance()
+        }
         .onChange(of: reader.pdfOriginalColors) { _, _ in applyAppearance() }
         .onChange(of: reader.pdfCanvasBrightness) { _, _ in applyAppearance() }
         .onChange(of: reader.flowMode) { _, newValue in controller.apply(flowMode: newValue) }
+        .onReceive(translation.$appleSessionRequest.dropFirst()) { _ in
+            var next = TranslationSession.Configuration(
+                source: nil,
+                target: Locale.Language(identifier: reader.translationTargetLanguage)
+            )
+            // 同一语言对的重试也必须改变 configuration 版本，否则 modifier 不会重跑。
+            if translationConfiguration != nil { next.invalidate() }
+            translationConfiguration = next
+        }
         .onChange(of: isOCRRunning) { _, running in
             bridge.ocrRunningPage = running ? controller.currentPageIndex : nil
             // OCR 状态一变，右键菜单的启用/禁用与文案也要跟着变（识别中 → 禁用）。
@@ -80,12 +94,46 @@ struct PDFReaderView: View {
             Task { await runOCR() }
         }
         .onDisappear {
+            translation.stop()
+            if bridge.pdfTranslationController === translation {
+                bridge.pdfTranslationController = nil
+                bridge.revealTranslationParagraph = nil
+            }
             store?.flush()
             state.recent.updateProgress(
                 path: document.url.standardizedFileURL.path,
                 progress: bridge.progress
             )
         }
+    }
+
+    private func prepareAndStartTranslation(reset: Bool) async {
+        translation.isVisible = true
+        if reset { translation.resetTranslations() }
+        await translation.prepare(documentPath: document.url.standardizedFileURL.path,
+                                  target: reader.translationTargetLanguage,
+                                  engineID: reader.translationEngineID,
+                                  glossary: reader.translationGlossary)
+        guard !translation.phase.isFailure else { return }
+        // `prepare` 会更新文档标题/页数并让上层视图重算。await 之后再提交
+        // 一次显示态，避免自动启动时译文已入缓存、开关却回到关闭。
+        translation.isVisible = true
+        startTranslation()
+    }
+
+    private func startTranslation() {
+        let customEngine: (any TranslationEngine)? = {
+            guard reader.translationEngineID == LLMTranslation.engineID,
+                  let config = state.settingsStore.activeProvider else { return nil }
+            return LLMTranslationEngine(
+                config: config,
+                apiKey: AICredentialStore.read(account: config.keychainAccount) ?? "",
+                glossary: reader.translationGlossary
+            )
+        }()
+        translation.startAll(engineID: reader.translationEngineID,
+                             target: reader.translationTargetLanguage,
+                             customEngine: customEngine)
     }
 
     /// 扫描件提示条。
@@ -189,7 +237,6 @@ struct PDFReaderView: View {
         bridge.reset()
         applyAppearance()
         controller.apply(flowMode: reader.flowMode)
-
         let store = ReadingStateStore(documentPath: document.url.standardizedFileURL.path)
         self.store = store
         wireCallbacks(store: store)
@@ -206,6 +253,10 @@ struct PDFReaderView: View {
         bridge.unitCount = pdf.pageCount
         bridge.metadata = Self.metadata(of: pdf)
         bridge.isScannedDocument = controller.detectScannedDocument()
+        bridge.pdfTranslationController = translation
+        bridge.revealTranslationParagraph = { [weak controller] paragraph, preferredPage in
+            controller?.revealTranslationParagraph(paragraph, preferredPage: preferredPage)
+        }
         wireDocumentWideProviders()
 
         // 恢复上次位置
@@ -221,10 +272,15 @@ struct PDFReaderView: View {
         if LaunchOptions.autoOCR {
             await runOCR()
         }
+        if LaunchOptions.autoPDFTranslation {
+            await prepareAndStartTranslation(reset: false)
+        }
 
         // 自检通道：批注写盘 / 搜索高亮（都在 /tmp 副本上做，不碰用户文件）
+        if LaunchOptions.pdfToneReport { await PDFToneAudit.run(sourceURL: document.url) }
         if LaunchOptions.annotateReport {
             await AnnotationAudit.runDocumentAudit(sourceURL: document.url)
+            await GroupedAnnotationAudit.run(sourceURL: document.url)
         }
         if LaunchOptions.searchReport {
             await AnnotationAudit.runSearchAudit(sourceURL: document.url)
@@ -286,21 +342,25 @@ struct PDFReaderView: View {
 
         bridge.slicesProvider = { [weak controller] in
             guard let controller, controller.pageCount > 0 else { return [] }
-            let chunkSize = max(1, Int(ceil(Double(controller.pageCount) / 20.0)))
+            // 最多 30 个均衡分段，但每一页都贡献代表性文字。旧实现固定成 20 大段后
+            // 再在提示词层裁剪，长书每段中部页面可能完全消失，看起来像“只读了 20 页”。
             var slices: [(label: String, text: String)] = []
-            var start = 0
-
-            while start < controller.pageCount {
-                let end = min(controller.pageCount - 1, start + chunkSize - 1)
-                let text = (start...end)
-                    .map { controller.usableText(of: $0) }
+            for range in SummarySlicePlanner.ranges(itemCount: controller.pageCount) {
+                let start = range.lowerBound
+                let end = range.upperBound - 1
+                let pageBudget = SummarySlicePlanner.characterBudget(itemCount: range.count)
+                let text = range
+                    .map { page in
+                        let body = controller.usableText(of: page)
+                        return "【第 \(page + 1) 页】\n"
+                            + PromptLibrary.truncate(body, limit: pageBudget)
+                    }
                     .filter { !$0.isEmpty }
                     .joined(separator: "\n")
                 if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     let label = start == end ? "第 \(start + 1) 页" : "第 \(start + 1)–\(end + 1) 页"
                     slices.append((label: label, text: text))
                 }
-                start = end + 1
             }
             return slices
         }
@@ -321,8 +381,13 @@ struct PDFReaderView: View {
         let documentPath = document.url.standardizedFileURL.path
         let progressThrottle = ProgressThrottle()
 
-        controller.onPositionChange = { [weak controller] page, count in
-            guard count > 0 else { return }
+        bridge.closeReader = { [weak controller] in
+            store.flush()
+            controller?.unload()
+        }
+
+        controller.onPositionChange = { [weak controller, weak bridge, weak state] page, count in
+            guard let bridge, let state, count > 0 else { return }
             // 卡顿自检：记一次位置回调（滚动时若它每步都发，说明滚动在推 SwiftUI 状态）。
             Jank.tick(.positionCallback)
             let progress = Double(page + 1) / Double(count)
@@ -344,7 +409,8 @@ struct PDFReaderView: View {
             controller?.objectWillChange.send()
         }
 
-        controller.onSelectionChange = { [weak controller] (selection: ReaderSelection?) in
+        controller.onSelectionChange = { [weak controller, weak bridge] (selection: ReaderSelection?) in
+            guard let bridge else { return }
             // 必须包 `withAnimation`：划词条自己写了 transition（淡入 + 上浮 10pt），
             // 但 transition 只在「状态变化处于动画事务内」时才跑。这里裸赋值的话
             // 那条 transition 等于白写——拖完鼠标，条子是「啪」地闪出来的。
@@ -368,8 +434,8 @@ struct PDFReaderView: View {
         }
         syncOCRMenuDescriptor()
 
-        controller.onOutline = { (nodes: [OutlineNode]) in
-            bridge.outline = nodes
+        controller.onOutline = { [weak bridge] (nodes: [OutlineNode]) in
+            bridge?.outline = nodes
         }
 
         bridge.goTo = { [weak controller] locator in controller?.go(to: locator) }
@@ -452,10 +518,17 @@ struct PDFReaderView: View {
         bridge.addNoteAtCurrentPosition = { [weak controller] in
             controller?.addPageNoteAtCurrentPosition()
         }
+        // 批注面板「修正截断」→ 把文件里已存在的半行矩形扩到整行并写回一次。
+        // 面板负责弹确认框（这会改用户的 PDF 文件），这里只执行。
+        bridge.normalizeAnnotationRows = { [weak controller] in
+            let changed = controller?.normalizeAnnotationRows() ?? 0
+            if changed > 0 { bridge.annotationRevision += 1 }
+            return changed
+        }
         // 正文里点批注（PDFViewAnnotationHit）→ 侧栏聚焦对应行。
         // 若批注页签不在前台，顺势切过去——用户点的是批注，就该看到批注清单。
         controller.onAnnotationTapped = { [weak bridge, weak state] id in
-            bridge?.focusedAnnotationID = id
+            bridge?.focusAnnotation(id)
             state?.revealSidebar(tab: .annotations)
         }
 
@@ -546,6 +619,13 @@ struct PDFReaderView: View {
         let renderer = PDFThumbnailRenderer(url: document.url)
         bridge.thumbnailProvider = { index, size in renderer.render(index: index, size: size) }
         bridge.setPanelResizing = { [weak controller] active in controller?.setPanelResizing(active) }
+        // 面板过渡自检的观测点：`autoScales` 的实际取值与滚动锚点只有控制器看得到，
+        // 自检通道经这个闭包回读（`--panel-transition-report`）。
+        bridge.panelTransitionProbe = { [weak controller] in
+            guard let controller else { return nil }
+            return controller.panelTransitionProbe()
+        }
+        bridge.resetPanelTransitionTrace = { [weak controller] in controller?.resetPanelTrace() }
         controller.connectViewport(bridge.viewport)
     }
 }

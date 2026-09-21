@@ -3,6 +3,13 @@
 > 断点续做时**先读这里**，再读 `ARCHITECTURE.md`。
 > 每一项都附「怎么验的」——没有验证方式的条目等于没做完。
 
+
+## 2026-09-20：PDF 滚动与项目维护
+
+用户确认《教育的目的》收起侧栏、AI 后仍卡。基于 `496f464` 排查了原扫描版与 OCR 版。用户后续实机确认原色流畅、主题仍卡，因此放弃视口混合方案，改为 PDFKit 原生分块绘制时着色并缓存；隐藏缩略图时停止高频几何；统一关闭标签的后台取消，避免重新挂载清空 AI 草稿；删除未使用的钥匙串实现。原图标与最新界面功能保留，未重复拖拽验证。
+
+29 项单测通过；快捷键 55、OCR 菜单 16、批注 15、搜索 6 项全部通过；生命周期与快捷键实际路由通过。Release 已构建。冷启动与热身表现不同，不把单次性能读数当作“完全不卡”的证明。详见 [验证报告](VERIFY-20260920.md) 与 [对话记录](DECISIONS-20260920.md)。
+
 ---
 
 ## 本批次（第七批）：一个窗口多标签 + 阅读升级（EPUB 双栏 / 外观菜单）
@@ -223,6 +230,40 @@ SwiftUI 拉回 920（`.frame(minWidth: 920)` 持续兜住 NSWindow 的 minSize�
 | 联网检索自检 | 新增 `--websearch-report 1` | 实跑 | 3/3：Crossref 4 条 / OpenAlex 4 条 / arXiv 4 条，去重后 12 条，0 失败 |
 | 过时文案修正 | `AgentEditor` | 全文 grep | 「Crossref、Semantic Scholar、arXiv」→「Crossref、OpenAlex、arXiv」（代码早就换了源） |
 
+### 已落地（第四批：Agent 精简与技能合并，2026-09-21）
+
+| 项 | 改在哪 | 验证方式 | 关键结论 |
+| --- | --- | --- | --- |
+| 移除「批判审稿人」预设 | `AgentConfig.presets` + `retiredPresetIDs` | `--agent-report 1` | **只删预设表是不够的**：用户磁盘上那份副本不会自己消失，必须按 id 登记并在读盘时清理 |
+| 技能模型统一 | `AgentConfig.skills: [AgentSkill]`（`{id,name,instruction}`） | `--agent-report 1` + `swift test` | 旧 `skills:["socratic"]` 按 id 查目录还原、旧 `customSkills` 并进同一列表；**内置 id 沿用旧枚举 rawValue，改 id 等于让老用户技能静默消失** |
+| 「论证链」「术语变化」并入内置目录 | `AgentSkill.catalog` | `--agent-report 1` | 两条从「某个预设的自定义技能」升为可复用技能，目录共 9 项 |
+| 技能区合并 + 可增删改 | `AgentEditor.skillsEditor` | 代码路径（界面） | 「添加内置技能」菜单里取副本 + 「新建技能」写自己的；删除按 **id** 不按下标（`ForEach` 重算时下标会错位） |
+| Agent 可删除（含内置预设） | `AgentEditor.footer` + `AISettings.init(from:)` | `--agent-report 1` | 删任意 Agent 都留得住：不再「缺哪个预设补哪个」，只有磁盘上**完全没有** `agents` 键才灌预设 |
+| 悬空选择收口 | `AISettings.init(from:)` | `--agent-report 1` | 选中的 Agent 被删 / 被下线清理后 `activeAgentID` 置 nil，否则面板显示「Agent」却不带勾选 |
+| 界面文案精简 | `AgentEditor` | 逐块对照 | 联网检索 2 段 → 1 句、自定义指令 3 行 → 1 句、温度 4 行 → 1 句、底部说明整块删除；「列文献」没开联网时改成**行内**提示 |
+| 证伪演练 | 同上 | 人为删掉「字符串技能」的迁移分支后重跑 | 红 4 项（字符串技能还原、名字与要求、自定义技能合并、旧配置容错解码）——**不是恒真断言** |
+| 自检不污染配置 | 跑前跑后 `md5 settings.json` / `conversations.json` | 一致（`LUMEN_TEST_DATA` 隔离 + `suppressSave`） |
+
+### 已落地（第五批：技能改回可选卡片 + 全局技能库 + 删掉自定义指令，2026-09-21）
+
+用户的要求是「恢复此前可选择的样式」，同时保留增删改。两件事互相拉扯：卡片式勾选要一个
+**固定的选项清单**，而增删改要这个清单**可变且持久**。所以技能从「Agent 上的一份副本」
+改成「一份全局技能库 + Agent 只存 id」——用户选了全局共享（而不是每个 Agent 各一份）。
+
+| 项 | 改在哪 | 验证方式 | 关键结论 |
+| --- | --- | --- | --- |
+| 技能改回两列可选卡片 | `AgentEditor.skillGrid` / `skillCard` | 代码路径（界面） | 点卡片勾选；悬停出编辑 / 删除，另有右键菜单；编辑走一层小 sheet（480×400） |
+| 技能存全局技能库 | `AISettings.skillLibrary` + `AgentConfig.skills: [String]` | `--agent-report 1` + `swift test` | **磁盘键仍叫 `skills`**（老配置就是这个键），所以绝大多数老配置原样读得出；代价认下：改一条技能，用它的所有 Agent 一起变 |
+| 三条来路的迁移 | `AgentConfig.init(from:)` + `AISettings.migrateCarriedSkills` | `--agent-report 1` + `swift test` | `[String]` → `[AgentSkill]`（带全文）→ 旧 `customSkills` 逐条试；带全文的定义由**迁移载体 `carriedSkills`** 捎进技能库，载体不进 `CodingKeys`，不会被写回磁盘 |
+| 同名旧技能认领 | 同上 | `--agent-report 1` + `swift test` | 老配置里「论证链」「术语变化」是自建技能（带 UUID）而现在是内置的：**只按 id 判会多出一张同名卡，只按名字判会丢掉用户自己写的** ——两条一起用 |
+| 悬空 id 清理 | `AISettings.init(from:)` | `--agent-report 1` + `swift test` | 技能库里没有的 id 会被清掉；否则界面上是一张勾不掉的空卡 |
+| 技能库灌入规则 | `AISettings.init(from:)` | `--agent-report 1` + `swift test` | 与 agents 同一条：**缺键才灌** 14 条内置技能，被清空就保持为空（删掉的不会自己长回来） |
+| 「恢复内置技能」入口 | `AgentEditor` 技能区 | 代码路径（界面） | 有内置技能缺失时才出现，显示缺几条；与「恢复内置预设」是两件事 |
+| 删掉「自定义指令」 | `AgentConfig.customInstruction` / `promptSection` / `AgentEditor` | `--agent-report 1` + `swift test` | 字段、输入框、提示词段落、自检断言一并删；老配置里残留的键由容错解码忽略（有一条专门的容错用例） |
+| 技能库一路传下去 | `PromptLibrary.systemPrompt(agent:skills:)` / `messages` / `AIChatModel.submit`+`RequestSnapshot` / `AIPanelView` | `--agent-report 1` | **不传就是系统提示静默变短**：`PromptLibrary` 里加了一行兜底日志（传了 agent 没传 skills 会打 `[Lumen][prompt]`）；快照连技能库一起记，重跑才和第一次一致 |
+| 预设技能改写成 id | `AgentConfig.presets` | `--agent-report 1` | 新增一条「预设引用的技能都在内置技能里」的断言——写错一个 id 的后果是那条技能静默不生效 |
+| 内置技能扩到 14 条 | `AgentSkill.catalog` | `--agent-report 1` | 原先只活在预设里的 5 条（认知检查 / 研究设计 / 脉络定位 / 可写段落 / 反方检验）升为可选样式，避免删预设时连带丢内容 |
+
 ### 未变（回归）
 
 | 项 | 验证方式 | 结论 |
@@ -281,7 +322,7 @@ SwiftUI 拉回 920（`.frame(minWidth: 920)` 持续兜住 NSWindow 的 minSize�
 | **PDF 批注与高亮** | `--annotate-report 1` | 10/10：写回**原文件**（重开磁盘文件核对条数）；锚回的高亮与取选区那一行**相交** |
 | **搜索高亮** | `--search-report 1` | 6/6：逐条定位准确；保存后重开**批注数仍是起点值**（临时高亮没被固化） |
 | **AI 消息操作** | 侧栏批注页签可见 | 复制进剪贴板；「添加到批注」锚回原文行 |
-| **Agent + 联网检索** | `--agent-report 1` | 20/20：预设 id 稳定、系统提示拼装顺序正确、温度覆盖与容错解码、Crossref + OpenAlex + arXiv 三源 0 失败 |
+| **Agent + 联网检索** | `--agent-report 1` | 36/36：预设 id 稳定、技能迁移（字符串 / customSkills 两路）、下线预设清理、删掉的 Agent 不再补回、系统提示拼装顺序、温度覆盖、Crossref + OpenAlex + arXiv 三源 0 失败 |
 | **批注列表页签** | `--sidebar-tab annotations --layout-report 1` | 5 个页签（现在在图标栏里，不再占内容面板顶部）在 920pt 最小窗口下不被挤掉；几何断言通过 |
 
 > 侧栏页签顺序即快捷键编号，插入「批注」后页面顺延：**⌘1 目录 / ⌘2 智能 / ⌘3 搜索 /
@@ -367,7 +408,7 @@ SwiftUI 拉回 920（`.frame(minWidth: 920)` 持续兜住 NSWindow 的 minSize�
 | --- | --- | --- |
 | 推送 GitHub 私有仓库 | **卡在需要用户操作** | SSH 已认证为 `JiongN`；本机无 `gh` CLI 也无 HTTPS token，**创建远端仓库这一步必须由用户完成** |
 | 残留文件清理 | **需要用户补充信息** | 全盘搜过：未发现 Lumen 相关的残留文件，`recent.json` 干净，代码里没有「已删除」提示文案。用户提到的弹窗**不是本应用**发出的，需确认来源 |
-| 全文翻译 | **部分完成** | EPUB 已支持**逐段翻译**（译文在原文上方，`--translate-report 1` 可验）。PDF 侧与「整本一次性翻译」仍未做：PDF 的段落边界靠 PDFKit 推断，错一次就是译串 |
+| 文档翻译 | **已完成当前实现** | EPUB 保留逐段翻译；PDF 新增整本文字抽取、按段翻译与当前页原文／译文对照栏。默认 Apple 系统翻译，微软在线通道后备；不改写原 PDF。段落抽取 42/42、真实英→中缓存与界面截图均已验证。复杂双栏、表格及 OCR 错误仍可能影响段落边界 |
 | EPUB 批注写回原文件 | **做不了，已在界面上说明** | EPUB 是压缩包，写回会破坏结构与签名 → 存应用数据目录 |
 | 拖拽手势验证 | 受权限限制 | 辅助功能权限未授予，无法程序化触发鼠标拖拽。面板宽度的计算链路已验，但「按下时命中区域对不对」未验 |
 | 真实服务商兼容性 | 未覆盖 | 桩服务只覆盖 OpenAI 兼容协议的标准形态 |
@@ -386,3 +427,5 @@ SwiftUI 拉回 920（`.frame(minWidth: 920)` 持续兜住 NSWindow 的 minSize�
 - **`usableText` 的 24 字符门槛**：AI 上下文里宁可这页什么都不给，
   也好过把「12」这个页码当成正文——但对「复制全文」用的是另一套规则，
   因为那边少一格正文比多一个页码严重得多。
+
+最新原生 tile 色调实现、崩溃与批注修复验证见 [VERIFY-20260921.md](VERIFY-20260921.md)。

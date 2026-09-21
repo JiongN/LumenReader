@@ -8,6 +8,27 @@ import LumenKit
 /// 回答里必须带得回原文的引用。不做那种浮在半空、跟正文没有锚点的聊天窗口。
 struct AIPanelView: View {
 
+    private enum QuestionScope: String, CaseIterable, Identifiable {
+        case currentUnit
+        case wholeDocument
+        case compareDocument
+        var id: String { rawValue }
+        var title: String {
+            switch self {
+            case .currentUnit: return "当前页/章"
+            case .wholeDocument: return "全文检索"
+            case .compareDocument: return "双文档"
+            }
+        }
+        var icon: String {
+            switch self {
+            case .currentUnit: return "doc.text"
+            case .wholeDocument: return "doc.text.magnifyingglass"
+            case .compareDocument: return "rectangle.on.rectangle.angled"
+            }
+        }
+    }
+
     @EnvironmentObject private var state: AppState
     @EnvironmentObject private var bridge: ReaderBridge
     @EnvironmentObject private var chat: AIChatModel
@@ -21,6 +42,13 @@ struct AIPanelView: View {
     @State private var isTemplateEditorVisible = false
     /// Agent 编辑器
     @State private var isAgentEditorVisible = false
+    /// 普通问题默认只读当前页/章；全文与双文档比较必须由用户明确选择。
+    @State private var questionScope: QuestionScope = LaunchOptions.aiQuestionScope == "compare"
+        ? .compareDocument
+        : (LaunchOptions.aiQuestionScope == "whole" ? .wholeDocument : .currentUnit)
+    @State private var comparisonSessionID: UUID?
+    @State private var didWarnDraftLimit = false
+    private static let maxDraftCharacters = 6_000
 
     var body: some View {
         // 卡顿自检：body 每次求值都记一次。必须写在这里（而不是做成 ViewModifier）——
@@ -62,93 +90,79 @@ struct AIPanelView: View {
     /// 引用编号加四个动作按钮。14 是「看着不挤」与「300pt 时 footer 仍放得下」的交点。
     private static let contentInset: CGFloat = 14
 
-    /// composer 行里模型 chip 的**最小槽位宽**（pt）。
-    ///
-    /// 这不是审美常量，是**可见性下限**。chip 里的文本挂了 `.frame(maxWidth:)` 可截断，
-    /// 它的最小宽度因此是 0；而同一行的输入框是 `.layoutPriority(1)`，HStack 于是把
-    /// chip 一路压到 0 宽——实测面板里根本看不到模型切换按钮（头部已搬走、底部又没画出来）。
-    /// 108 ≈ chip 自然上限（8 前内边距 + 5 圆点 + 4 间距 + 80 文本 + 8 后内边距 = 105）取整；
-    /// 300pt 面板下给输入框仍留得下 126pt，占位符不会被裁成残句。
-    private static let modelSlotMinWidth: CGFloat = 108
-
-    /// header 行里「模板 / Agent」两枚 chip 的宽度区间（pt）。
-    ///
-    /// 这两枚原来挂 `.fixedSize()`（不让菜单标题被截断），代价是 header 行在
-    /// 300pt 下限下**整体溢出面板右边界**：实测收起按钮被顶到 maxX=1340.2，
-    /// 而面板右边界是 1340.0——按钮有一半探到面板外面，看着像「悬在行尾外面」。
-    /// 改成可压缩后必须同时给下限：只压缩不设下限，可截断的文本会被压到 0 宽
-    /// （模型 chip 那次就是同一个坑），chip 会整个消失。
-    private static let headerChipMinWidth: CGFloat = 56
-    private static let headerChipMaxWidth: CGFloat = 116
+    private static let headerIconWidth: CGFloat = 32
 
     private var header: some View {
-        HStack(spacing: DS.Space.s) {
-            // v3 图标迭代：头部不再放 AI 图标。面板里是 chips + 对话，
-            // 再摆一个标记属于重复自我介绍；工具栏与侧栏页签上的
-            // 环点字形已经足够指认这里是 AI。
-
-            // 这里原来还有一行「AI 阅读」文字标题，现在让位给切换器。
-            // 面板默认宽 380pt、用户还能调到 300pt，标题 + 两个 chip 会把整行挤爆；
-            // 而 sparkles 图标本身已经说明了这是 AI 面板，标题是纯冗余。
-            //
-            // 顺序（用户定的）：globe（联网开关）→ 模板 → Agent → ⋯。
-            // 面板的收起 / 展开统一由主窗口工具栏最右侧的开关承担，头部不再放入口。
-            // globe 从输入框左槽搬到这里、模型 chip 从头部搬到输入框左槽——两者换了位置：
-            // 「这一次要不要联网」属于发起的动作，和输入框放一起更顺手；
-            // 「用哪个模型」是长期设定，放在头部与模板 / Agent 并列更合逻辑。
+        HStack(spacing: DS.Space.xs) {
             webSearchToggle
-            templateMenu
-            agentMenu
-
-            Spacer(minLength: 0)
-
-            // ⋯ 菜单钉在行尾，不许被左侧的 chip 挤出可视区。
-            moreMenu
-                .layoutPriority(1)
+            HStack(spacing: DS.Space.xs) {
+                providerMenu.layoutProbe("aiModelChip")
+                templateMenu
+                agentMenu
+            }
+            .frame(maxWidth: .infinity)
+            conversationMenu
         }
         .padding(.horizontal, Self.contentInset)
-        .frame(height: DS.Size.toolbarHeight)
+        .padding(.vertical, DS.Space.xs)
     }
 
-    /// 面板内的「超长菜单」：总结 / 重新生成 / 记忆 / 导出 / 清空。
-    private var moreMenu: some View {
-        Menu {
-            Button("总结本节") { run(.summarize(scope: .currentUnit)) }
-            Button("总结全书") { summarizeWholeDocument() }
-            Divider()
+    /// planner 条目 + 「这一项之前要不要画分隔线」。首项之前不画。
+    private var aiPanelEntries: [PanelMenuRow] {
+        var result: [PanelMenuRow] = []
+        var previousSection: Int?
+        for entry in ActionEntries.entries(in: .aiPanel) {
+            result.append(PanelMenuRow(entry: entry,
+                                       showDivider: previousSection.map { $0 != entry.section } ?? false))
+            previousSection = entry.section
+        }
+        return result
+    }
+
+    /// 把 planner 里的一条 AI 面板条目翻译成按钮（含可用性）。视图不做归属判断。
+    @ViewBuilder
+    private func aiPanelButton(_ entry: ActionEntry) -> some View {
+        switch entry.id {
+        case .summarizeUnit:
+            Button(currentUnitSummaryTitle) { run(.summarize(scope: .currentUnit)) }
+        case .summarizeAll:
+            Button("总结全文") { summarizeWholeDocument() }
+        case .rerunLast:
             // 「重新生成」是**付费动作**，所以只放在菜单与气泡 footer 里，
             // 不给键盘快捷键：一次误触的代价是一次真实的模型调用。
-            Button("重新生成上一条回答") { chat.rerunLast() }
+            Button(entry.title) { chat.rerunLast() }
                 .disabled(!chat.canRerunLast)
-            Divider()
-            Button("记住选中内容") { rememberSelection() }
+        case .rememberSelection:
+            Button(entry.title) { rememberSelection() }
                 .disabled(!hasSelection)
-            Button("记住当前这一节") { rememberCurrentUnit() }
+        case .rememberCurrentUnit:
+            Button(entry.title) { rememberCurrentUnit() }
                 .disabled(bridge.isLoading)
-            Divider()
-            Button("导出摘要为 Markdown…") { exportSummary() }
-                .disabled(chat.lastSubstantialAnswer.isEmpty)
-            Divider()
-            Button("清空对话") { chat.clear() }
+        case .clearChat:
+            Button(entry.title) { chat.clear() }
                 .disabled(chat.bubbles.isEmpty)
-            Button("AI 与阅读设置…") {
+        case .newConversation:
+            Button(entry.title) { conversationNew() }
+        case .renameConversation:
+            Button(entry.title) { conversationRename() }
+        case .deleteConversation:
+            Button(entry.title) { conversationDelete() }
+                .foregroundStyle(DS.Palette.danger)
+        case .openAISettings:
+            Button(entry.title) {
                 openSettings()
                 NSApp.activate(ignoringOtherApps: true)
             }
-        } label: {
-            Image(systemName: "ellipsis.circle")
-                .font(DS.Typo.ui(size: 13))
+        default:
+            // planner 里新增了 AI 面板条目却没在这里补 case：不静默（断言 + 可见兜底），
+            // 否则菜单会悄悄少一项——不报错、不崩溃、自检也不会红。
+            UnimplementedEntryView(entry: entry)
         }
-        .menuStyle(.borderlessButton)
-        .menuIndicator(.hidden)
-        .frame(width: 22)
-        .help("更多")
-        .layoutProbe("aiMoreMenu")
     }
 
     // MARK: - 服务商与提示词
 
-    /// 服务商 / 模型切换。**放在 composer 行的左槽**（本批与联网开关换了位置）。
+    /// 服务商 / 模型切换。放在头部第一行并紧邻联网开关。
     ///
     /// 从「点击跳设置页」改成菜单直选，解决的是一个很实际的摩擦：
     /// 读论文时常要在快模型和强模型之间来回切——随手问一句用便宜的，
@@ -183,21 +197,20 @@ struct AIPanelView: View {
             } label: {
                 chipContent(
                     text: modelLabel,
-                    // 80 而不是 132：让它连上槽位上限（`modelSlotMinWidth` = 108），
-                    // chip 才不会反过来去挤输入框。完整模型名交给下面的 `.help`。
-                    maxTextWidth: 80
+                    // 限制可见文字宽度，避免长模型名挤掉右侧会话菜单。
+                    maxTextWidth: 48
                 )
             }
             .menuStyle(.borderlessButton)
             .menuIndicator(.hidden)
         }
         // 胶囊外壳挂在 Menu 外面（挂在 label 里不落色，见 ChipShell 的注释）。
-        // 放在 .frame(minWidth:) 之前，胶囊才是「贴着内容」而不是被拉满 108pt。
-        .modifier(ChipShell())
+        // 放在 .frame(minWidth:) 之前，胶囊才会贴着内容。
+        .modifier(ChipShell(minHeight: 36))
         // 不给 layoutPriority（输入框优先拿宽度），但**必须给最小宽度**——
         // 只靠 layoutPriority，可截断的文本会被压到 0 宽，chip 就整个消失了。
         .layoutPriority(0)
-        .frame(minWidth: Self.modelSlotMinWidth, alignment: .leading)
+        .frame(minWidth: 0, maxWidth: .infinity)
         .help(configured
               ? "切换 AI 服务商 / 模型\n当前模型：\(modelLabel)"
               : "尚未配置 AI 服务商，点击开始配置")
@@ -212,7 +225,15 @@ struct AIPanelView: View {
         if provider.models.count > 1 {
             Menu {
                 ForEach(provider.models, id: \.self) { model in
-                    Button(model) { activate(provider, model: model) }
+                    Button {
+                        activate(provider, model: model)
+                    } label: {
+                        if isActive && provider.selectedModel == model {
+                            Label(model, systemImage: "checkmark")
+                        } else {
+                            Text(model)
+                        }
+                    }
                 }
             } label: {
                 if isActive {
@@ -273,16 +294,15 @@ struct AIPanelView: View {
 
             Button("编辑提示词…") { isTemplateEditorVisible = true }
         } label: {
-            chipContent(text: activeTemplateName, icon: "text.badge.checkmark")
+            chipContent(text: activeTemplateName,
+                        icon: "text.badge.checkmark",
+                        maxTextWidth: 48)
         }
         .menuStyle(.borderlessButton)
         .menuIndicator(.hidden)
-        .modifier(ChipShell())
-        // 不挂 .fixedSize()：那样这一行在 300pt 下限下会整体溢出面板右边界，
-        // 把行尾的收起按钮顶出去（实测 maxX=1340.2 > 面板 1340.0）。
-        // 改成「可压缩 + 有下限」，超长模板名截断、完整名字交给 .help。
-        .frame(minWidth: Self.headerChipMinWidth, maxWidth: Self.headerChipMaxWidth)
-        .help("切换提示词模板")
+        .modifier(ChipShell(minHeight: 36))
+        .frame(minWidth: 0, maxWidth: .infinity)
+        .help("提示词模板：\(activeTemplateName)")
     }
 
     /// Agent 切换。
@@ -295,11 +315,7 @@ struct AIPanelView: View {
         let activeID = state.settingsStore.ai.activeAgentID
         let active = agents.first { $0.id == activeID }
 
-        return HStack(spacing: 4) {
-            // 联网中的 Agent 才亮这一点；「不用 Agent」与不联网的 Agent 都不挂灯。
-            statusDot(active?.usesWebSearch == true ? DS.Palette.accent : nil)
-
-            Menu {
+        return Menu {
                 Button {
                     state.settingsStore.ai.activeAgentID = nil
                     noteRerunAvailability("已改为不用 Agent")
@@ -330,19 +346,114 @@ struct AIPanelView: View {
                 Divider()
 
                 Button("管理 Agent…") { isAgentEditorVisible = true }
-            } label: {
-                chipContent(
-                    text: active?.name ?? "Agent",
-                    icon: "person.crop.circle.badge.checkmark"
-                )
-            }
-            .menuStyle(.borderlessButton)
-            .menuIndicator(.hidden)
+        } label: {
+            chipContent(text: active?.name ?? "Agent",
+                        icon: "person.crop.circle.badge.checkmark",
+                        maxTextWidth: 48)
         }
-        .modifier(ChipShell())
-        // 同 templateMenu：可压缩 + 有下限，换掉会让 header 行溢出的 .fixedSize()。
-        .frame(minWidth: Self.headerChipMinWidth, maxWidth: Self.headerChipMaxWidth)
-        .help("切换 Agent：角色、技能与联网检索")
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .modifier(ChipShell(minHeight: 36))
+        .frame(minWidth: 0, maxWidth: .infinity)
+        .help("Agent：\(active?.name ?? "不用 Agent")")
+    }
+
+    /// 头部「会话」切换菜单（全局共享会话之后新增）。
+    ///
+    /// 放在头部第一行右侧：当前活动会话的标题就是这枚 chip 的标签，
+    /// 点开可在「新建会话 / 历史会话（最新在前、当前项带勾选）/ 重命名 / 删除」之间切换。
+    ///
+    /// 设计取舍（与 templateMenu / agentMenu 一致，见各自注释）：
+    /// - 挂 `ChipShell` 兜底底色，标签里的 `.background` 在 borderlessButton 菜单上取不到；
+    /// - **不挂** `.fixedSize()`：300pt 下限下整行溢出会把收起按钮顶出面板；改「可压缩 + 下限」，
+    ///   超长会话标题截断、完整标题交给 `.help`；
+    /// - 永不禁用：即使只有一条空会话，菜单也要能打开（新建 / 重命名 / 删除都还有意义）。
+    private var conversationMenu: some View {
+        let store = state.services.conversationStore
+        let title = store.activeConversation?.displayTitle ?? "会话"
+        return Menu {
+            // 菜单项完全由 ConversationMenuPlanner 长出（顺序 / 勾选 / 分隔线都交给数据），
+            // 自检才能逐条核对（见 ConversationAudit），而不是靠肉眼看原生菜单。
+            ForEach(ConversationMenuPlanner.items(store: store, currentDocPath: state.document?.id), id: \.id) { item in
+                switch item {
+                case .newConversation:
+                    Button(ActionEntries.title(of: .newConversation)) { conversationNew() }
+                case .divider:
+                    Divider()
+                case .conversation(let id, let convTitle, let isActive):
+                    Button {
+                        // 点当前活动项：原地不动（避免一次无意义的 flush + 重载）。
+                        guard !isActive else { return }
+                        chat.switchTo(id)
+                    } label: {
+                        if isActive {
+                            Label(convTitle, systemImage: "checkmark")
+                        } else {
+                            Text(convTitle)
+                        }
+                    }
+                case .renameCurrent:
+                    Button(ActionEntries.title(of: .renameConversation)) { conversationRename() }
+                case .deleteCurrent:
+                    Button(ActionEntries.title(of: .deleteConversation)) { conversationDelete() }
+                }
+            }
+            Divider()
+            ForEach(aiPanelEntries) { row in
+                if row.showDivider { Divider() }
+                aiPanelButton(row.entry)
+            }
+        } label: { compactHeaderIcon("bubble.left.and.text.bubble.right") }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .frame(width: Self.headerIconWidth, height: Self.headerIconWidth)
+        .modifier(HeaderIconShell())
+        .help("会话：\(title)")
+        .layoutProbe("aiConversationMenu")
+    }
+
+    // MARK: - 会话管理动作
+
+    /// 依据当前文档开一条全新会话（全局共享，来源记到「当前文档」以便跨文档引用判定）。
+    private func conversationNew() {
+        _ = chat.newConversation(
+            sourcePath: state.document?.id,
+            sourceTitle: state.document?.displayTitle
+        )
+    }
+
+    /// 给当前会话起一个便于识别的名字（留空则回退到自动标题）。
+    private func conversationRename() {
+        guard chat.store.activeID != nil else { return }
+        let current = chat.store.activeConversation?.displayTitle ?? ""
+        let alert = NSAlert()
+        alert.messageText = "重命名会话"
+        alert.informativeText = "给当前会话起一个名字，方便以后在会话菜单里认出它。留空则使用自动标题。"
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: "确定")
+        alert.addButton(withTitle: "取消")
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 260, height: 24))
+        field.stringValue = current
+        field.placeholderString = "留空则使用自动标题"
+        field.bezelStyle = .roundedBezel
+        alert.accessoryView = field
+        if alert.runModal() == .alertFirstButtonReturn {
+            let name = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            chat.renameActive(name.isEmpty ? nil : name)
+        }
+    }
+
+    /// 删除当前会话（走二次确认，破坏性动作）。
+    private func conversationDelete() {
+        guard chat.store.activeID != nil else { return }
+        state.presentConfirmation(
+            title: "删除当前会话",
+            message: "这条会话里的全部问答记录将被永久删除，且无法恢复。",
+            confirmTitle: "删除",
+            isDestructive: true
+        ) {
+            chat.deleteActive()
+        }
     }
 
     private var activeTemplateName: String {
@@ -375,6 +486,20 @@ struct AIPanelView: View {
     private func noteRerunAvailability(_ prefix: String) {
         guard chat.canRerunLast else { return }
         state.showToast("\(prefix)：点「重新生成」可按新配置重跑当前内容")
+    }
+
+    /// 头部单行中的固定宽图标按钮。名称放进 help，避免模板、Agent、会话标题
+    /// 在 300pt 面板里互相挤压；模型名是唯一保留文字的高频状态。
+    private func compactHeaderIcon(_ systemImage: String,
+                                   tint: Color = DS.Palette.textSecondary) -> some View {
+        Image(systemName: systemImage)
+            .font(DS.Typo.ui(size: 13, weight: .medium))
+            .foregroundStyle(tint)
+            .frame(width: Self.headerIconWidth, height: Self.headerIconWidth)
+            .background(DS.Palette.surfaceRaised,
+                        in: RoundedRectangle(cornerRadius: DS.Radius.s, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: DS.Radius.s, style: .continuous)
+                .strokeBorder(DS.Palette.separator, lineWidth: 0.5))
     }
 
     /// chip 的**内容**（图标 + 文本），作为 `Menu` 的 label。
@@ -428,12 +553,24 @@ struct AIPanelView: View {
     /// 同款写法用在非 Menu 的视图上（气泡头像、页码徽章）是正常的，
     /// 所以这是 Menu（borderlessButton 样式）自己的事，不是颜色的问题。
     struct ChipShell: ViewModifier {
+        var minHeight: CGFloat? = 30
         func body(content: Content) -> some View {
             content
                 .padding(.horizontal, DS.Space.s)
                 .padding(.vertical, 3)
+                .frame(minHeight: minHeight)
                 .background(DS.Palette.surfaceRaised, in: Capsule())
                 .overlay(Capsule().strokeBorder(DS.Palette.separator, lineWidth: 0.5))
+        }
+    }
+
+    private struct HeaderIconShell: ViewModifier {
+        func body(content: Content) -> some View {
+            content
+                .background(DS.Palette.surfaceRaised,
+                            in: RoundedRectangle(cornerRadius: DS.Radius.s, style: .continuous))
+                .overlay(RoundedRectangle(cornerRadius: DS.Radius.s, style: .continuous)
+                    .strokeBorder(DS.Palette.separator, lineWidth: 0.5))
         }
     }
 
@@ -507,17 +644,18 @@ struct AIPanelView: View {
                 Text("让 AI 帮你读这一页")
                     .font(DS.Typo.ui(size: 13.5, weight: .semibold))
                     .foregroundStyle(DS.Palette.textPrimary)
-                Text("选中正文后点浮动条上的按钮，或直接从下面开始。\n没有选中内容时，提问会先在全书中检索相关段落。")
+                Text("选中正文后点浮动条上的按钮，或直接从下面开始。\n默认读取当前页/章；输入框左侧可切换全文检索或双文档对照。")
                     .font(DS.Typo.ui(size: 11.5))
                     .foregroundStyle(DS.Palette.textTertiary)
                     .fixedSize(horizontal: false, vertical: true)
             }
 
             VStack(spacing: DS.Space.s) {
-                quickAction("解释选中内容", icon: "sparkles", enabled: hasSelection) { run(.explain) }
-                quickAction("翻译选中内容", icon: "character.book.closed", enabled: hasSelection) { run(.translate) }
-                quickAction("总结本节", icon: "text.append", enabled: true) { run(.summarize(scope: .currentUnit)) }
-                quickAction("总结全书", icon: "books.vertical", enabled: bridge.unitCount > 1) { summarizeWholeDocument() }
+                // 四张引导卡从 planner 长出：文案取自 `entry.title`，不再在视图里硬编码，
+                // 否则改文案时 planner 会静默过期——而它是我们宣称的单一真相源。
+                ForEach(ActionEntries.entries(in: .aiPanelGuide)) { entry in
+                    guideCard(entry)
+                }
             }
 
             if !(state.settingsStore.activeProvider?.isConfigured ?? false) {
@@ -539,7 +677,7 @@ struct AIPanelView: View {
                     .font(DS.Typo.ui(size: 12, weight: .semibold))
                     .foregroundStyle(DS.Palette.textPrimary)
             }
-            Text("Lumen 采用 BYOK：密钥只存在你本机的钥匙串里，不经过任何中间服务器。\n支持 DeepSeek、OpenAI、Kimi、智谱、通义，以及本机的 Ollama / LM Studio。")
+            Text("Lumen 采用 BYOK：密钥保存在本机应用数据目录，不经过任何中间服务器。\n支持 DeepSeek、OpenAI、Kimi、智谱、通义，以及本机的 Ollama / LM Studio。")
                 .font(DS.Typo.ui(size: 11.5))
                 .foregroundStyle(DS.Palette.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -602,6 +740,25 @@ struct AIPanelView: View {
         .disabled(!enabled)
     }
 
+    /// 空状态引导卡：文案取自 planner（`entry.title`），图标 / 可用性 / 动作按 id 翻译。
+    /// 这样改文案只动 `ActionEntries` 一处——视图里不再出现那四个中文标题字面量。
+    @ViewBuilder
+    private func guideCard(_ entry: ActionEntry) -> some View {
+        switch entry.id {
+        case .guideExplain:
+            quickAction(entry.title, icon: "sparkles", enabled: hasSelection) { run(.explain) }
+        case .guideTranslate:
+            quickAction(entry.title, icon: "character.book.closed", enabled: hasSelection) { run(.translate) }
+        case .guideSummarizeUnit:
+            quickAction(currentUnitSummaryTitle, icon: "text.append", enabled: true) { run(.summarize(scope: .currentUnit)) }
+        case .guideSummarizeAll:
+            quickAction("总结全文", icon: "books.vertical", enabled: bridge.unitCount > 1) { summarizeWholeDocument() }
+        default:
+            // planner 里新增了引导卡条目却没在这里补 case：不静默，走可见兜底 + 断言。
+            UnimplementedEntryView(entry: entry)
+        }
+    }
+
     // MARK: - 输入区
 
     private var composer: some View {
@@ -610,18 +767,16 @@ struct AIPanelView: View {
                 selectionChip(selection)
             }
 
-            HStack(alignment: .bottom, spacing: DS.Space.s) {
-                // 左槽现在是模型 chip（本批从头部搬来）；联网开关搬去了头部。
-                providerMenu
-                    // 几何可外部核对：这一条断言是「模型切换按钮真的画出来了」。
-                    .layoutProbe("aiModelChip")
+            HStack(alignment: .center, spacing: DS.Space.s) {
+                questionScopeMenu
 
-                TextField("就当前内容提问…", text: $chat.draft, axis: .vertical)
+                TextField(questionPlaceholder, text: draftBinding, axis: .vertical)
                     .textFieldStyle(.plain)
                     .font(DS.Typo.aiBody)
                     .lineLimit(1...6)
                     .padding(.horizontal, DS.Space.m)
-                    .padding(.vertical, 9)
+                    .padding(.vertical, 8)
+                    .frame(minHeight: 40)
                     .background(
                         RoundedRectangle(cornerRadius: DS.Radius.m, style: .continuous)
                             .fill(DS.Palette.surfaceRaised)
@@ -639,7 +794,8 @@ struct AIPanelView: View {
                         chat.stop()
                     } label: {
                         Image(systemName: "stop.circle.fill")
-                            .font(DS.Typo.ui(size: 22))
+                            .font(DS.Typo.ui(size: 24))
+                            .frame(width: 40, height: 40)
                             .foregroundStyle(DS.Palette.danger)
                     }
                     .buttonStyle(.plain)
@@ -647,7 +803,8 @@ struct AIPanelView: View {
                 } else {
                     Button(action: sendDraft) {
                         Image(systemName: "arrow.up.circle.fill")
-                            .font(DS.Typo.ui(size: 22))
+                            .font(DS.Typo.ui(size: 24))
+                            .frame(width: 40, height: 40)
                             .foregroundStyle(canSend ? DS.Palette.accent : DS.Palette.textTertiary)
                     }
                     .buttonStyle(.plain)
@@ -655,9 +812,119 @@ struct AIPanelView: View {
                     .help("发送 (↩)")
                 }
             }
+
+            if chat.draft.count >= Self.maxDraftCharacters * 4 / 5 {
+                Text("\(chat.draft.count)/\(Self.maxDraftCharacters)")
+                    .font(DS.Typo.ui(size: 10.5, design: .monospaced))
+                    .foregroundStyle(chat.draft.count >= Self.maxDraftCharacters
+                        ? DS.Palette.warning : DS.Palette.textTertiary)
+                    .monospacedDigit()
+                    .frame(maxWidth: .infinity, alignment: .trailing)
+            }
         }
         .padding(.horizontal, Self.contentInset)
         .padding(.vertical, DS.Space.m)
+    }
+
+    private var questionScopeMenu: some View {
+        Menu {
+            ForEach([QuestionScope.currentUnit, .wholeDocument]) { scope in
+                Button {
+                    questionScope = scope
+                } label: {
+                    if questionScope == scope {
+                        Label(scope.title, systemImage: "checkmark")
+                    } else {
+                        Text(scope.title)
+                    }
+                }
+            }
+            Divider()
+            Section("与已打开文档对照") {
+                if comparisonSessions.isEmpty {
+                    Text("请先打开另一份文档")
+                } else {
+                    ForEach(comparisonSessions) { candidate in
+                        Button {
+                            comparisonSessionID = candidate.id
+                            questionScope = .compareDocument
+                        } label: {
+                            if questionScope == .compareDocument,
+                               comparisonSessionID == candidate.id {
+                                Label(candidate.title, systemImage: "checkmark")
+                            } else {
+                                Text(candidate.title)
+                            }
+                        }
+                    }
+                }
+            }
+        } label: {
+            chipContent(text: questionScopeTitle, icon: questionScope.icon, maxTextWidth: 78)
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .modifier(ChipShell(minHeight: 40))
+        .frame(minWidth: 100, maxWidth: 118)
+        .layoutPriority(1)
+        .help(questionScopeHelp)
+    }
+
+    private var questionPlaceholder: String {
+        switch questionScope {
+        case .currentUnit: return "就当前页/章提问…"
+        case .wholeDocument: return "向全文提问…"
+        case .compareDocument: return "比较两份文档…"
+        }
+    }
+
+    private var comparisonSessions: [ReaderSession] {
+        state.sessions.filter { $0.id != session.id }
+    }
+
+    private var selectedComparisonSession: ReaderSession? {
+        if let comparisonSessionID,
+           let selected = comparisonSessions.first(where: { $0.id == comparisonSessionID }) {
+            return selected
+        }
+        return comparisonSessions.first
+    }
+
+    private var questionScopeTitle: String {
+        guard questionScope == .compareDocument else { return questionScope.title }
+        guard let title = selectedComparisonSession?.title else { return "双文档" }
+        return "对照 · \(title)"
+    }
+
+    private var questionScopeHelp: String {
+        switch questionScope {
+        case .currentUnit:
+            return "默认只使用当前页或当前章的内容"
+        case .wholeDocument:
+            return "检索当前整份文档，选取最相关的段落作为依据"
+        case .compareDocument:
+            return selectedComparisonSession.map {
+                "同时检索当前文档与「\($0.title)」，回答时区分两份来源"
+            } ?? "先打开另一份文档，才能进行双文档比较"
+        }
+    }
+
+    private var draftBinding: Binding<String> {
+        Binding(
+            get: { chat.draft },
+            set: { value in
+                if value.count > Self.maxDraftCharacters {
+                    chat.draft = String(value.prefix(Self.maxDraftCharacters))
+                    if !didWarnDraftLimit {
+                        didWarnDraftLimit = true
+                        state.showToast("输入已限制为 6000 字；长材料请放在文档中，再用「全文检索」提问")
+                    }
+                } else {
+                    chat.draft = value
+                    if value.count < Self.maxDraftCharacters { didWarnDraftLimit = false }
+                }
+            }
+        )
     }
 
     /// 头部的「联网检索」手动开关（本批从输入框左槽搬来）。
@@ -680,7 +947,7 @@ struct AIPanelView: View {
             Image(systemName: "globe")
                 .font(DS.Typo.ui(size: 13, weight: isOn ? .semibold : .regular))
                 .foregroundStyle(isOn ? Color.white : DS.Palette.textTertiary)
-                .frame(width: 26, height: 26)
+                .frame(width: 30, height: 30)
                 .background(
                     Circle().fill(isOn ? DS.Palette.accent : DS.Palette.surfaceRaised)
                 )
@@ -769,25 +1036,38 @@ struct AIPanelView: View {
     private func sendDraft() {
         guard canSend else { return }
         let question = chat.draft.trimmingCharacters(in: .whitespacesAndNewlines)
-        let (context, locator, _) = resolveContext(for: .ask(question: question))
+        let (context, locator, citations) = resolveContext(for: .ask(question: question))
+        // 双文档模式的 context 已明确包含 A / B 两份材料；若继续传当前选区，PromptLibrary
+        // 会按“有选区就只用选区”的规则覆盖 context，比较会悄悄退化成单文档提问。
+        let requestSelection = questionScope == .compareDocument ? nil : bridge.selection
+        // 全局共享会话之后，每次提问都要把「当前文档」记到气泡上，
+        // 否则跨文档引用降级（见 ConversationCitationPolicy）无从判定这条回答属于哪本书。
+        let sourcePath = state.document?.id
+        let sourceTitle = state.document?.displayTitle
         chat.followUp(
             question: question,
-            selection: bridge.selection,
+            selection: requestSelection,
             metadata: bridge.metadata,
             locatorLabel: bridge.positionLabel,
             context: context,
             locator: locator,
+            citations: citations,
             config: state.settingsStore.activeProvider,
             memory: state.aiMemoryPayload,
             translateTarget: state.settingsStore.ai.translateTarget,
             template: activeTemplate,
             agent: activeAgent,
-            webSearchEnabled: state.settingsStore.ai.webSearchEnabled
+            skills: state.settingsStore.ai.skillLibrary,
+            webSearchEnabled: state.settingsStore.ai.webSearchEnabled,
+            sourcePath: sourcePath,
+            sourceTitle: sourceTitle
         )
     }
 
     private func run(_ task: AITask) {
-        let (context, locator, _) = resolveContext(for: task)
+        let (context, locator, citations) = resolveContext(for: task)
+        let sourcePath = state.document?.id
+        let sourceTitle = state.document?.displayTitle
         chat.submit(
             task: task,
             selection: bridge.selection,
@@ -795,13 +1075,16 @@ struct AIPanelView: View {
             locatorLabel: bridge.positionLabel,
             context: context,
             locator: locator,
-            citations: nil,
+            citations: citations,
             config: state.settingsStore.activeProvider,
             memory: state.aiMemoryPayload,
             translateTarget: state.settingsStore.ai.translateTarget,
             template: activeTemplate,
             agent: activeAgent,
-            webSearchEnabled: state.settingsStore.ai.webSearchEnabled
+            skills: state.settingsStore.ai.skillLibrary,
+            webSearchEnabled: state.settingsStore.ai.webSearchEnabled,
+            sourcePath: sourcePath,
+            sourceTitle: sourceTitle
         )
     }
 
@@ -824,15 +1107,20 @@ struct AIPanelView: View {
 
     /// 决定这次请求要喂给模型什么上下文。
     ///
-    /// 三级回退：有选中内容就用选中内容（最准）；没有选中但用户在提问，
-    /// 就全书检索出相关段落（把提问从「这一屏」扩到「整本书」）；
-    /// 都没有就用当前阅读位置的内容。
+    /// 当前页是默认；全文模式才检索当前整本，双文档模式则分别检索两个已打开标签。
     private func resolveContext(for task: AITask) -> (String, DocumentLocator, [DocumentLocator]) {
+        if questionScope == .compareDocument,
+           let query = Self.retrievalQuery(for: task), !query.isEmpty,
+           let comparison = resolveComparisonContext(query: query) {
+            return comparison
+        }
+
         if let selection = bridge.selection {
             return (selection.text, selection.locator, [selection.locator])
         }
 
-        if let query = Self.retrievalQuery(for: task), !query.isEmpty,
+        if questionScope == .wholeDocument,
+           let query = Self.retrievalQuery(for: task), !query.isEmpty,
            let retrieve = bridge.retrieveProvider {
             let slices = retrieve(query)
             if !slices.isEmpty {
@@ -847,6 +1135,67 @@ struct AIPanelView: View {
         return (fallback.0, fallback.1, [fallback.1])
     }
 
+    /// 从当前标签和另一个已打开标签各取最相关段落。定位按钮只保留当前文档的命中：
+    /// `DocumentLocator` 目前不携带文件身份，若把 B 文档页码挂到 A 文档气泡上，会跳错书。
+    /// 两份材料本身始终带文档名和页/章标签，回答仍可核对来源。
+    private func resolveComparisonContext(
+        query: String
+    ) -> (String, DocumentLocator, [DocumentLocator])? {
+        guard let other = selectedComparisonSession else {
+            state.showToast("请先打开另一份文档，再选择双文档比较")
+            return nil
+        }
+
+        let currentFallback = bridge.currentContextProvider?()
+            ?? ("", DocumentLocator.pdf(page: 0, charOffset: 0))
+        let currentHits = bridge.retrieveProvider?(query) ?? []
+        let currentText: String
+        let currentLocator: DocumentLocator
+        let currentCitations: [DocumentLocator]
+
+        if let selection = bridge.selection, selection.isUsable {
+            currentText = "【当前选中内容】\n\(selection.text)"
+            currentLocator = selection.locator
+            currentCitations = [selection.locator]
+        } else if !currentHits.isEmpty {
+            currentText = currentHits.map { "【\($0.label)】\n\($0.text)" }
+                .joined(separator: "\n\n")
+            currentLocator = currentHits[0].locator
+            currentCitations = currentHits.map(\.locator)
+        } else {
+            currentText = currentFallback.0
+            currentLocator = currentFallback.1
+            currentCitations = [currentFallback.1]
+        }
+
+        let otherHits = other.bridge.retrieveProvider?(query) ?? []
+        let otherFallback = other.bridge.currentContextProvider?()
+        let otherText: String
+        if !otherHits.isEmpty {
+            otherText = otherHits.map { "【\($0.label)】\n\($0.text)" }
+                .joined(separator: "\n\n")
+        } else {
+            otherText = otherFallback?.0 ?? ""
+        }
+
+        guard !otherText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            state.showToast("「\(other.title)」尚未完成加载，请先切到该标签一次")
+            return nil
+        }
+
+        let context = """
+        【双文档对照】
+        以下材料分别来自两份文档。回答时必须区分 A 与 B 的观点；共同点和差异都要标明来源，不要把两份原文混成同一作者的论述。
+
+        【文档 A：\(session.title)】
+        \(currentText)
+
+        【文档 B：\(other.title)】
+        \(otherText)
+        """
+        return (context, currentLocator, currentCitations)
+    }
+
     private static func retrievalQuery(for task: AITask) -> String? {
         switch task {
         case .ask(let question):   return question
@@ -858,14 +1207,20 @@ struct AIPanelView: View {
 
     private func summarizeWholeDocument() {
         guard let slices = bridge.slicesProvider?(), !slices.isEmpty else {
+            state.showToast("当前文档没有可用于全文总结的文字层")
             return
         }
+        state.showToast("将分段读取全文（共 \(bridge.unitCount) \(state.unitName)）；耗时与请求次数随篇幅和模型而变")
         chat.summarizeDocument(
             slices: slices,
             metadata: bridge.metadata,
             config: state.settingsStore.activeProvider,
             memory: state.aiMemoryPayload
         )
+    }
+
+    private var currentUnitSummaryTitle: String {
+        "总结当前\(state.unitName)"
     }
 
     // MARK: - 记忆
@@ -887,19 +1242,15 @@ struct AIPanelView: View {
             locatorLabel: locator.displayLabel()
         )
     }
+}
 
-    // MARK: - 导出
-
-    private func exportSummary() {
-        let summary = chat.lastSubstantialAnswer
-        guard !summary.isEmpty else { return }
-        ExportService.exportSummary(
-            documentTitle: state.currentDocumentTitle,
-            metadata: bridge.metadata,
-            summary: summary,
-            transcript: chat.bubbles
-        )
-    }
+/// ⋯ 菜单里的一行：planner 条目 + 「是否在其前面画分隔线」。
+///
+/// 用结构体而不是元组：SwiftUI 的 `ForEach` 需要 `id`，而 key path 指不到元组成员。
+private struct PanelMenuRow: Identifiable {
+    let entry: ActionEntry
+    let showDivider: Bool
+    var id: ActionEntryID { entry.id }
 }
 
 // MARK: - 单条消息
@@ -1068,6 +1419,14 @@ struct AIBubbleView: View {
     private var citationRow: some View {
         HStack(spacing: DS.Space.xs) {
             ForEach(Array(bubble.citations.prefix(3).enumerated()), id: \.offset) { _, locator in
+                // 跨文档引用降级：只有引用指向「当前正在看的这份文档」才允许跳。
+                // 否则一键跳到另一本书的同一页码，是事实性错误（正确性红线）。
+                // 判定走纯函数 ConversationCitationPolicy，便于自检（见 ConversationAudit）。
+                let active = chat.isCitationActive(
+                    locator,
+                    bubbleDocPath: bubble.sourceDocPath,
+                    currentDocPath: state.document?.id
+                )
                 Button {
                     bridge.goTo?(locator)
                 } label: {
@@ -1075,15 +1434,24 @@ struct AIBubbleView: View {
                         .font(DS.Typo.ui(size: 10, weight: .medium))
                         .lineLimit(1)
                         .monospacedDigit()
-                        .foregroundStyle(DS.Palette.accent)
+                        .foregroundStyle(active ? DS.Palette.accent : DS.Palette.textTertiary)
                         .padding(.horizontal, 5)
                         .padding(.vertical, 3)
-                        .background(Capsule().fill(DS.Palette.accentSoft))
+                        .background(Capsule().fill(active ? DS.Palette.accentSoft : DS.Palette.surfaceRaised))
                         .contentShape(Capsule())
                 }
                 .buttonStyle(.plain)
-                .help(citationHelp(locator))
+                .disabled(!active)
+                .help(active ? citationHelp(locator) : crossDocCitationHelp(locator))
             }
+        }
+    }
+
+    /// 引用指向另一本书 / 来源未知时，按钮的 tooltip：明确告诉用户为什么不能跳。
+    private func crossDocCitationHelp(_ locator: DocumentLocator) -> String {
+        switch locator {
+        case .pdf:  return "这条引用来自另一份文档，无法跳回当前文件"
+        case .epub: return "这条引用来自另一份文档，无法跳回当前文件"
         }
     }
 

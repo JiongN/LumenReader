@@ -8,8 +8,8 @@ import Foundation
 /// EPUB 没有可以写回的「原文件」，批注本体就存在本应用的数据目录里，
 /// 由 `AnnotationStore` 持有——两种格式在这个结构上汇合成同一种列表交互。
 public struct AnnotationItem: Identifiable, Sendable, Equatable {
-    /// 稳定 id。PDF 用批注的 modificationDate 时间戳（会随文件持久化）；
-    /// EPUB 用生成时的 UUID。
+    /// 稳定 id。PDF 用「页号 + 批注原点 + 类型」（同基串的第 k 条再追加 `#k`）——
+    /// 刻意不含时间戳，原因见 `PDFController.entryID` 的注释；EPUB 用生成时的 UUID。
     public var id: String
     /// 批注挂在哪里（PDF 为页，EPUB 为章）
     public var locator: DocumentLocator
@@ -21,14 +21,34 @@ public struct AnnotationItem: Identifiable, Sendable, Equatable {
     public var hasHighlight: Bool
     /// 创建时间
     public var createdAt: Date
+    /// 标注颜色，形如 `#RRGGBB`。
+    ///
+    /// 只对 **PDF 高亮类**批注有意义——颜色是画在正文上的那个色，列表里据此显示色块，
+    /// 让人一眼对上「清单里这条 = 页面上那块」。取不到颜色（PDF 未设色 / EPUB 批注）时为 nil，
+    /// 调用方回退到主题强调色。
+    ///
+    /// 刻意**不**加进 `StoredAnnotation`：那是 EPUB 的落盘模型，动它会改存档编码格式，
+    /// 而容错解码是项目硬约束，不值得为配色冒这个险。EPUB 侧恒为 nil。
+    public var highlightHex: String?
+    /// 这条高亮的**存储矩形比整行窄**（历史遗留：修复「按整行截断」之前画下的批注，
+    /// 存进 PDF 的矩形只覆盖划中的那几个字）。
+    ///
+    /// 读取侧已经会补算整行，所以列表显示不受影响；这个标记只用来**如实告诉用户
+    /// 文件里存的还是半行**，并给「修正」入口一个准确条数——没有它就只能挂一个
+    /// 永远不知道有没有用的按钮。EPUB 恒为 false。
+    public var truncated: Bool
 
-    public init(id: String, locator: DocumentLocator, quote: String, note: String, hasHighlight: Bool, createdAt: Date) {
+    public init(id: String, locator: DocumentLocator, quote: String, note: String,
+                hasHighlight: Bool, createdAt: Date, highlightHex: String? = nil,
+                truncated: Bool = false) {
         self.id = id
         self.locator = locator
         self.quote = quote
         self.note = note
         self.hasHighlight = hasHighlight
         self.createdAt = createdAt
+        self.highlightHex = highlightHex
+        self.truncated = truncated
     }
 
     /// 列表里的预览行：有正文显正文，否则显划线原文。

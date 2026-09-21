@@ -29,6 +29,19 @@ public extension Color {
             opacity: alpha
         )
     }
+
+    /// 从 `#RRGGBB` / `RRGGBB` 解析。格式不认识就返回 nil——
+    /// 调用方一律要有回退色，别让一个坏字符串变成看不见的元素。
+    ///
+    /// 存在的理由：批注的颜色是**从 PDF 里读出来的**（`annotation.color`），
+    /// 只能以字符串形态跨越 LumenKit ↔ LumenApp 的分层边界，
+    /// 界面层需要把同一个字符串还原成色块。
+    init?(hexString: String, alpha: Double = 1) {
+        var s = hexString.trimmingCharacters(in: .whitespacesAndNewlines)
+        if s.hasPrefix("#") { s.removeFirst() }
+        guard s.count == 6, let value = UInt32(s, radix: 16) else { return nil }
+        self.init(hex: value, alpha: alpha)
+    }
 }
 
 public extension NSColor {
@@ -111,7 +124,9 @@ public enum DS {
             weight: Font.Weight = .regular,
             design: Font.Design = .default
         ) -> Font {
-            UIFontGate.font(size: size, weight: weight, design: design)
+            // 统一把应用外壳提升一个字号层级。这里只影响经过设计令牌的界面文字与
+            // SF Symbols；PDF/EPUB 正文字号走各自阅读设置，不会被连带放大。
+            UIFontGate.font(size: size + 1, weight: weight, design: design)
         }
 
         public static var display: Font { ui(size: 34, weight: .bold, design: .rounded) }
@@ -169,13 +184,20 @@ public enum DS {
     // MARK: 尺寸
 
     public enum Size {
-        public static let toolbarHeight: CGFloat = 44
+        public static let toolbarHeight: CGFloat = 48
         public static let sidebarMin: CGFloat = 200
         public static let sidebarIdeal: CGFloat = 248
         public static let sidebarMax: CGFloat = 360
         public static let aiPanelMin: CGFloat = 300
         public static let aiPanelIdeal: CGFloat = 380
         public static let aiPanelMax: CGFloat = 620
+
+        /// 大窗口的外壳比例。macOS 已经用 point 处理 Retina 像素密度，这里适配的是
+        /// 窗口可用空间：普通窗口保持 1×，外接大屏上的宽窗口最多放大到 1.22×。
+        public static func windowScale(for width: CGFloat) -> CGFloat {
+            guard width.isFinite, width > 0 else { return 1 }
+            return min(1.22, max(1, width / 1320))
+        }
 
         // MARK: 缩略图（数值按参考样式逐像素量出来，见 docs/VERIFY.md）
 

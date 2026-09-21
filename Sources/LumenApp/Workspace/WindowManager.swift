@@ -17,16 +17,35 @@ final class AppServices: ObservableObject {
     let recent: RecentDocuments
     let keyBindings: KeyBindingStore
     let memory: MemoryStore
+    /// 全局共享的会话仓库：整个进程一份，所有窗口 / 标签共用。
+    /// 「哪本书的回答」从此不再由文档绑定决定，而是用户在 AI 面板里选中的那条会话。
+    let conversationStore: ConversationStore
+    /// 活动会话控制器（全局共享的那一份对话）。`AIChatModel` 持有 `conversationStore`，
+    /// 所以初始化顺序必须是 conversationStore 在前、activeChat 在后。
+    let activeChat: AIChatModel
 
     init(
         settingsStore: SettingsStore? = nil,
-        recent: RecentDocuments? = nil
+        recent: RecentDocuments? = nil,
+        conversationStore: ConversationStore? = nil,
+        activeChat: AIChatModel? = nil
     ) {
         let settings = settingsStore ?? SettingsStore()
         self.settingsStore = settings
         self.recent = recent ?? RecentDocuments()
         self.keyBindings = KeyBindingStore()
         self.memory = MemoryStore()
+
+        // 全局共享会话：整个进程一份。先建 store，再让 activeChat 持有它。
+        let store = conversationStore ?? ConversationStore()
+        self.conversationStore = store
+        let chat = activeChat ?? AIChatModel(store: store)
+        self.activeChat = chat
+
+        // 把「当前活动会话」的内容装进全局控制器，AI 面板一打开就显示正确历史
+        // （而不是一片空白、要等用户先问一句才出现）。旧实现是「按文档绑定后载入」，
+        // 全局共享后改成启动时统一载入活动会话。
+        chat.showActiveConversation()
 
         // ── 自检开关：以前写在 AppState.init 里，挪到共享服务这一层 ──
         // 主题不走这里（setter 会防抖落盘）；这里只处理会污染 settings.json 的项。
@@ -36,7 +55,7 @@ final class AppServices: ObservableObject {
             settings.suppressSave = true
             settings.commitAIPanelWidth(panel.ai)
             NSLog("[Lumen] 自检：--panel-width 只设 AI 面板 = \(Int(panel.ai))pt"
-                  + "（侧栏分量 \(Int(panel.sidebar))pt 已废弃，侧栏固定 \(Int(UISettings.PanelWidth.sidebarDefault))pt）")
+                  + "（侧栏分量 \(Int(panel.sidebar))pt 已废弃，侧栏采用 \(Int(UISettings.PanelWidth.sidebarDefault))pt 基准宽度并随窗口缩放）")
         }
 
         if LaunchOptions.perfReport {
@@ -54,6 +73,14 @@ final class AppServices: ObservableObject {
             }
             if let value = LaunchOptions.value(for: "--epub-columns") { settings.reader.epubDoubleColumn = value == "2" }
             if let value = LaunchOptions.value(for: "--pdf-original") { settings.reader.pdfOriginalColors = value == "1" }
+            if let engine = LaunchOptions.translationEngine {
+                settings.reader.translationEngineID = TranslationEngineCatalog.descriptor(for: engine).id
+                // 启动覆盖若指定的是机器引擎，也同步记进「切回机器」字段，
+                // 与 `PDFTranslationPane` 的切换逻辑保持同一口径。
+                if engine != LLMTranslation.engineID {
+                    settings.reader.translationMachineEngineID = settings.reader.translationEngineID
+                }
+            }
         }
 
         // --mock-ai：把服务商临时指向本机桩服务，走和设置页同一份内存配置。
@@ -134,6 +161,13 @@ final class WindowManager: ObservableObject {
                 recordInRecents: !LaunchOptions.isAuditRun
             )
             NSLog("[Lumen][tabs] startup 打开后会话数 = \(workspace.sessions.count)")
+        }
+        if let path = LaunchOptions.comparisonOpenPath {
+            workspace.open(
+                url: URL(fileURLWithPath: path),
+                recordInRecents: !LaunchOptions.isAuditRun
+            )
+            NSLog("[Lumen][tabs] 双文档自检已打开第二份文档，会话数 = \(workspace.sessions.count)")
         }
 
         // 自检用：`--home-tab 1` 走一次「点 + 建主页标签」。
@@ -309,7 +343,7 @@ final class LumenWindowController: NSWindowController, NSWindowDelegate {
         // 改成标题栏透明 + 内容延伸到最顶，红黄绿交通灯悬浮在自定义标签栏同一行里（Obsidian 式）。
         window.titleVisibility = .hidden
         window.titlebarAppearsTransparent = true
-        window.minSize = CGSize(width: 920, height: 620)
+        window.minSize = CGSize(width: 940, height: 640)
         // 我们自己做标签，关掉系统的窗口标签化，否则窗口菜单里会出现
         // 「显示标签栏 / ⌘T」等与自定义标签冲突的项。
         window.tabbingMode = .disallowed

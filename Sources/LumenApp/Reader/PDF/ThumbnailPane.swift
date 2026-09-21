@@ -16,6 +16,8 @@ struct ThumbnailPane: View {
             originalColors: state.settingsStore.reader.pdfOriginalColors,
             annotationRevision: bridge.annotationRevision
         )
+        .onAppear { bridge.viewport.isTracking = true }
+        .onDisappear { bridge.viewport.isTracking = false }
     }
 }
 
@@ -136,7 +138,10 @@ private struct ThumbnailGrid: View, Equatable {
         .onChange(of: currentPage) { _, page in follow(page) }
         .onChange(of: documentID) { _, _ in reset() }
         .onChange(of: annotationRevision) { _, _ in reset() }
-        .onAppear { follow(currentPage) }
+        .onChange(of: theme) { _, _ in reset() }
+        .onChange(of: originalColors) { _, _ in reset() }
+        .onAppear { reset(); follow(currentPage) }
+        .onDisappear { visible.setGeneration(UUID()); pending.removeAll() }
     }
 
     private func follow(_ page: Int) {
@@ -150,6 +155,7 @@ private struct ThumbnailGrid: View, Equatable {
 
     private func reset() {
         generation = UUID()
+        visible.setGeneration(generation)
         cache.removeAll()
         pending.removeAll()
         for index in visible.snapshot() { request(index) }
@@ -160,18 +166,21 @@ private struct ThumbnailGrid: View, Equatable {
         pending.insert(index)
         let requestGeneration = generation
         let tracker = visible
+        let tone = originalColors ? nil : PDFReadingTone(theme: theme)
         let size = CGSize(width: Self.width * Self.pixelScale, height: height(index) * Self.pixelScale)
         Self.renderQueue.async {
             // 排队期间用户可能已经滚过去了：可见性在**渲染前**再问一次，
             // 转过头已经不在视口里的页就不必再画。
-            guard tracker.contains(index) else {
+            guard tracker.contains(index, generation: requestGeneration) else {
                 DispatchQueue.main.async {
                     if generation == requestGeneration { pending.remove(index) }
                 }
                 return
             }
             Jank.tick(.thumbnailRender)
-            var image = provider(index, size)
+            var image = autoreleasepool {
+                provider(index, size).map { tone?.applying(to: $0) ?? $0 }
+            }
             // 必须把图的 `size` 从「像素」改回「点」。
             //
             // `PDFPage.thumbnail(of:)` 返回的 NSImage，`size` 就是请求时给的那个值。
@@ -200,35 +209,12 @@ private struct ThumbnailGrid: View, Equatable {
 private final class VisibleTracker: @unchecked Sendable {
     private let lock = NSLock()
     private var indices: Set<Int> = []
+    private var generation = UUID()
+    func setGeneration(_ value: UUID) { lock.lock(); defer { lock.unlock() }; generation = value }
     func insert(_ index: Int) { lock.lock(); defer { lock.unlock() }; indices.insert(index) }
     func remove(_ index: Int) { lock.lock(); defer { lock.unlock() }; indices.remove(index) }
-    func contains(_ index: Int) -> Bool { lock.lock(); defer { lock.unlock() }; return indices.contains(index) }
+    func contains(_ index: Int, generation expected: UUID) -> Bool { lock.lock(); defer { lock.unlock() }; return generation == expected && indices.contains(index) }
     func snapshot() -> Set<Int> { lock.lock(); defer { lock.unlock() }; return indices }
-}
-
-private struct ThemedThumbnailImage: NSViewRepresentable {
-    let image: NSImage
-    let theme: ReadingTheme
-    let original: Bool
-    final class Coordinator {
-        var theme: ReadingTheme?
-        var original: Bool?
-    }
-    func makeCoordinator() -> Coordinator { Coordinator() }
-    func makeNSView(context: Context) -> NSImageView {
-        let view = NSImageView()
-        view.imageScaling = .scaleProportionallyUpOrDown
-        view.wantsLayer = true
-        return view
-    }
-    func updateNSView(_ view: NSImageView, context: Context) {
-        if view.image !== image { view.image = image }
-        if context.coordinator.theme != theme || context.coordinator.original != original {
-            context.coordinator.theme = theme
-            context.coordinator.original = original
-            view.contentFilters = original ? [] : PDFReadingAppearance.filter(theme: theme).map { [$0] } ?? []
-        }
-    }
 }
 
 private struct ThumbnailRow: View {
@@ -278,7 +264,7 @@ private struct ThumbnailRow: View {
                 .fill(DS.Palette.surfaceRaised)
 
             if let image {
-                ThemedThumbnailImage(image: image, theme: theme, original: originalColors)
+                Image(nsImage: image).resizable().aspectRatio(contentMode: .fit)
                     .clipShape(RoundedRectangle(cornerRadius: DS.Radius.thumbnail, style: .continuous))
                     .transition(.opacity)
             } else {

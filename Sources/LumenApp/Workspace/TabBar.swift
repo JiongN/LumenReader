@@ -13,7 +13,10 @@ struct TabBar: View {
 
     @EnvironmentObject private var state: AppState
 
-    static let height: CGFloat = 36
+    static let height: CGFloat = 40
+    @State private var availableWidth: CGFloat = 1320
+    private var layoutScale: CGFloat { DS.Size.windowScale(for: availableWidth) }
+    private var adaptiveHeight: CGFloat { Self.height * layoutScale }
 
     /// 左侧给红黄绿交通灯留的横向空位（标题栏透明、交通灯悬浮在标签同一行）。
     static let trafficLightInset: CGFloat = 70
@@ -23,15 +26,15 @@ struct TabBar: View {
             // 标题栏透明后，红黄绿交通灯悬浮在窗口最左上。标签栏从它右边开始，
             // 左侧留出格位，避免标签被交通灯盖住（Obsidian 式单行顶栏）。
             Color.clear
-                .frame(width: Self.trafficLightInset)
+                .frame(width: Self.trafficLightInset * layoutScale)
 
             // 「收起 / 展开侧栏」放最左、紧跟交通灯，之后才是标签页（Chrome/Obsidian 习惯）。
             Button {
-                withAnimation(DS.Motion.panel) { state.isSidebarVisible.toggle() }
+                state.toggleSidebar()
             } label: {
                 Image(systemName: "sidebar.leading")
-                    .font(DS.Typo.ui(size: 13))
-                    .frame(width: 24, height: 24)
+                    .font(DS.Typo.ui(size: 14))
+                    .frame(width: 28, height: 28)
             }
             .buttonStyle(.plain)
             .foregroundStyle(DS.Palette.textSecondary)
@@ -60,7 +63,7 @@ struct TabBar: View {
                     addButton
                 }
                 .padding(.horizontal, DS.Space.s)
-                .frame(height: Self.height)
+                .frame(height: adaptiveHeight)
             }
 
             Divider()
@@ -70,8 +73,15 @@ struct TabBar: View {
         // 关键：把标签栏钉成固定高度。裸 `Divider()` 在 HStack 里是竖直柔性的
         // （会撑满父级提案的高度），不钉死的话 TabBar 会被顶层 VStack 当成一个
         // 可与阅读区平分的柔性子项——结果阅读区只剩约半窗、底部对齐。
-        .frame(height: Self.height)
+        .frame(height: adaptiveHeight)
         .background(DS.Palette.surfaceSunken)
+        .background {
+            GeometryReader { proxy in
+                Color.clear
+                    .onAppear { availableWidth = proxy.size.width }
+                    .onChange(of: proxy.size.width) { _, width in availableWidth = width }
+            }
+        }
         .overlay(alignment: .bottom) {
             Rectangle()
                 .fill(DS.Palette.separator)
@@ -80,33 +90,31 @@ struct TabBar: View {
     }
 
 
-    /// 顶栏右侧的操作按钮：侧栏 / AI 面板 / 复制导出 / 沉浸。
+    /// 顶栏右侧的操作按钮：外观 / 复制 / 沉浸 / AI 面板。
     /// 窗口不再有独立的工具栏行，这些动作统一收进这一条标签栏。
     @ViewBuilder
     private var toolbarActions: some View {
         HStack(spacing: DS.Space.s) {
             AppearanceMenuButton()
             Menu {
-                Button("复制全文为纯文本") { state.copyFullText() }
-                    .disabled(state.bridge.extractFullText == nil)
-                Button("复制文件") { state.copyDocumentFileToPasteboard() }
-                Divider()
-                Button("导出 AI 摘要为 Markdown…") { state.exportSummaryToFile() }
-                    .disabled(state.chat.lastSubstantialAnswer.isEmpty)
-                Button("导出对话记录为 Markdown…") { state.exportTranscriptToFile() }
-                    .disabled(state.chat.bubbles.isEmpty)
+                // 只保留去向为**剪贴板**的动作（复制全文 / 复制文件）。
+                // 导出类动作已收归菜单栏「文件 > 导出」唯一入口——这里不再出现，
+                // 条目（含文案与顺序）统一从 `ActionEntries` 长出，避免同一个动作多处出现。
+                ForEach(ActionEntries.entries(in: .copy)) { entry in
+                    copyMenuItem(entry)
+                }
             } label: {
                 Image(systemName: "doc.on.doc")
-                    .font(DS.Typo.ui(size: 13))
-                    .frame(width: 18, height: 24)
+                    .font(DS.Typo.ui(size: 14))
+                    .frame(width: 22, height: 28)
                     .contentShape(Rectangle())
             }
             .foregroundStyle(DS.Palette.textSecondary)
             .menuStyle(.borderlessButton)
             .menuIndicator(.hidden)
             .fixedSize()
-            .frame(width: 28, height: 28)
-            .help("复制与导出")
+            .frame(width: 32, height: 32)
+            .help("复制")
             .disabled(state.document == nil)
 
             Button {
@@ -115,8 +123,8 @@ struct TabBar: View {
                 Image(systemName: state.isImmersive
                       ? "arrow.down.right.and.arrow.up.left"
                       : "arrow.up.left.and.arrow.down.right")
-                    .font(DS.Typo.ui(size: 13))
-                    .frame(width: 24, height: 24)
+                    .font(DS.Typo.ui(size: 14))
+                    .frame(width: 28, height: 28)
             }
             .buttonStyle(.plain)
             .foregroundStyle(DS.Palette.textSecondary)
@@ -124,11 +132,11 @@ struct TabBar: View {
             .disabled(state.document == nil)
 
             Button {
-                withAnimation(DS.Motion.panel) { state.isAIPanelVisible.toggle() }
+                state.toggleAIPanel()
             } label: {
                 Image(systemName: "sidebar.trailing")
-                    .font(DS.Typo.ui(size: 13))
-                    .frame(width: 24, height: 24)
+                    .font(DS.Typo.ui(size: 14))
+                    .frame(width: 28, height: 28)
             }
             .buttonStyle(.plain)
             .foregroundStyle(DS.Palette.textSecondary)
@@ -144,6 +152,20 @@ struct TabBar: View {
     private func ts(_ label: String, for action: LumenAction) -> String {
         guard let combo = state.keyBindings.combo(for: action) else { return label }
         return "\(label) (\(combo.display))"
+    }
+
+    /// 顶栏「复制」菜单的一项：文案取自 planner，可用性与执行取自它挂的 `LumenAction`。
+    /// 这样「复制全文」的可用性（有无文本层）与命令面板、菜单栏读的是同一个判断。
+    @ViewBuilder
+    private func copyMenuItem(_ entry: ActionEntry) -> some View {
+        if let action = entry.action {
+            Button(entry.title) { action.run(state) }
+                .disabled(!action.isEnabled(in: state))
+        } else {
+            // 复制菜单里出现了一个没有 `LumenAction` 的条目：不静默（断言 + 可见兜底），
+            // 否则这一项会悄悄消失——不报错、不崩溃、自检也不会红。
+            UnimplementedEntryView(entry: entry)
+        }
     }
 
     /// 标签栏末尾的「+」：新建标签页，正文回到主页（最近打开 / 打开按钮都在那儿）。
@@ -207,7 +229,7 @@ private struct HomeTabItem: View {
             .help("关闭标签页")
         }
         .padding(.horizontal, DS.Space.s)
-        .frame(width: 120, height: 26)
+        .frame(width: 126, height: 30)
         .background(
             RoundedRectangle(cornerRadius: DS.Radius.s, style: .continuous)
                 .fill(DS.Palette.surfaceRaised)
@@ -255,7 +277,7 @@ private struct TabItem: View {
             trailingControl
         }
         .padding(.horizontal, DS.Space.s)
-        .frame(width: 168, height: 26)
+        .frame(width: 176, height: 30)
         .frame(minWidth: Self.tabWidth.lowerBound, maxWidth: Self.tabWidth.upperBound)
         .background(background)
         .overlay(border)
