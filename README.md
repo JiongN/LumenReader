@@ -103,6 +103,7 @@ PDF 右上角的“对照翻译”会抽取当前文档的段落，在 PDF 旁�
 ./build.sh              # 编译 + 组装 dist/Lumen.app + 签名
 ./build.sh release      # Release 构建
 ./build.sh debug run    # 编译并启动
+./publish.sh v1.1.0     # 发布：Release 构建 + 自签 + 打 ZIP(/DMG) + tag + GitHub Release
 ```
 
 签名优先使用自签证书「Lumen Dev」，没有证书时使用 ad-hoc。API 凭据已独立存入本机文件，不再因重编译后的签名变化触发钥匙串授权。
@@ -134,6 +135,7 @@ dist/Lumen.app/Contents/MacOS/Lumen --open /path/to/book.pdf
 | `docs/ISSUES-2026-09-17.md` | 两批共 17 项问题的排查 / 根因 / 修复 / 验证记录 |
 | `docs/PROGRESS.md` | 批次进度、已完成 / 待办清单 |
 | `docs/design/` | 两轮设计稿（`DESIGN.md` 第一轮、`DESIGN-v2.md` 第二轮） |
+| `publish.sh` | 发布脚本：Release 构建 → 自签 → 打 ZIP/DMG → tag → GitHub Release |
 
 ### 引擎层 / 界面层的分界线在哪
 
@@ -266,3 +268,28 @@ PDF 阅读色调改为 PDFKit 页面分块绘制时着色并缓存，不再使�
 2. 「复制类」仍有两处物理入口（编辑菜单的「复制全文」、文件菜单的「复制文件」）。
    菜单项是快捷键生效的前提，删了会连带废掉 ⇧⌘C，所以保留为 macOS 惯例落点——
    「每个功能只有一处入口」严格说只对导出类成立。
+
+## 2026-09-21 发布与更新
+
+**分发方式（鲜明取舍，诚实说明）**：不付费上 App Store / 不付 Developer Program 年费 →
+没有 Developer ID 证书 → **没有 notarization**。发布流程定为：
+
+```
+./build.sh release         # 构建 + 自签「Lumen Dev」
+z → 打 ZIP / 可选 DMG      # 产物放 /tmp/lumen-dist/
+→ git tag                  # vX.Y.Z
+→ GitHub Releases          # 上传 ZIP（需 gh 或 GH_TOKEN，否则给网页指引）
+→ 用户下载 → 拖进 Applications
+```
+
+**没有 notarization 的唯一代价**：用户首次打开会遇「无法验证开发者」，需「右键 → 打开」
+或到「安全性与隐私」允许一次。这是免费 macOS 分发的固有体验折扣，没有绕开办法。
+
+**App 内置「检查更新」**（设置 → 关于 → 检查更新）：URLSession 查 GitHub `releases/latest`
+（零依赖，不引 Sparkle——那需要 Xcode 嵌入 + appcast + 复杂签名，对本项目过度工程）。
+有了新版本给出版本号、更新说明与下载链接。启动**不**自动弹窗提示（避免打扰阅读），
+用户在「关于」页主动检查。判断逻辑（语义化版本比较）由 `--update-report 1` 与 LumenKit
+单测双重界定。
+
+发布前记得递增 `Resources/Info.plist` 的 `CFBundleShortVersionString` 与 `CFBundleVersion`；
+`publish.sh` 会校验版本号一致、且 git 工作区必须干净才肯跑。

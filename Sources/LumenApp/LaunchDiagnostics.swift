@@ -190,6 +190,18 @@ enum LaunchOptions {
     /// 批注自检：在 /tmp 的副本上跑一遍「高亮 → 页面批注 → 写盘 → 重开核对 → 删除」。
     static var annotateReport: Bool { flag("--annotate-report") }
 
+    /// 更新检查自检：`--update-report 1`。
+    ///
+    /// 验证三件事：① 版本号读取链路（`AppVersionInfo.semver` 能否从 Info.plist 解出）；
+    /// ② 更新判定的纯函数（表驱动断言，与 LumenKit 单测互为印证）；
+    /// ③ 一次**真实** GitHub `releases/latest` 请求，打印解析出的版本与判定——
+    ///    「App 里点『检查更新』真的能连到服务器」这条端到端链路必须真跑一遍才有数。
+    ///    外部服务（GitHub）会随时间变化，故第③项只打印不硬断言；真正要被证伪的
+    ///    判定逻辑在第①②项里。
+    ///
+    /// ⚠️ 必须搭配 `--capture` 使用，否则进程不会自己退出（自检老坑，退出码 137）。
+    static var updateReport: Bool { flag("--update-report") }
+
     /// OCR 右键菜单自检：`--ocr-menu-report 1`。
     ///
     /// 存在的理由：右键菜单**没法自动化验证**（本机没有辅助功能权限，合成不出真实右键，

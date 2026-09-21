@@ -70,6 +70,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // OCR 右键菜单自检：纯函数表驱动断言（菜单本身没法自动化验证）
         OCRMenuAudit.run()
 
+        // 更新检查自检：版本读取 + 判定纯函数表驱动 + 一次真实 GitHub 请求。
+        // 时序上必须早于窗口创建（AppVersionInfo 读的是已就绪的 Info.plist，不依赖窗口）；
+        // 放在这里即可，无需等 services。
+        UpdateAudit.run()
+
         // 入口归属自检：断言语义「每个动作只归一个入口组」
         EntryAudit.run()
 

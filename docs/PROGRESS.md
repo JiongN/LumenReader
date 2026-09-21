@@ -406,7 +406,9 @@ SwiftUI 拉回 920（`.frame(minWidth: 920)` 持续兜住 NSWindow 的 minSize�
 
 | 项 | 状态 | 说明 |
 | --- | --- | --- |
-| 推送 GitHub 私有仓库 | **卡在需要用户操作** | SSH 已认证为 `JiongN`；本机无 `gh` CLI 也无 HTTPS token，**创建远端仓库这一步必须由用户完成** |
+| 推送 GitHub 仓库 | **已完成** | `origin` 指向 `git@github.com:JiongN/LumenReader.git`，SSH（JiongN）可推送（`git ls-remote` 已验证） |
+| 发布与更新 | **已完成（2026-09-21）** | `publish.sh`（Release构建 + 自签 + ZIP/DMG + tag + GitHub Release）+ App 内置「检查更新」（设置→关于，GitHub Releases API，零依赖不引 Sparkle）。`--update-report 1` 7 断言全绿 + 真实请求打通；LumenKit 单测全绿 |
+| 首次发布 | **等一个版本号** | 发布时：递增 Info.plist 的 CFBundleShortVersionString/CFBundleVersion，确认 git 干净，跑 `./publish.sh vX.Y.Z`
 | 残留文件清理 | **需要用户补充信息** | 全盘搜过：未发现 Lumen 相关的残留文件，`recent.json` 干净，代码里没有「已删除」提示文案。用户提到的弹窗**不是本应用**发出的，需确认来源 |
 | 文档翻译 | **已完成当前实现** | EPUB 保留逐段翻译；PDF 新增整本文字抽取、按段翻译与当前页原文／译文对照栏。默认 Apple 系统翻译，微软在线通道后备；不改写原 PDF。段落抽取 42/42、真实英→中缓存与界面截图均已验证。复杂双栏、表格及 OCR 错误仍可能影响段落边界 |
 | EPUB 批注写回原文件 | **做不了，已在界面上说明** | EPUB 是压缩包，写回会破坏结构与签名 → 存应用数据目录 |

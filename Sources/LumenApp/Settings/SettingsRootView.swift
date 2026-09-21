@@ -332,7 +332,7 @@ struct AboutPane: View {
             VStack(spacing: DS.Space.xs) {
                 Text("流明 Lumen")
                     .font(DS.Typo.title)
-                Text("版本 1.0.0")
+                Text("版本 \(AppVersionInfo.display)")
                     .font(DS.Typo.callout)
                     .foregroundStyle(DS.Palette.textTertiary)
             }
@@ -348,6 +348,8 @@ struct AboutPane: View {
                 RoundedRectangle(cornerRadius: DS.Radius.m, style: .continuous)
                     .fill(DS.Palette.surfaceSunken)
             )
+
+            UpdateCheckSection()
 
             Text("不建书库、不收集数据、不上传文档。\nAI 请求只发送你当前需要处理的那段文本。")
                 .font(DS.Typo.ui(size: 11))
