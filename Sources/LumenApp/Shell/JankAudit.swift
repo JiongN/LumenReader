@@ -21,6 +21,17 @@ enum JankCounter: String, CaseIterable {
     case pdfViewDraw = "PDFView.draw(重绘)"
     case thumbnailRender = "缩略图渲染"
     case positionCallback = "onPositionChange"
+    /// 面板宽度变化期间**被冻结挡掉**的 PDFView 重排 / 重绘次数。
+    ///
+    /// 它与 `pdfViewLayout` 成对读才有意义：`layout=0 frozen=308` = 父布局确实每帧
+    /// 来敲了 308 次门，但一次都没真重排——正是「面板动画不再重光栅化」的证据。
+    /// 若两者同时为 0，那只是「这段没人动」，什么都没证明。
+    case pdfViewFrozen = "PDFView.重排(冻结挡掉)"
+    /// 滚动**过程中**的「轻发布」实际执行次数。
+    ///
+    /// 它与 `pos` 分开记，是为了把两件事分开：轻发布跑了但页号没变（去重挡掉，
+    /// `vport` 涨而 `pos` 不涨）vs 轻发布根本没被排上（`vport` 恒 0）。
+    case viewportLight = "轻发布(滚动中)"
 
     /// watch 日志里的短名（那一行要塞下所有计数器的增量，长名会撑爆）。
     var short: String {
@@ -35,6 +46,8 @@ enum JankCounter: String, CaseIterable {
         case .pdfViewDraw: return "draw"
         case .thumbnailRender: return "thumbR"
         case .positionCallback: return "pos"
+        case .pdfViewFrozen: return "frozen"
+        case .viewportLight: return "vport"
         }
     }
 }
@@ -76,6 +89,9 @@ enum Jank {
     static let isEnabled = CommandLine.arguments.contains("--jank-report")
         || CommandLine.arguments.contains("--jank-watch")
         || CommandLine.arguments.contains("--sidebar-tab-report")
+        // 面板过渡自检要用 `pdfViewFrozen` 证明「动画期间的重排真被冻住了」，
+        // 不打开计数那条断言只能读到 0，读不出东西。
+        || CommandLine.arguments.contains("--panel-transition-report")
 
     static func tick(_ counter: JankCounter) {
         guard isEnabled else { return }

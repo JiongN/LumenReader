@@ -128,7 +128,7 @@ struct ReaderContainerView: View {
                         let scale = Double(layoutScale)
                         settings.commitAIPanelWidth(value / scale, maxWidth: aiPanelCap / scale)
                     },
-                    onDragStateChange: { bridge.setPanelResizing?($0) }
+                    onDragStateChange: { bridge.setPanelWidthDragging?($0) }
                 )
 
                 AIPanelView()

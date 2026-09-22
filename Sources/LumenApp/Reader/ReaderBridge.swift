@@ -99,7 +99,12 @@ final class ReaderBridge: ObservableObject {
     /// 缩略图提供者（PDF 专用）
     let viewport = PDFViewportState()
     var closeReader: (() -> Void)?
+    /// 面板**显隐动画**期间：钉住 autoScales + 冻结重排（`PDFController.setPanelResizing`）。
     var setPanelResizing: ((Bool) -> Void)?
+    /// 拖动分隔线期间：只钉 autoScales，保留实时重排（`PDFController.setPanelWidthDragging`）。
+    ///
+    /// 与上面分开的原因：两者要的反馈不一样，详见 `PDFController` 那两个方法的注释。
+    var setPanelWidthDragging: ((Bool) -> Void)?
     /// 面板展开 / 收起过渡的观测点（`--panel-transition-report` 读它）。
     ///
     /// 之所以经桥回读而不让自检自己去拿控制器：面板可见性写在 `AppState`，
@@ -211,6 +216,7 @@ final class ReaderBridge: ObservableObject {
         closeReader = nil
         thumbnailProvider = nil
         setPanelResizing = nil
+        setPanelWidthDragging = nil
         panelTransitionProbe = nil
         resetPanelTransitionTrace = nil
         viewport.snapshot = .init()

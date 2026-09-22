@@ -110,6 +110,8 @@ enum PanelTransitionAudit {
         // 本通道第一版就真踩了这个坑，所以下面专门有「状态真的翻转了」一条盯着它。
         for (round, leg, target) in [(1, "收起", false), (2, "展开", true)] {
             let visibleBefore = state.isSidebarVisible
+            // 冻结断言的基线：必须在**进入动画之前**取——进入那一刻冻结就生效了。
+            let jankBefore = JankTally.shared.snapshot()
             state.setSidebarVisible(target)
             NSLog("%@", "[Lumen][panel] 第 \(round) 轮（\(leg)）："
                   + "isSidebarVisible \(visibleBefore) → \(state.isSidebarVisible)（目标 \(target)）")
@@ -130,12 +132,32 @@ enum PanelTransitionAudit {
             try? await Task.sleep(nanoseconds: 150_000_000)
             let during = probe()
             if motionMuted {
-                NSLog("%@", "[Lumen][panel] ⚠️ 第 \(round) 轮跳过「动画进行中 autoScales=false」：动效已静音")
+                NSLog("%@", "[Lumen][panel] ⚠️ 第 \(round) 轮跳过「动画进行中」两项断言：动效已静音"
+                      + "（0 时长动画下冻结窗口也一并消失，frozen 读到 0 属于正常而非失败）")
             } else {
                 check("第 \(round) 轮（\(leg)）动画进行中 autoScales 被钉住（=false）",
                       during?.autoScalesNow == false,
                       "实际 autoScales=\(during?.autoScalesNow.description ?? "nil")"
                           + "（true = 仍在每帧重算适宽倍率，即屏闪成因未除）")
+
+                // ── 冻结是否真挡住了重排 ──
+                //
+                // 两条读数必须**成对**看：`frozen` 是「父布局来敲了几次门」，
+                // `layout+draw` 是「真重排了几次」。真机修复前是 2 秒内各 308 次；
+                // 冻住之后应当变成 frozen 涨、layout/draw 几乎不动。
+                // 只看其中一个都说明不了问题：frozen=0 可能是「这段没人动」，
+                // layout=0 也可能是「没人动」——两个一起看才排除这种侥幸。
+                let now = JankTally.shared.snapshot()
+                let frozen = (now[.pdfViewFrozen] ?? 0) - (jankBefore[.pdfViewFrozen] ?? 0)
+                let relayout = ((now[.pdfViewLayout] ?? 0) - (jankBefore[.pdfViewLayout] ?? 0))
+                    + ((now[.pdfViewDraw] ?? 0) - (jankBefore[.pdfViewDraw] ?? 0))
+                NSLog("%@", "[Lumen][panel] 第 \(round) 轮（\(leg)）动画期间重排："
+                      + "被冻结挡掉 \(frozen) 次，真重排 \(relayout) 次")
+                check("第 \(round) 轮（\(leg)）动画期间重排被冻结（frozen>0 且 layout+draw≤2）",
+                      frozen > 0 && relayout <= 2,
+                      "frozen=\(frozen) layout+draw=\(relayout)"
+                          + "（frozen=0 = 这段根本没重排请求，断言未生效；"
+                          + "layout+draw>2 = 冻结没挡住，面板卡顿成因仍在）")
             }
 
             // 等动画收敛 + setPanelResizing(false) 里那个 async 恢复块跑完
@@ -192,6 +214,7 @@ enum PanelTransitionAudit {
         // 若有人把 setPanelResizing 的钉住逻辑删掉，② 会红；若有人把断言写成恒真，
         // 本组会红（因为它期望 false / 0）。
         let entersBefore = probe()?.trace.enters ?? -1
+        let frozenBefore = JankTally.shared.snapshot()[.pdfViewFrozen] ?? 0
         let directTarget = !state.isSidebarVisible
         withAnimation(DS.Motion.panel) { state.isSidebarVisible = directTarget }
         try? await Task.sleep(nanoseconds: 150_000_000)
@@ -200,6 +223,11 @@ enum PanelTransitionAudit {
               directProbe?.trace.enters == entersBefore,
               "enters 从 \(entersBefore) 涨到 \(directProbe?.trace.enters ?? -1)"
                   + "（说明有人把 beginPanelTransition 塞进了 withAnimation 之外的公共路径）")
+        let frozenDirect = (JankTally.shared.snapshot()[.pdfViewFrozen] ?? 0) - frozenBefore
+        check("反向对照：绕过方法时冻结计数不涨（证明 frozen 来自 setPanelResizing 而非恒真）",
+              frozenDirect == 0,
+              "frozen 涨了 \(frozenDirect) 次（说明别处也在冻结 PDFView 重排，"
+                  + "上面那条「重排被冻结」的因果链需要重查）")
         if motionMuted {
             NSLog("%@", "[Lumen][panel] ⚠️ 反向对照跳过「动画中 autoScales 仍为 true」：动效已静音")
         } else {

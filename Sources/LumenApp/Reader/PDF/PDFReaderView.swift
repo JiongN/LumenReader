@@ -684,6 +684,9 @@ struct PDFReaderView: View {
         let renderer = PDFThumbnailRenderer(url: document.url)
         bridge.thumbnailProvider = { index, size in renderer.render(index: index, size: size) }
         bridge.setPanelResizing = { [weak controller] active in controller?.setPanelResizing(active) }
+        bridge.setPanelWidthDragging = { [weak controller] active in
+            controller?.setPanelWidthDragging(active)
+        }
         // 面板过渡自检的观测点：`autoScales` 的实际取值与滚动锚点只有控制器看得到，
         // 自检通道经这个闭包回读（`--panel-transition-report`）。
         bridge.panelTransitionProbe = { [weak controller] in
