@@ -10,7 +10,7 @@
 
 SwiftUI · PDFKit · WebKit · 零第三方依赖
 
-**本项目由 AI 完成**
+**本项目由 AI 开发完成**
 
 </div>
 
