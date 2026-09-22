@@ -22,6 +22,40 @@ struct PDFKitRepresentable: NSViewRepresentable {
     }
 }
 
+/// Equivalent to `PDFReadingTone.paint`, composed once over the fixed viewport.
+/// PDFKit can therefore keep its native page and tile cache during scrolling.
+private struct PDFToneOverlay: View {
+    let tone: PDFReadingTone
+
+    var body: some View {
+        ZStack {
+            Color(nsColor: NSColor(
+                srgbRed: tone.red.inverted ? 1 : 0,
+                green: tone.green.inverted ? 1 : 0,
+                blue: tone.blue.inverted ? 1 : 0,
+                alpha: 1
+            ))
+            .blendMode(.difference)
+
+            Color(nsColor: NSColor(
+                srgbRed: tone.red.multiply,
+                green: tone.green.multiply,
+                blue: tone.blue.multiply,
+                alpha: 1
+            ))
+            .blendMode(.multiply)
+
+            Color(nsColor: NSColor(
+                srgbRed: tone.red.screen,
+                green: tone.green.screen,
+                blue: tone.blue.screen,
+                alpha: 1
+            ))
+            .blendMode(.screen)
+        }
+    }
+}
+
 /// PDF 阅读区。
 struct PDFReaderView: View {
 
@@ -40,11 +74,23 @@ struct PDFReaderView: View {
     @State private var isOCRRunning = false
     @State private var translationConfiguration: TranslationSession.Configuration?
 
+    /// Keep theme blending local to the reading surface.
+    private var pdfSurface: some View {
+        ZStack {
+            PDFKitRepresentable(controller: controller)
+                .opacity(bridge.isLoading ? 0 : 1)
+            if !reader.pdfOriginalColors {
+                PDFToneOverlay(tone: PDFReadingTone(theme: theme))
+                    .allowsHitTesting(false)
+            }
+        }
+        .compositingGroup()
+    }
+
     var body: some View {
         ZStack {
             theme.background
-            PDFKitRepresentable(controller: controller)
-                .opacity(bridge.isLoading ? 0 : 1)
+            pdfSurface
             if bridge.isLoading {
                 LoadingStateView(title: "正在打开 PDF", subtitle: document.displayTitle)
             }
@@ -94,6 +140,7 @@ struct PDFReaderView: View {
             Task { await runOCR() }
         }
         .onDisappear {
+            controller.flushPendingReadingPosition()
             translation.stop()
             if bridge.pdfTranslationController === translation {
                 bridge.pdfTranslationController = nil
@@ -382,6 +429,7 @@ struct PDFReaderView: View {
         let progressThrottle = ProgressThrottle()
 
         bridge.closeReader = { [weak controller] in
+            controller?.flushPendingReadingPosition()
             store.flush()
             controller?.unload()
         }
@@ -405,8 +453,6 @@ struct PDFReaderView: View {
             if progressThrottle.shouldReport(progress) {
                 state.recent.updateProgress(path: documentPath, progress: progress)
             }
-            // 让依赖 scaleFactor 的控件（缩放百分比）刷新
-            controller?.objectWillChange.send()
         }
 
         controller.onSelectionChange = { [weak controller, weak bridge] (selection: ReaderSelection?) in

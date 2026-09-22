@@ -33,6 +33,7 @@ struct AppearanceMenuButton: View {
                 // 面板是浮出的独立分支，环境对象不会自动带过去。
                 .environmentObject(state)
                 .environmentObject(state.bridge)
+                .environmentObject(state.settingsStore)
         }
     }
 }
@@ -44,7 +45,7 @@ private struct AppearancePanel: View {
     @EnvironmentObject private var state: AppState
     @EnvironmentObject private var bridge: ReaderBridge
 
-    private var store: SettingsStore { state.settingsStore }
+    @EnvironmentObject private var store: SettingsStore
     private var isEPUB: Bool { state.document?.kind == .epub }
 
     var body: some View {

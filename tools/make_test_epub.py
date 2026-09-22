@@ -92,6 +92,8 @@ CH1_BODY = """
 
 <p>Bourdieu argues that cultural capital is transmitted through everyday family practices rather than through any explicit instruction. The school, in turn, treats the resulting dispositions as natural talent.</p>
 
+<div class="abstract-body">Many commercial EPUB files put an entire abstract paragraph directly inside a div instead of a semantic paragraph element. Lumen must translate this text as a separate block without translating its parent container twice.</div>
+
 <blockquote>
 <p>教育系统越是宣称自己中立，就越能有效地掩藏它对社会结构的再生产功能。</p>
 </blockquote>

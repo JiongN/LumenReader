@@ -320,7 +320,7 @@ enum JankAudit {
         // 方向自适应：不同系统 / 触控板的「自然滚动」设置会翻转滚轮事件的符号约定。
         // 写死符号的话，在一半的机器上「往下滚」实际是「往上滚」——文档已在顶部，
         // 于是怎么投事件都滚不动，计数全 0 还自称「通过」（本轮踩过）。
-        let sign = await detectScrollSign(pdfView, delta: delta)
+        var sign = await detectScrollSign(pdfView, delta: delta)
 
         // 归零到文档开头，保证每一轮从同一起点出发（读数可比）。
         pdfView.document.map { doc in
@@ -340,16 +340,24 @@ enum JankAudit {
         // 不能让它默默发生，所以要数出来并在收尾处说穿。
         var stalledSteps = 0
         var lastOffset = offsetBefore
-        for _ in 0..<steps {
+        var travelled: CGFloat = 0
+        var movingSteps = 0
+        for step in 0..<steps {
+            if LaunchOptions.flag("--jank-roundtrip"), step % 45 == 0, step > 0 { sign = -sign }
             // 把一步的总位移拆成 N 个小事件在同一帧内投完，模拟真触控板「一帧一串事件」。
             for _ in 0..<burst {
-                scrollStep(pdfView: pdfView, deltaY: CGFloat(sign) * delta / CGFloat(burst))
+                scrollStep(pdfView: pdfView, deltaY: CGFloat(sign) * delta / CGFloat(burst), phase: LaunchOptions.flag("--jank-phased-scroll") ? (step == 0 ? 1 : 2) : 0)
             }
             await awaitFrame()
             let now = scrollOffsetY(pdfView)
-            if now == lastOffset { stalledSteps += 1 } else { stalledSteps = 0 }
+            if let now, let lastOffset, abs(now - lastOffset) > 0.5 {
+                travelled += abs(now - lastOffset)
+                movingSteps += 1
+                stalledSteps = 0
+            } else { stalledSteps += 1 }
             lastOffset = now
         }
+        if LaunchOptions.flag("--jank-phased-scroll") { scrollStep(pdfView: pdfView, deltaY: 0, phase: 4) }
         NSLog("%@", "[Lumen][jank] 滚动：投完 \(steps) 步（每步 \(Int(delta))px × \(burst) 事件、倍率 "
             + String(format: "%.2f", pdfView.scaleFactor) + "）时 页=\(viewportPageIndex(pdfView).map(String.init) ?? "?")"
             + " 偏移=\(fmt(scrollOffsetY(pdfView)))（落定后的回调还没发生，下面等惯性）")
@@ -402,7 +410,8 @@ enum JankAudit {
 
         // 驱动自证：滚动事件真的把文档滚动了。偏移与页码都看——
         // 偏移是连续的，一个 300px 小步就动；页码要跨过一整页才变，量级太粗。
-        let moved = (offsetBefore != offsetAfter) || (pageBefore != pageAfter)
+        let moved = movingSteps > 0 && travelled > 1
+        NSLog("%@", "[Lumen][jank] 有效位移：\(movingSteps)/\(steps) 步，累计 \(Int(travelled))pt（往返结束位置相同也能验真）")
         let before = pageBefore.map(String.init) ?? "?"
         let after = pageAfter.map(String.init) ?? "?"
         NSLog("%@", "[Lumen][jank] 滚动驱动自证：页码 \(before) → \(after)，滚动偏移 \(fmt(offsetBefore)) → \(fmt(offsetAfter)) "
@@ -465,7 +474,7 @@ enum JankAudit {
     /// 直接调用 `pdfView.scrollWheel(with:)` 等于把事件交给一个不接的人，什么都不会发生
     /// （本轮踩过——页码与滚动偏移纹丝不动，读数全 0 还自称通过）。
     /// 真正消化滚轮事件的是它内部那个 `NSScrollView`，投给它才是「用户滚了一下」。
-    private static func scrollStep(pdfView: PDFView, deltaY: CGFloat) {
+    private static func scrollStep(pdfView: PDFView, deltaY: CGFloat, phase: Int64 = 0) {
         guard let cgEvent = CGEvent(
             scrollWheelEvent2Source: nil,
             units: .pixel,
@@ -473,7 +482,9 @@ enum JankAudit {
             wheel1: Int32(deltaY),
             wheel2: 0,
             wheel3: 0
-        ), let event = NSEvent(cgEvent: cgEvent) else { return }
+        ) else { return }
+        cgEvent.setIntegerValueField(.scrollWheelEventScrollPhase, value: phase)
+        guard let event = NSEvent(cgEvent: cgEvent) else { return }
 
         if let scrollView = firstScrollView(in: pdfView) {
             scrollView.scrollWheel(with: event)

@@ -3,7 +3,7 @@ import Combine
 import PDFKit
 import LumenKit
 
-/// High-frequency geometry has its own publisher, never ReaderBridge.objectWillChange.
+/// Geometry is published only after native scrolling settles.
 @MainActor
 final class PDFViewportState: ObservableObject {
     struct Snapshot: Equatable {
@@ -18,6 +18,16 @@ final class PDFViewportState: ObservableObject {
     }
     @Published var snapshot = Snapshot()
     @Published var pageAspects: [CGFloat] = []
+    /// 只在视口连续变化期间为 true。缩略图用它把新渲染延后到手势停稳，
+    /// 避免 PDFKit 正文 tile 与缩略图在同一段滚动中争抢 CPU / PDF 解析资源。
+    private(set) var isActivelyScrolling = false
+    @Published private(set) var scrollSettledRevision = 0
+
+    func setActivelyScrolling(_ value: Bool) {
+        guard isActivelyScrolling != value else { return }
+        isActivelyScrolling = value
+        if !value { scrollSettledRevision &+= 1 }
+    }
 }
 
 /// The PDFDocument belongs exclusively to the thumbnail serial queue.

@@ -72,9 +72,12 @@ final class AppState: ObservableObject {
     /// 当前标签。与 `activeSessionID` 保持同步（id 失效时回退第一个）。
     @Published private(set) var activeSession: ReaderSession?
 
-    /// 已经挂载过阅读视图的标签：文档解析很重，切到才挂载；挂过就保活，
-    /// 切回来不重新解析（阅读位置、滚动、流式回答都还在）。
+    /// 已挂载的阅读视图。只保活最近两个：无上限保留 PDFView/WKWebView
+    /// 会让大文档内存随标签数线性增长。被卸载的标签保留 ReaderSession 与落盘位置，
+    /// 再次打开时重建平台视图。
     @Published private(set) var loadedSessionIDs: Set<UUID> = []
+    private var loadedSessionRecency: [UUID] = []
+    private static let maximumResidentReaders = 2
 
     /// 欢迎页（一个标签都没有）时给窗口级视图兜底的空通道，
     /// 保证 `@EnvironmentObject` 永远能解析到对象。
@@ -239,7 +242,7 @@ final class AppState: ObservableObject {
     func adopt(_ session: ReaderSession) {
         homeTabIsActive = false
         sessions = sessions + [session]
-        loadedSessionIDs.insert(session.id)
+        retainReader(for: session.id)
         activeSessionID = session.id
     }
 
@@ -256,7 +259,7 @@ final class AppState: ObservableObject {
     /// 不崩溃、不报错、界面纹丝不动。自检 `--sidebar-tab-report` 抓到的就是它。
     func activate(_ session: ReaderSession) {
         homeTabIsActive = false
-        loadedSessionIDs.insert(session.id)
+        retainReader(for: session.id)
         if activeSessionID != session.id {
             activeSessionID = session.id
         } else {
@@ -276,6 +279,7 @@ final class AppState: ObservableObject {
         if let index = sessions.firstIndex(where: { $0 === session }) {
             let wasActive = activeSessionID == session.id
             sessions.remove(at: index)
+            forgetResidentReader(session.id)
             session.close()
             // 最后一个文档标签也关掉时顺手收掉主页标签：没有文档标签却留着一枚
             // 「主页」芯片，标签栏上就只剩一个点不掉也没处可去的按钮。
@@ -297,6 +301,7 @@ final class AppState: ObservableObject {
     func closeOthers(keeping kept: ReaderSession) {
         for session in sessions where session !== kept {
             session.close()
+            forgetResidentReader(session.id)
         }
         sessions.removeAll { $0 !== kept }
         activate(kept)
@@ -322,6 +327,7 @@ final class AppState: ObservableObject {
         if let index = sessions.firstIndex(where: { $0 === session }) {
             let wasActive = activeSessionID == session.id
             sessions.remove(at: index)
+            forgetResidentReader(session.id)
             if wasActive {
                 let neighbor = min(index, sessions.count - 1)
                 if sessions.indices.contains(neighbor) {
@@ -352,7 +358,7 @@ final class AppState: ObservableObject {
         }
         activeSession = target
         if let target {
-            loadedSessionIDs.insert(target.id)
+            retainReader(for: target.id)
             // 转发当前会话的变更，窗口级浮层才能跟着 busy / 请求状态刷新。
             activeSessionObservation = target.objectWillChange.sink { [weak self] _ in
                 self?.objectWillChange.send()
@@ -360,6 +366,23 @@ final class AppState: ObservableObject {
         } else {
             activeSessionObservation = nil
         }
+    }
+
+    /// 将激活的阅读器提到 LRU 尾部，卸载超出上限的后台平台视图。
+    /// Session 本身不关闭，因此标签、对话和智能目录仍然存在。
+    private func retainReader(for id: UUID) {
+        loadedSessionRecency.removeAll { $0 == id }
+        loadedSessionRecency.append(id)
+        loadedSessionIDs.insert(id)
+        while loadedSessionRecency.count > Self.maximumResidentReaders {
+            let evicted = loadedSessionRecency.removeFirst()
+            loadedSessionIDs.remove(evicted)
+        }
+    }
+
+    private func forgetResidentReader(_ id: UUID) {
+        loadedSessionRecency.removeAll { $0 == id }
+        loadedSessionIDs.remove(id)
     }
 
     // MARK: - 打开与关闭

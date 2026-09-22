@@ -24,6 +24,10 @@ struct EPUBTranslationPane: View {
         .task {
             if !settings.reader.epubTranslateEnabled {
                 settings.reader.epubTranslateEnabled = true
+            } else if !controller.isRunning && controller.totalCount == 0 {
+                // 开关可能是上次启动保留的 true，此时 onChange 不会再触发。
+                // 进入面板就走一次真实重试通道，避免永远停在“正在准备”。
+                controller.retry()
             }
         }
         .accessibilityElement(children: .contain)
@@ -94,7 +98,7 @@ struct EPUBTranslationPane: View {
                 SidebarEmptyState(
                     icon: "character.book.closed",
                     title: "逐段翻译已关闭",
-                    message: "打开后，译文会显示在当前章节每段原文的上方。"
+                    message: "打开后，译文会紧跟在当前章节每段原文的下方。"
                 )
             } else if let error = controller.errorMessage {
                 Label(error, systemImage: "exclamationmark.triangle")

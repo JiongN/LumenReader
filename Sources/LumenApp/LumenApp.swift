@@ -32,6 +32,8 @@ struct LumenApp: App {
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
 
+    private var pdfWindowProbe: PDFWindowProbe?
+
     /// 本次运行的构建标记（dist bundle 里由 build.sh 写入的 lumen-build-stamp）。
     /// 拿不到时给出明确提示——多半意味着跑的不是 dist 产物，而是某个旧副本。
     static var buildStamp: String {
@@ -53,6 +55,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // 「打开方式」进来可能复活旧二进制，症状与「修复没生效」一模一样。
         // 有了这行日志，一眼即可分辨当前跑的是哪一次构建。
         NSLog("%@", "[Lumen] 构建标记：\(AppDelegate.buildStamp)")
+
+        if LaunchOptions.flag("--pdf-window-probe") {
+            pdfWindowProbe = PDFWindowProbe()
+            pdfWindowProbe?.show()
+            return
+        }
 
         if LaunchOptions.fontReport {
             Task { await FontCatalog.logReport() }

@@ -21,6 +21,7 @@ struct EPUBReaderView: View {
 
     @EnvironmentObject private var state: AppState
     @EnvironmentObject private var bridge: ReaderBridge
+    @EnvironmentObject private var session: ReaderSession
 
     @StateObject private var controller: EPUBController
     /// 逐段翻译的编排器。持有它而不是每次现造，是因为翻译是跨章节的长任务：
@@ -85,6 +86,16 @@ struct EPUBReaderView: View {
         }
         .onReceive(controller.$chapterLoadRevision.dropFirst()) { _ in
             refreshTranslationIfEnabled()
+        }
+        .onChange(of: state.activeSessionID) { _, activeID in
+            if activeID == session.id {
+                refreshTranslationIfEnabled()
+            } else {
+                // 透明的后台标签仍然挂在视图树中，onDisappear 不会触发。
+                // 不显式停止的话，EPUB 网络请求和 WebKit DOM 回写会在用户阅读 PDF 时继续抢资源。
+                translation.stop()
+                controller.discardPendingTranslations()
+            }
         }
         .onDisappear {
             translation.stop()
@@ -234,6 +245,7 @@ struct EPUBReaderView: View {
 
 
         translation.onFinish = { [weak state] failed in
+            controller.flushPendingTranslations()
             if failed > 0 {
                 state?.showToast("有 \(failed) 段翻译失败，可关闭再打开重试", isError: true)
             }

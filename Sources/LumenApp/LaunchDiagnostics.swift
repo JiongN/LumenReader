@@ -314,7 +314,8 @@ enum LaunchOptions {
     /// 的门不会开，覆盖**根本不生效**（同时也就不置 `suppressSave`）。
     static let auditOnlyOverrides: Set<String> = [
         "--reading-theme", "--epub-columns", "--pdf-original", "--pdf-translate",
-        "--translation-engine",
+        "--translation-engine", "--pdf-document-analysis",
+        "--pdf-window-probe", "--pdf-probe-host",
     ]
 
     /// 是否需要在启动后自动截图并退出

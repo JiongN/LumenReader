@@ -42,6 +42,7 @@ private struct ThumbnailPaneBody: View {
         ThumbnailGrid(
             pageAspects: viewport.pageAspects,
             currentPage: currentPage,
+            scrollSettledRevision: viewport.scrollSettledRevision,
             unitCount: bridge.unitCount,
             documentID: documentID,
             theme: theme,
@@ -67,6 +68,7 @@ private struct ThumbnailGrid: View, Equatable {
 
     let pageAspects: [CGFloat]
     let currentPage: Int
+    let scrollSettledRevision: Int
     let unitCount: Int
     let documentID: String?
     let theme: ReadingTheme
@@ -94,6 +96,7 @@ private struct ThumbnailGrid: View, Equatable {
 
     static func == (lhs: ThumbnailGrid, rhs: ThumbnailGrid) -> Bool {
         lhs.currentPage == rhs.currentPage
+            && lhs.scrollSettledRevision == rhs.scrollSettledRevision
             && lhs.unitCount == rhs.unitCount
             && lhs.documentID == rhs.documentID
             && lhs.theme == rhs.theme
@@ -136,6 +139,7 @@ private struct ThumbnailGrid: View, Equatable {
         // 那不光把每一帧都变成一次列表滚动，视觉上也是「缩略图一直在匀动」，
         // 反而不如「翻过一页，卡片跳一格」看得清。
         .onChange(of: currentPage) { _, page in follow(page) }
+        .onChange(of: scrollSettledRevision) { _, _ in resumeRendering() }
         .onChange(of: documentID) { _, _ in reset() }
         .onChange(of: annotationRevision) { _, _ in reset() }
         .onChange(of: theme) { _, _ in reset() }
@@ -158,11 +162,20 @@ private struct ThumbnailGrid: View, Equatable {
         visible.setGeneration(generation)
         cache.removeAll()
         pending.removeAll()
+        if !viewport.isActivelyScrolling {
+            for index in visible.snapshot() { request(index) }
+        }
+    }
+
+    private func resumeRendering() {
+        generation = UUID()
+        visible.setGeneration(generation)
         for index in visible.snapshot() { request(index) }
     }
 
     private func request(_ index: Int) {
-        guard cache[index] == nil, !pending.contains(index), let provider = bridge.thumbnailProvider else { return }
+        guard !viewport.isActivelyScrolling, cache[index] == nil, !pending.contains(index),
+              let provider = bridge.thumbnailProvider else { return }
         pending.insert(index)
         let requestGeneration = generation
         let tracker = visible
@@ -197,7 +210,13 @@ private struct ThumbnailGrid: View, Equatable {
                 )
                 image = rendered
             }
-            DispatchQueue.main.async {
+            Task { @MainActor in
+                // Already queued renders may finish during a gesture. Hold their
+                // UI/cache publication until idle as well.
+                while viewport.isActivelyScrolling {
+                    guard generation == requestGeneration else { return }
+                    try? await Task.sleep(nanoseconds: 100_000_000)
+                }
                 guard generation == requestGeneration else { return }
                 pending.remove(index)
                 if let image { cache.store(image, at: index, current: currentPage) }

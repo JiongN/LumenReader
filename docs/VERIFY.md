@@ -67,7 +67,7 @@
 | `--demo-click 1` | 塞一段**单击来源**的假选区（内容与上一条完全相同，只把来源标成单击）。用于证伪「划词条只在拖动时出现」——此时 `selectionBar` 探针应当**缺席** |
 | `--epub-columns 1\|2` | 启动期的 EPUB 栏数（等价于设置项「EPUB 双栏阅读」）。`2` 会同时打开分页模式 |
 | `--epub-layout-report 1` | **EPUB 布局自检**：直接问真实 WebKit 文档「几栏 / 是不是分页 / 翻页翻了多远 / 能不能到底 / 能不能回退」。见第四节同名小节 |
-| `--translate-report 1` | **EPUB 逐段翻译自检**：启动后自己把翻译开关打开（走 `suppressSave`，**不写用户设置**），翻译完回读页面里译文块的数量 / 失败数 / 加载中数 / **译文是否真的在原文上方** / 首段的原文与译文对照 |
+| `--translate-report 1` | **EPUB 逐段翻译自检**：启动后自己把翻译开关打开（走 `suppressSave`，**不写用户设置**），翻译完回读页面里译文块的数量 / 失败数 / 加载中数 / **译文是否真的紧跟原文下方** / 首段的原文与译文对照 |
 | `--translate-to en` | 配 `--translate-report 1` 用的目标语言（默认 `zh-Hans`）。**拿中文书验必须给 `en`**——中译中「成功」等于什么都没验 |
 | `--home-tab 1` | 走一次「新建主页标签」。判据不是「开关为 true」，而是配 `--layout-report 1` 看**阅读区探针（readerSurface / sidebar / aiPanel）是否消失** |
 | `--reading-theme paper\|warm\|sage\|dusk\|midnight` | 启动即把阅读主题钉到某个值（验主题取色时与 `--capture-screen 1` 配合）。**只在自检里生效的启动覆盖**，见下方注 |
@@ -762,6 +762,8 @@ python3 tools/make_test_epub.py /tmp/lumen-test    # typography.epub（自带对
 ---
 
 ## 七、滚动卡顿：三旋钮单变量证伪与保真对比
+
+> 2026-09-22 更新：本节“瓶颈是整页光栅化”的旧归因不充分。最新采样发现 PDFKit 自动 Vision 文档分析；定位、修复与兼容限制见 [PDF 滚动修复记录](PDF-SCROLL-20260922.md)。历史测量保留，不能作为当前流畅度验收结论。
 
 用户实机 `--jank-watch`（2 秒一窗）把滚动卡顿定位在 **PDFKit 渲染管线**：活跃段进程 CPU 在 2 秒里烧掉
 5.9–6.8 秒（≈3 个核），而我们这层所有 SwiftUI 计数器（`body/ai/side/thumbBody/update/layout/draw/thumbR`）

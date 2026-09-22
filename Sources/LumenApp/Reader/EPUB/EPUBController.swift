@@ -57,6 +57,8 @@ final class EPUBController: NSObject, ObservableObject {
 
     private var theme: ReadingTheme
     private var reader: ReaderSettings
+    private var pendingTranslationUpdates: [(index: Int, text: String, state: EPUBTranslationState)] = []
+    private var translationFlushWork: DispatchWorkItem?
 
     init(theme: ReadingTheme, reader: ReaderSettings) {
         self.theme = theme
@@ -234,15 +236,19 @@ final class EPUBController: NSObject, ObservableObject {
             // 插入的译文块本身也是块级元素，重算会把它算进去，下标就会漂移。
             // 标记一次、之后按下标取，才对得上。
             prepareParagraphs: function () {
-              // 只取语义块的叶节点。`li` 内常常还有 `p`，父子同时入队会让同一句
-              // 被翻两次；表格、图注和 h5/h6 也属于正文，不能无故漏掉。
-              var selector = 'p, blockquote, dd, figcaption, td, th, h1, h2, h3, h4, h5, h6, li';
+              // 只取语义块的叶节点。不少出版商用 div/section/article 直接装段落，
+              // 只识别 p 会出现“标题译了、正文没译”。父容器里已有更精确的块时
+              // 跳过父容器，避免 li>p、div>p 之类的重复翻译。
+              var selector = 'p, blockquote, dd, figcaption, td, th, h1, h2, h3, h4, h5, h6, li, div, section, article';
               var els = document.querySelectorAll(selector);
               var out = [];
+              var nestedSelector = selector;
+              var oldMarks = document.querySelectorAll('[data-lm-p]');
+              for (var m = 0; m < oldMarks.length; m++) { oldMarks[m].removeAttribute('data-lm-p'); }
               for (var i = 0; i < els.length; i++) {
                 var el = els[i];
                 if (el.classList.contains('lm-tr')) { continue; }
-                if (el.matches('li') && el.querySelector('p, blockquote, dl, ol, ul, table')) { continue; }
+                if (el.querySelector(nestedSelector)) { continue; }
                 if (el.closest('nav, [hidden], [aria-hidden="true"]')) { continue; }
                 var t = (el.innerText || el.textContent || '').trim();
                 // 太短的段落不值得花一次请求（空段、纯数字页码都会落在这里）
@@ -262,25 +268,33 @@ final class EPUBController: NSObject, ObservableObject {
                 box.className = 'lm-tr lm-tr-loading';
                 box.setAttribute('data-lm-for', el.getAttribute('data-lm-p') || '');
                 box.textContent = '翻译中…';
-                el.parentNode.insertBefore(box, el);
+                el.parentNode.insertBefore(box, el.nextSibling);
               }
               return indices.length;
             },
             setTranslation: function (index, text, state) {
               var el = document.querySelector('[data-lm-p="' + index + '"]');
               if (!el || !el.parentNode) { return false; }
-              var box = el.previousElementSibling;
+              var box = el.nextElementSibling;
               if (!box || !box.classList || !box.classList.contains('lm-tr')
                   || box.getAttribute('data-lm-for') !== String(index)) {
                 box = document.createElement('div');
                 box.className = 'lm-tr';
                 box.setAttribute('data-lm-for', String(index));
-                el.parentNode.insertBefore(box, el);
+                el.parentNode.insertBefore(box, el.nextSibling);
               }
               box.textContent = text || '';
               box.classList.toggle('lm-tr-loading', state === 'loading');
               box.classList.toggle('lm-tr-failed', state === 'failed');
               return true;
+            },
+            setTranslations: function (updates) {
+              updates = Array.isArray(updates) ? updates : [];
+              for (var i = 0; i < updates.length; i++) {
+                var item = updates[i] || {};
+                this.setTranslation(Number(item.index), String(item.text || ''), String(item.state || 'done'));
+              }
+              return updates.length;
             },
             clearTranslations: function () {
               var boxes = document.querySelectorAll('.lm-tr');
@@ -419,12 +433,11 @@ final class EPUBController: NSObject, ObservableObject {
       max-width: 100% !important;
       width: auto !important;
     }
-    /* 逐段翻译的译文容器。挂在原段**上方**：对照阅读时视线自上而下是
-       「译文 → 原文」，和「先看译文再对原文」的顺序一致；挂在下方则会被
-       下一段顶开，读起来像是下一段的引言。左侧一道细竖条是它与正文的分界，
-       不吃掉段落本身的层级。 */
+    /* 逐段翻译的译文容器。紧跟在对应原文之后，阅读顺序固定为
+       「原文 → 译文」。上方留出较小间距、下方留出更大间距，让译文在视觉上
+       归属于前一段，而不会被误认为下一段的引言。 */
     div.lm-tr {
-      margin: 0.3em 0 0.55em;
+      margin: 0.2em 0 0.75em;
       padding: 0.3em 0.6em;
       border-left: 2px solid var(--lm-accent-soft);
       border-radius: 0 4px 4px 0;
@@ -578,16 +591,47 @@ extension EPUBController {
         webView.evaluateJavaScript("window.__lumen && window.__lumen.markLoading(\(json));")
     }
 
-    /// 写入第 `index` 段的译文（或失败态）。
+    /// 写入第 `index` 段的译文（或失败态）。先在主线程合并一小批，
+    /// 再用一次 WebKit IPC 写回，避免每个请求完成都触发独立 DOM 重排。
     func setTranslation(index: Int, text: String, state: EPUBTranslationState) {
-        let js = "window.__lumen && window.__lumen.setTranslation(\(index), \(Self.jsString(text)), '\(state.rawValue)');"
-        webView.evaluateJavaScript(js)
+        pendingTranslationUpdates.append((index, text, state))
+        if pendingTranslationUpdates.count >= 8 {
+            flushPendingTranslations()
+            return
+        }
+        guard translationFlushWork == nil else { return }
+        let work = DispatchWorkItem { [weak self] in
+            self?.translationFlushWork = nil
+            self?.flushPendingTranslations()
+        }
+        translationFlushWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.06, execute: work)
+    }
+
+    func flushPendingTranslations() {
+        translationFlushWork?.cancel()
+        translationFlushWork = nil
+        let updates = pendingTranslationUpdates
+        pendingTranslationUpdates.removeAll(keepingCapacity: true)
+        guard !updates.isEmpty else { return }
+        let payload: [[String: Any]] = updates.map {
+            ["index": $0.index, "text": $0.text, "state": $0.state.rawValue]
+        }
+        guard let data = try? JSONSerialization.data(withJSONObject: payload),
+              let json = String(data: data, encoding: .utf8) else { return }
+        webView.evaluateJavaScript("window.__lumen && window.__lumen.setTranslations(\(json));")
+    }
+
+    func discardPendingTranslations() {
+        translationFlushWork?.cancel()
+        translationFlushWork = nil
+        pendingTranslationUpdates.removeAll(keepingCapacity: true)
     }
 
     /// 自检用（`--translate-report 1`）：回读页面里译文块的现状。
     ///
     /// 断言必须指向**外部可核对的产物**：数一数页面里到底有几个译文块、第一段译成了
-    /// 什么、它是不是真的挂在原文**上方**——这些都能在 Safari 里手动复核。
+    /// 什么、它是不是真的紧跟在原文**下方**——这些都能在 Safari 里手动复核。
     /// 只报「函数返回 true」的自检是自我安慰。
     func translationReport() async -> String {
         await withCheckedContinuation { continuation in
@@ -595,12 +639,12 @@ extension EPUBController {
             (function () {
               var boxes = document.querySelectorAll('.lm-tr');
               var first = document.querySelector('[data-lm-p="0"]');
-              var prev = first ? first.previousElementSibling : null;
+              var next = first ? first.nextElementSibling : null;
               return {
                 boxes: boxes.length,
                 failed: document.querySelectorAll('.lm-tr-failed').length,
                 loading: document.querySelectorAll('.lm-tr-loading').length,
-                aboveOriginal: !!(prev && prev.classList && prev.classList.contains('lm-tr')),
+                belowOriginal: !!(next && next.classList && next.classList.contains('lm-tr')),
                 sample: boxes.length ? String(boxes[0].textContent || '').slice(0, 60) : '',
                 original: first ? String(first.innerText || '').slice(0, 60) : ''
               };
@@ -613,7 +657,7 @@ extension EPUBController {
                 }
                 continuation.resume(returning:
                     "译文块 \(dict["boxes"] ?? 0) 个 / 失败 \(dict["failed"] ?? 0) / 加载中 \(dict["loading"] ?? 0)"
-                    + " / 译文在原文上方=\(dict["aboveOriginal"] ?? false)"
+                    + " / 译文在原文下方=\(dict["belowOriginal"] ?? false)"
                     + " / 原文=「\(dict["original"] ?? "")」"
                     + " 译文=「\(dict["sample"] ?? "")」"
                 )
@@ -624,6 +668,7 @@ extension EPUBController {
     /// 清掉全部译文与下标标记。切章节时 DOM 本来就会重建，
     /// 但关掉开关、或在同一章里重译时必须显式清，否则会越叠越多。
     func clearTranslations() {
+        discardPendingTranslations()
         webView.evaluateJavaScript("window.__lumen && window.__lumen.clearTranslations();")
     }
 }

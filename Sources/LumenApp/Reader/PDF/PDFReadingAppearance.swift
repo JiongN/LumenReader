@@ -46,6 +46,7 @@ struct PDFReadingTone: Equatable, Sendable {
         guard let result = context.makeImage() else { return image }
         return NSImage(cgImage: result, size: image.size)
     }
+
 }
 
 /// PDFKit can render tiles concurrently. No SwiftUI/AppKit state is read by a worker.

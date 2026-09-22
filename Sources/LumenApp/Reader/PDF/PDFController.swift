@@ -12,7 +12,6 @@ import PDFKit
 final class PDFController: NSObject, ObservableObject {
 
     let view: AnnotatedPDFView
-    private let readingDocumentDelegate = ReadingPDFDocumentDelegate()
     private(set) var document: PDFDocument?
     private(set) var documentURL: URL?
     private(set) var pageCount = 0
@@ -21,13 +20,21 @@ final class PDFController: NSObject, ObservableObject {
     private var lastPublishedPage: Int?
     private weak var viewportState: PDFViewportState?
     private var viewportObserver: NSObjectProtocol?
-    private var viewportWork: DispatchWorkItem?
+    private var viewportIdleWork: DispatchWorkItem?
+    private var pendingScalePublication = false
     private var viewportDocumentID = UUID()
     private var resizeAnchor: (PDFPage, CGPoint, Bool)?
 
     func connectViewport(_ state: PDFViewportState) {
         viewportState = state
-        state.onTrackingChange = { [weak self] in self?.scheduleViewport() }
+        state.onTrackingChange = { [weak self, weak state] in
+            guard let self, let state else { return }
+            if state.isTracking {
+                self.scheduleViewport()
+            } else {
+                state.setActivelyScrolling(false)
+            }
+        }
         viewportDocumentID = UUID()
         state.pageAspects = (0..<pageCount).map { index in
             guard let page = document?.page(at: index) else { return 1.4 }
@@ -46,14 +53,31 @@ final class PDFController: NSObject, ObservableObject {
     }
 
     private func scheduleViewport() {
-        guard viewportState?.isTracking == true, viewportWork == nil else { return }
-        let work = DispatchWorkItem { [weak self] in
-            guard let self else { return }
-            self.viewportWork = nil
-            self.publishViewport()
+        guard document != nil else { return }
+        // Do not mutate any SwiftUI-observed state in the responsive-scroll
+        // transaction. Bounds notifications include momentum between page changes.
+        viewportState?.setActivelyScrolling(true)
+        viewportIdleWork?.cancel()
+        let expectedDocument = viewportDocumentID
+        let idle = DispatchWorkItem { [weak self] in
+            guard let self, self.viewportDocumentID == expectedDocument else { return }
+            self.flushPendingReadingPosition()
         }
-        viewportWork = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0 / 60.0, execute: work)
+        viewportIdleWork = idle
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.22, execute: idle)
+    }
+
+    /// Also called before closing/saving so the final scroll position is not lost.
+    func flushPendingReadingPosition() {
+        viewportIdleWork?.cancel()
+        viewportIdleWork = nil
+        publishPosition()
+        if viewportState?.isTracking == true { publishViewport() }
+        viewportState?.setActivelyScrolling(false)
+        if pendingScalePublication {
+            pendingScalePublication = false
+            objectWillChange.send()
+        }
     }
 
     private func publishViewport() {
@@ -209,7 +233,7 @@ final class PDFController: NSObject, ObservableObject {
 
     deinit {
         if let viewportObserver { NotificationCenter.default.removeObserver(viewportObserver) }
-        viewportWork?.cancel()
+        viewportIdleWork?.cancel()
         for observer in observers {
             NotificationCenter.default.removeObserver(observer)
         }
@@ -218,6 +242,7 @@ final class PDFController: NSObject, ObservableObject {
     // MARK: - 视图配置
 
     private func configureView() {
+        PDFBackgroundAnalysisPolicy.apply(to: view)
         view.displayMode = .singlePageContinuous
         view.displayDirection = .vertical
         view.displaysAsBook = false
@@ -247,43 +272,6 @@ final class PDFController: NSObject, ObservableObject {
         let clamped = min(max(brightness, 0.4), 1.0)
         let target = (base.blended(withFraction: 1 - clamped, of: .black) ?? base).usingColorSpace(.sRGB) ?? base
         view.backgroundColor = target
-        guard readingDocumentDelegate.tone.update(original ? nil : PDFReadingTone(theme: theme)),
-              let document else { return }
-        // Recreate native tiles only when the theme changes, retaining position and selection.
-        // setNeedsDisplay on the outer PDFView does not invalidate PDFKit's cached page tiles.
-        let destination = view.currentDestination
-        let scrollOrigin = view.documentView?.enclosingScrollView?.contentView.bounds.origin
-        let selection = view.currentSelection
-        let automatic = view.autoScales
-        let scale = view.scaleFactor
-        suppressCallbacks = true
-        view.document = nil
-        view.document = document
-        view.autoScales = automatic
-        view.layoutDocumentView()
-        view.scaleFactor = automatic ? view.scaleFactorForSizeToFit : scale
-        if let scrollOrigin, let scrollView = view.documentView?.enclosingScrollView {
-            scrollView.contentView.scroll(to: scrollOrigin)
-            scrollView.reflectScrolledClipView(scrollView.contentView)
-        } else if let destination, let page = destination.page {
-            let restored = PDFDestination(page: page, at: destination.point)
-            restored.zoom = view.scaleFactor
-            view.go(to: restored)
-        }
-        view.setCurrentSelection(selection, animate: false)
-        // PDFKit queues an initial scroll after assigning the document; restore after that.
-        DispatchQueue.main.async { [weak self, weak document] in
-            guard let self, let document, self.document === document else { return }
-            if let destination { self.view.go(to: destination) }
-            self.view.autoScales = automatic
-            self.view.scaleFactor = automatic ? self.view.scaleFactorForSizeToFit : scale
-            if let scrollOrigin, let scrollView = self.view.documentView?.enclosingScrollView {
-                scrollView.contentView.scroll(to: scrollOrigin)
-                scrollView.reflectScrolledClipView(scrollView.contentView)
-            }
-            self.suppressCallbacks = false
-            if let state = self.viewportState { self.connectViewport(state) }
-        }
     }
 
     func apply(flowMode: ReadingFlowMode) {
@@ -314,7 +302,7 @@ final class PDFController: NSObject, ObservableObject {
         ) { [weak self] _ in
             MainActor.assumeIsolated {
                 guard let self, !self.suppressCallbacks else { return }
-                self.publishPosition()
+                self.scheduleViewport()
             }
         })
 
@@ -332,8 +320,8 @@ final class PDFController: NSObject, ObservableObject {
         ) { [weak self] _ in
             MainActor.assumeIsolated {
                 guard let self else { return }
+                self.pendingScalePublication = true
                 self.scheduleViewport()
-                self.objectWillChange.send()
             }
         })
     }
@@ -343,7 +331,9 @@ final class PDFController: NSObject, ObservableObject {
     @discardableResult
     func load(url: URL) -> PDFDocument? {
         guard let doc = PDFDocument(url: url) else { return nil }
-        doc.delegate = readingDocumentDelegate
+        viewportIdleWork?.cancel()
+        viewportIdleWork = nil
+        viewportDocumentID = UUID()
         suppressCallbacks = true
         lastPublishedPage = nil
         document = doc
@@ -359,8 +349,11 @@ final class PDFController: NSObject, ObservableObject {
 
     func unload() {
         suppressCallbacks = true
-        viewportWork?.cancel()
-        viewportWork = nil
+        viewportIdleWork?.cancel()
+        viewportIdleWork = nil
+        viewportDocumentID = UUID()
+        pendingScalePublication = false
+        viewportState?.setActivelyScrolling(false)
         if let viewportObserver { NotificationCenter.default.removeObserver(viewportObserver) }
         viewportObserver = nil
         resizeAnchor = nil
@@ -385,7 +378,6 @@ final class PDFController: NSObject, ObservableObject {
     private func publishPosition() {
         guard let doc = document, let page = view.currentPage else { return }
         let index = doc.index(for: page)
-        scheduleViewport()
         guard lastPublishedPage != index else { return }
         lastPublishedPage = index
         onPositionChange?(index, pageCount)

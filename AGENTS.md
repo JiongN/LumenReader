@@ -2,6 +2,7 @@
 
 先读 README.md；当前实现见 docs/ARCHITECTURE.md，验证见 docs/VERIFY.md，发布见 docs/RELEASING.md。docs/archive 是历史证据，不是当前行为契约。
 
+- **PDF 阅读体验是第一优先级。** 任何功能和 UI 改动都不得以明显增加 PDF 滚动、缩放、翻页的主线程开销或驻留内存为代价；涉及阅读热路径、标签保活、缩略图、渲染或背景任务时，必须先用真实大文件或现有 `--perf-report` / `--jank-report` 通道验证流畅度、内存上界和取消行为；无数据不得宣称性能改善。
 - 保留 Sources/、Tests/、Resources/ 的 SwiftPM 标准结构，分发产物统一 releases/<version>/。
 - LumenKit 不引 SwiftUI。PDFKit/WebKit 视图和共享文档的所有权仍在 App 层。
 - API 密钥使用本机 credentials 文件（0700/0600，未加密）；不得进入日志、版本库、截图或配置导出，仅向用户配置的 AI 接口用于授权。
