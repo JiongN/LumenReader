@@ -105,10 +105,14 @@ struct ReaderContainerView: View {
                     // 随 AI 面板的显隐漂移。浮层本来就是给阅读区用的（页码、缩放、划词），
                     // 锚在阅读区才是它的语义位置。
                     // 划词条在沉浸模式下同样保留：沉浸只是收起面板，不是收起「选中文字后能做的事」。
-                    .overlay(alignment: .bottom) { SelectionActionBarLayer() }
+                    .overlay(alignment: .bottom) {
+                        if !LaunchOptions.pdfBareOverlays { SelectionActionBarLayer() }
+                    }
                     // 沉浸时收起状态条：页码已经在底部 HUD 上显示，再留一条属于重复信息，
                     // 而沉浸模式要的恰恰是「屏幕上只有正文」。
-                    .overlay(alignment: .bottomTrailing) { ReaderStatusLayer() }
+                    .overlay(alignment: .bottomTrailing) {
+                        if !LaunchOptions.pdfBareOverlays { ReaderStatusLayer() }
+                    }
 
 
             }

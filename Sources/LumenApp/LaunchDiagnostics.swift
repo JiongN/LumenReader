@@ -316,6 +316,7 @@ enum LaunchOptions {
         "--reading-theme", "--epub-columns", "--pdf-original", "--pdf-translate",
         "--translation-engine", "--pdf-document-analysis",
         "--pdf-window-probe", "--pdf-probe-host",
+        "--pdf-surface-level", "--pdf-bare-overlays",
     ]
 
     /// 是否需要在启动后自动截图并退出
@@ -478,6 +479,31 @@ enum LaunchOptions {
     /// 也就是说：「材质有没有跟着主题变」这件事，只有走录屏通道才是可信的。
     /// 代价是需要「屏幕录制」权限，且抓到的是整窗（含标题栏与工具栏），不能只截 contentView。
     static var captureViaScreen: Bool { flag("--capture-screen") }
+
+    /// 阅读区表面**分级降级**诊断：`--pdf-surface-level N`（0 = 现状，默认）。
+    ///
+    /// 为什么是分级而不是一个开关：完整界面与「最小 SwiftUI 承载」之间隔着好几层
+    /// （主题垫色、调色蒙层、`compositingGroup`、常驻浮层），一次全剥掉只能回答
+    /// 「是不是这几层的错」，回答不了「是哪一层」。分级跑同一份二进制，逐级剥离：
+    ///
+    /// | 级别 | 剥掉的层 |
+    /// | --- | -------- |
+    /// | 1 | `compositingGroup`（不再强制离屏合成整个阅读面） |
+    /// | 2 | 调色蒙层（正文按原色光栅化） |
+    /// | 3 | 主题垫色 + 扫描件提示条（阅读区只剩 `PDFKitRepresentable`） |
+    ///
+    /// 读数看 `--jank-report` 的「CPU/步」与停顿 p95：哪一档掉下去，成本就在那一层。
+    /// 只用于定位，**不是功能**——正常使用恒为 0。
+    static var pdfSurfaceLevel: Int {
+        guard let raw = value(for: "--pdf-surface-level"), let n = Int(raw), n >= 0 else { return 0 }
+        return min(n, 3)
+    }
+
+    /// 摘掉阅读区上**常驻**的两条浮层（页码状态条、划词条）：`--pdf-bare-overlays 1`。
+    ///
+    /// 与 `pdfSurfaceLevel` 是两件事：那几个是阅读面内部的合成层，这两条是压在
+    /// 阅读区之上的 overlay（状态条带 `.regularMaterial`，每帧要重采样它背后的内容）。
+    static var pdfBareOverlays: Bool { flag("--pdf-bare-overlays") }
 }
 
 // MARK: - 布局探针

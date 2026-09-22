@@ -75,21 +75,38 @@ struct PDFReaderView: View {
     @State private var translationConfiguration: TranslationSession.Configuration?
 
     /// Keep theme blending local to the reading surface.
+    ///
+    /// `LaunchOptions.pdfSurfaceLevel > 0` 时按级别剥掉外层的合成负担（仅诊断，见该开关）。
+    @ViewBuilder
     private var pdfSurface: some View {
-        ZStack {
+        switch LaunchOptions.pdfSurfaceLevel {
+        case 3:
             PDFKitRepresentable(controller: controller)
-                .opacity(bridge.isLoading ? 0 : 1)
-            if !reader.pdfOriginalColors {
-                PDFToneOverlay(tone: PDFReadingTone(theme: theme))
-                    .allowsHitTesting(false)
+        case 1, 2:
+            ZStack {
+                PDFKitRepresentable(controller: controller)
+                    .opacity(bridge.isLoading ? 0 : 1)
+                if LaunchOptions.pdfSurfaceLevel < 2, !reader.pdfOriginalColors {
+                    PDFToneOverlay(tone: PDFReadingTone(theme: theme))
+                        .allowsHitTesting(false)
+                }
             }
+        default:
+            ZStack {
+                PDFKitRepresentable(controller: controller)
+                    .opacity(bridge.isLoading ? 0 : 1)
+                if !reader.pdfOriginalColors {
+                    PDFToneOverlay(tone: PDFReadingTone(theme: theme))
+                        .allowsHitTesting(false)
+                }
+            }
+            .compositingGroup()
         }
-        .compositingGroup()
     }
 
     var body: some View {
         ZStack {
-            theme.background
+            if LaunchOptions.pdfSurfaceLevel < 3 { theme.background }
             pdfSurface
             if bridge.isLoading {
                 LoadingStateView(title: "正在打开 PDF", subtitle: document.displayTitle)
@@ -100,7 +117,9 @@ struct PDFReaderView: View {
                 }
             }
         }
-        .overlay(alignment: .top) { scannedBanner }
+        .overlay(alignment: .top) {
+            if LaunchOptions.pdfSurfaceLevel < 3 { scannedBanner }
+        }
         .sheet(item: $ocrSheet) { payload in
             OCRResultSheet(payload: payload)
                 .environmentObject(bridge)
