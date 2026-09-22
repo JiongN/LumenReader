@@ -4,7 +4,7 @@
 
 # Lumen · 流明
 
-**面向文献阅读的 macOS 原生 PDF / EPUB 阅读器**
+**面向文献阅读的 macOS 原生 PDF / EPUB AI阅读器**
 
 [下载最新版本](https://github.com/JiongN/LumenReader/releases) · [源码构建](#源码构建) · [数据与隐私](#数据与隐私)
 
