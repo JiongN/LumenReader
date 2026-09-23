@@ -18,6 +18,15 @@ final class PDFViewportState: ObservableObject {
     }
     @Published var snapshot = Snapshot()
     @Published var pageAspects: [CGFloat] = []
+    /// This channel updates the native page label only, never the SwiftUI tree.
+    private(set) var livePageIndex = 0
+    let livePageChanges = PassthroughSubject<Int, Never>()
+
+    func updateLivePage(_ index: Int) {
+        guard livePageIndex != index else { return }
+        livePageIndex = index
+        livePageChanges.send(index)
+    }
     /// 只在视口连续变化期间为 true。缩略图用它把新渲染延后到手势停稳，
     /// 避免 PDFKit 正文 tile 与缩略图在同一段滚动中争抢 CPU / PDF 解析资源。
     private(set) var isActivelyScrolling = false

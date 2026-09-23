@@ -167,6 +167,7 @@ final class AppState: ObservableObject {
     /// 只有**最后一个** completion 回来时才该结束「调整中」；
     /// 用布尔的话第一次 completion 就把 autoScales 放开了，第二次动画期间又在每帧重算适宽。
     private var panelTransitionsInFlight = 0
+    private var panelTransitionOwners: [ObjectIdentifier: (Bool) -> Void] = [:]
 
     /// 本窗口。全屏是**窗口级**操作，必须有个明确的施力对象。
     private weak var mainWindow: NSWindow?
@@ -534,14 +535,7 @@ final class AppState: ObservableObject {
             self.isSidebarVisible = on ? false : self.sidebarBeforeImmersive
             self.isAIPanelVisible = on ? false : self.aiPanelBeforeImmersive
         }
-        if animated {
-            beginPanelTransition()
-            withAnimation(DS.Motion.panel) { apply() } completion: { [weak self] in
-                self?.endPanelTransition()
-            }
-        } else {
-            apply()
-        }
+        changePanelLayout(animated: animated, apply)
         // 沉浸（zoom）模式不再进系统全屏：用户要求「不必全屏，只收起左侧工具栏和
         // 顶部标签栏」。隐藏顶栏/侧栏由 RootView 与 ReaderContainerView 按 isImmersive 处理。
     }
@@ -557,14 +551,7 @@ final class AppState: ObservableObject {
     /// 状态写入点散在 7 处时，任何一处漏调都会重新长出这个 bug，所以收敛。
     func setSidebarVisible(_ visible: Bool, animated: Bool = true) {
         guard isSidebarVisible != visible else { return }
-        if animated {
-            beginPanelTransition()
-            withAnimation(DS.Motion.panel) { isSidebarVisible = visible } completion: { [weak self] in
-                self?.endPanelTransition()
-            }
-        } else {
-            isSidebarVisible = visible
-        }
+        changePanelLayout(animated: animated) { isSidebarVisible = visible }
     }
 
     func toggleSidebar() { setSidebarVisible(!isSidebarVisible) }
@@ -572,17 +559,24 @@ final class AppState: ObservableObject {
     /// AI 面板可见性。理由同 `setSidebarVisible(_:animated:)`。
     func setAIPanelVisible(_ visible: Bool, animated: Bool = true) {
         guard isAIPanelVisible != visible else { return }
-        if animated {
-            beginPanelTransition()
-            withAnimation(DS.Motion.panel) { isAIPanelVisible = visible } completion: { [weak self] in
-                self?.endPanelTransition()
-            }
-        } else {
-            isAIPanelVisible = visible
-        }
+        changePanelLayout(animated: animated) { isAIPanelVisible = visible }
     }
 
     func toggleAIPanel() { setAIPanelVisible(!isAIPanelVisible) }
+
+    /// PDF surfaces resize once. Animating their width recreates backing stores
+    /// even when PDFView's own layout method is skipped.
+    private func changePanelLayout(animated: Bool, _ update: () -> Void) {
+        beginPanelTransition()
+        if animated && document?.kind != .pdf {
+            withAnimation(DS.Motion.panel, update) { [weak self] in self?.endPanelTransition() }
+        } else {
+            var transaction = Transaction(animation: nil)
+            transaction.disablesAnimations = true
+            withTransaction(transaction, update)
+            DispatchQueue.main.async { [weak self] in self?.endPanelTransition() }
+        }
+    }
 
     /// 让当前标签的阅读视图进入「面板正在调整」状态：钉住 autoScales、记下滚动锚点。
     ///
@@ -594,7 +588,11 @@ final class AppState: ObservableObject {
             NSLog("%@", "[Lumen][panel] beginPanelTransition：飞行中 \(panelTransitionsInFlight)"
                   + "，setPanelResizing 闭包\(bridge.setPanelResizing == nil ? "缺失" : "在位")")
         }
-        if panelTransitionsInFlight == 1 { bridge.setPanelResizing?(true) }
+        let owner = ObjectIdentifier(bridge)
+        if panelTransitionOwners[owner] == nil, let callback = bridge.setPanelResizing {
+            panelTransitionOwners[owner] = callback
+            callback(true)
+        }
     }
 
     /// 动画真正结束后放开，`setPanelResizing(false)` 内部会恢复 autoScales 并补偿滚动位置。
@@ -606,7 +604,11 @@ final class AppState: ObservableObject {
         if LaunchOptions.panelTransitionReport {
             NSLog("%@", "[Lumen][panel] endPanelTransition：飞行中 \(panelTransitionsInFlight)")
         }
-        if panelTransitionsInFlight == 0 { bridge.setPanelResizing?(false) }
+        if panelTransitionsInFlight == 0 {
+            let callbacks = Array(panelTransitionOwners.values)
+            panelTransitionOwners.removeAll()
+            callbacks.forEach { $0(false) }
+        }
     }
 
     private func driveFullScreen(_ on: Bool, animated: Bool) {

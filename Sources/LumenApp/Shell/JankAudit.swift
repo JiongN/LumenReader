@@ -26,7 +26,6 @@ enum JankCounter: String, CaseIterable {
     /// 它与 `pdfViewLayout` 成对读才有意义：`layout=0 frozen=308` = 父布局确实每帧
     /// 来敲了 308 次门，但一次都没真重排——正是「面板动画不再重光栅化」的证据。
     /// 若两者同时为 0，那只是「这段没人动」，什么都没证明。
-    case pdfViewFrozen = "PDFView.重排(冻结挡掉)"
     /// 滚动**过程中**的「轻发布」实际执行次数。
     ///
     /// 它与 `pos` 分开记，是为了把两件事分开：轻发布跑了但页号没变（去重挡掉，
@@ -46,7 +45,6 @@ enum JankCounter: String, CaseIterable {
         case .pdfViewDraw: return "draw"
         case .thumbnailRender: return "thumbR"
         case .positionCallback: return "pos"
-        case .pdfViewFrozen: return "frozen"
         case .viewportLight: return "vport"
         }
     }
@@ -89,9 +87,11 @@ enum Jank {
     static let isEnabled = CommandLine.arguments.contains("--jank-report")
         || CommandLine.arguments.contains("--jank-watch")
         || CommandLine.arguments.contains("--sidebar-tab-report")
-        // 面板过渡自检要用 `pdfViewFrozen` 证明「动画期间的重排真被冻住了」，
-        // 不打开计数那条断言只能读到 0，读不出东西。
+        // Panel diagnostics count real layout/draw callbacks.
         || CommandLine.arguments.contains("--panel-transition-report")
+        // 面板卡顿自检（`--panel-frame-report`）要靠 body/layout/draw 这几项
+        // 判断「那一大块停顿落在哪一层」，不打开计数只能读到全 0。
+        || CommandLine.arguments.contains("--panel-frame-report")
 
     static func tick(_ counter: JankCounter) {
         guard isEnabled else { return }

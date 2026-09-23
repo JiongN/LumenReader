@@ -332,6 +332,12 @@ struct ReaderContainerView: View {
             await PanelTransitionAudit.run(state: state)
         }
 
+        // 面板收起 / 展开的**卡顿**自检（`--panel-frame-report 1`）：量代价，不是验机制。
+        // 同样挂在文档装好之后；与 `--panel-transition-report` 可同时跑，互不依赖。
+        if LaunchOptions.panelFrameReport {
+            await PanelFrameAudit.run(state: state)
+        }
+
         // 侧栏页签切换自检（`--sidebar-tab-report 1`）。必须在这里跑：
         // 它要调的是 `selectSidebarTab(_:)`——图标栏 `onSelect` 接的就是它，
         // 而它是本类型的私有方法，只有这里够得着。绕到 `revealSidebar` 去验等于换了一条路。
@@ -768,8 +774,13 @@ struct ReaderStatusLayer: View {
                 Button {
                     withAnimation(DS.Motion.palette) { state.isPageJumpVisible = true }
                 } label: {
-                    ControlChip(text: bridge.positionLabel)
-                        .foregroundStyle(isJumpHovering ? DS.Palette.accent : DS.Palette.textSecondary)
+                    if documentIsPDF {
+                        PDFLivePageLabel(viewport: bridge.viewport, pageCount: bridge.unitCount,
+                                         color: NSColor(isJumpHovering ? DS.Palette.accent : DS.Palette.textSecondary))
+                    } else {
+                        ControlChip(text: bridge.positionLabel)
+                            .foregroundStyle(isJumpHovering ? DS.Palette.accent : DS.Palette.textSecondary)
+                    }
                 }
                 .buttonStyle(.plain)
                 .onHover { hovering in

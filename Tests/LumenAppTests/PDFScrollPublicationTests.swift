@@ -57,4 +57,81 @@ struct PDFScrollPublicationTests {
         #expect(state.scrollSettledRevision == revisionAfterUnload)
         #expect(controller.document == nil)
     }
+
+    @Test func livePageChannelDoesNotInvalidateViewportObservers() throws {
+        let state = PDFViewportState()
+        var treeUpdates = 0
+        var livePages: [Int] = []
+        let tree = state.objectWillChange.sink { treeUpdates += 1 }
+        let label = state.livePageChanges.sink { livePages.append($0) }
+        defer { tree.cancel(); label.cancel() }
+        for page in [1, 1, 2, 8] { state.updateLivePage(page) }
+        #expect(livePages == [1, 2, 8])
+        #expect(treeUpdates == 0)
+        #expect(state.snapshot.centerPage == 0)
+    }
+
+    @Test func lightPublicationDoesNotCallWorkspaceUntilSettled() async throws {
+        let (controller, state, url) = try fixture()
+        defer { controller.unload(); try? FileManager.default.removeItem(at: url) }
+        var pages: [Int] = []
+        controller.onPositionChange = { page, _ in pages.append(page) }
+        let page = try #require(controller.document?.page(at: 2))
+        controller.view.go(to: page)
+        for _ in 0..<5 {
+            NotificationCenter.default.post(name: .PDFViewPageChanged, object: controller.view)
+            try await Task.sleep(nanoseconds: 70_000_000)
+            #expect(pages.isEmpty)
+        }
+        #expect(state.livePageIndex > 0)
+        try await Task.sleep(nanoseconds: 350_000_000)
+        #expect(!pages.isEmpty)
+        #expect(pages.last == state.livePageIndex)
+    }
+
+    @Test func rapidPanelChangesPreserveOriginalAutoScaleMode() async throws {
+        let (controller, _, url) = try fixture()
+        defer { controller.unload(); try? FileManager.default.removeItem(at: url) }
+        try #require(controller.panelAnchor() != nil)
+        controller.view.autoScales = true
+        controller.setPanelResizing(true)
+        #expect(!controller.view.autoScales)
+        controller.setPanelResizing(false)
+        // A second interaction starts before the first async restoration runs.
+        controller.setPanelResizing(true)
+        await Task.yield()
+        #expect(!controller.view.autoScales)
+        controller.setPanelResizing(false)
+        try await Task.sleep(nanoseconds: 100_000_000)
+        #expect(controller.view.autoScales)
+    }
+
+    @Test func panelRestoreCannotModifyReplacementDocument() async throws {
+        let (controller, _, url) = try fixture()
+        defer { controller.unload(); try? FileManager.default.removeItem(at: url) }
+        try #require(controller.panelAnchor() != nil)
+        controller.view.autoScales = false
+        controller.setPanelResizing(true)
+        controller.setPanelResizing(false)
+        controller.unload()
+        try #require(controller.load(url: url) != nil)
+        #expect(controller.view.autoScales)
+        try await Task.sleep(nanoseconds: 100_000_000)
+        #expect(controller.view.autoScales)
+    }
+
+    @Test func overlappingDragAndPanelChangeRestoreOnlyAfterBothEnd() async throws {
+        let (controller, _, url) = try fixture()
+        defer { controller.unload(); try? FileManager.default.removeItem(at: url) }
+        try #require(controller.panelAnchor() != nil)
+        controller.view.autoScales = true
+        controller.setPanelResizing(true)
+        controller.setPanelWidthDragging(true)
+        controller.setPanelResizing(false)
+        await Task.yield()
+        #expect(!controller.view.autoScales)
+        controller.setPanelWidthDragging(false)
+        try await Task.sleep(nanoseconds: 100_000_000)
+        #expect(controller.view.autoScales)
+    }
 }

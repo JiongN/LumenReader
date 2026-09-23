@@ -28,12 +28,14 @@ final class PDFController: NSObject, ObservableObject {
     private static let viewportSettleDelay: Double = 0.22
     /// 连续滚动期间轻发布的最小间隔（秒）。
     ///
-    /// 150ms ≈ 每秒 6–7 次，是「页码跟得住手」与「SwiftUI 别每帧重算」之间的折中：
-    /// 每帧发（16.7ms）就是修复前那条卡顿路径，停稳才发（只有兜底）就是「显示慢」。
+    /// 150ms ≈ 每秒 6–7 次，仅更新原生页码标签，不使 SwiftUI 工作区失效。
     private static let viewportThrottleInterval: Double = 0.15
     private var pendingScalePublication = false
     private var viewportDocumentID = UUID()
     private var resizeAnchor: (PDFPage, CGPoint, Bool)?
+    private enum PanelAdjustment { case visibility, widthDrag }
+    private var panelAdjustments: Set<PanelAdjustment> = []
+    private var panelRestoreGeneration = UUID()
 
     func connectViewport(_ state: PDFViewportState) {
         viewportState = state
@@ -83,8 +85,7 @@ final class PDFController: NSObject, ObservableObject {
         // 页码、进度、侧栏当前位置一次都不更新，手指停稳才猛跳一下（真机实测
         // `--jank-watch` 里 `pos` 只在用户中途停顿的那几拍才涨）。
         //
-        // 轻发布按固定间隔补一次「页号 + 页内进度」，把跟手性还回来；整份视口几何
-        // （`pageRects`，每页一次坐标换算）仍然只留给停稳那一刻，重活不加。
+        // 固定间隔只更新原生数字标签；视口快照和工作区通知都留到停稳。
         guard viewportThrottleWork == nil else { return }
         let throttle = DispatchWorkItem { [weak self] in
             guard let self else { return }
@@ -102,8 +103,7 @@ final class PDFController: NSObject, ObservableObject {
         viewportIdleWork = nil
         viewportThrottleWork?.cancel()
         viewportThrottleWork = nil
-        publishPosition()
-        if viewportState?.isTracking == true { publishViewport() }
+        if viewportState != nil { publishViewport() } else { publishPosition() }
         viewportState?.setActivelyScrolling(false)
         if pendingScalePublication {
             pendingScalePublication = false
@@ -114,11 +114,16 @@ final class PDFController: NSObject, ObservableObject {
     private func publishViewport(detailed: Bool = true) {
         if !detailed { Jank.tick(.viewportLight) }
         guard let state = viewportState, let doc = document else { return }
-        // 从**当前快照**出发而不是从空白出发：轻发布只改页号与进度，
-        // 若顺手把 pageRects 抹成空，「轻 → 详」来回切会让视口几何在空与满之间反复跳变。
+        let visible = view.bounds
+        if !detailed {
+            if let page = view.page(for: CGPoint(x: visible.midX, y: visible.midY), nearest: true) {
+                state.updateLivePage(doc.index(for: page))
+            }
+            return
+        }
+        // Detailed geometry is computed only after scrolling settles.
         var snapshot = state.snapshot
         snapshot.documentID = viewportDocumentID
-        let visible = view.bounds
         if detailed {
             var rects: [Int: CGRect] = [:]
             for page in view.visiblePages {
@@ -136,6 +141,7 @@ final class PDFController: NSObject, ObservableObject {
             snapshot.centerProgress = min(1, max(0, fraction))
         }
         if state.snapshot != snapshot { state.snapshot = snapshot }
+        state.updateLivePage(snapshot.centerPage)
         // 页号也在这里发：滚动中 `view.currentPage` 要等落定才更新（真机日志出现过
         // 「页=0 而偏移一直在变」），而视口中心页是即时算出来的，跟得住手。
         publishPageIndex(snapshot.centerPage)
@@ -188,26 +194,18 @@ final class PDFController: NSObject, ObservableObject {
         return (doc.index(for: page), min(1, max(0, fraction)))
     }
 
-    /// 面板**显隐动画**（收起 / 展开）：钉住 autoScales，并冻结期间的重排与重绘。
-    ///
-    /// 冻结只加在这一条路上，理由见 `setPanelWidthDragging(_:)`。
+    /// Keep the reading anchor while the PDF layout changes once.
     func setPanelResizing(_ active: Bool) {
-        applyPanelAdjusting(active, freezesRelayout: true)
+        applyPanelAdjusting(active, kind: .visibility)
     }
 
-    /// 拖动分隔线：钉住 autoScales，但**不冻结**重排。
-    ///
-    /// 拖动这条路的反馈就是「正文跟着宽度实时重排」——用户靠它判断该拖到哪儿；
-    /// 一冻结就变成「松手才动」，看着像拖了没反应。而它的重活已经由 `LivePanelWidth`
-    /// 按显示刷新合并过（每帧至多一次重排），不需要再叠一层冻结。
-    ///
-    /// 反过来，**显隐动画**期间没人需要这份反馈：那是 0.3 秒的过场，正文跟着每帧
-    /// 重排 2.5 次（真机实测 2 秒内 layout/draw 各 308 次）纯属浪费，全冻掉。
+    /// Divider dragging retains live layout and has its own lifetime.
     func setPanelWidthDragging(_ active: Bool) {
-        applyPanelAdjusting(active, freezesRelayout: false)
+        applyPanelAdjusting(active, kind: .widthDrag)
     }
 
-    private func applyPanelAdjusting(_ active: Bool, freezesRelayout: Bool) {
+    private func applyPanelAdjusting(_ active: Bool, kind: PanelAdjustment) {
+        panelRestoreGeneration = UUID()
         // 只在跑面板过渡自检时留痕：这条路径平时每拖一次分隔线会走两回，
         // 无条件打印会把正常使用者的日志灌满。
         if LaunchOptions.panelTransitionReport {
@@ -215,6 +213,7 @@ final class PDFController: NSObject, ObservableObject {
                   + "：anchor=\(resizeAnchor == nil ? "无" : "有") autoScales=\(view.autoScales)")
         }
         if active {
+            panelAdjustments.insert(kind)
             guard resizeAnchor == nil,
                   let page = view.page(for: CGPoint(x: view.bounds.midX, y: view.bounds.midY), nearest: true) else {
                 panelTrace.ignoredEnters += 1
@@ -227,19 +226,18 @@ final class PDFController: NSObject, ObservableObject {
             panelTrace.autoScalesAtEnter.append(view.autoScales)
             if let anchor = panelAnchor() { panelTrace.anchorAtEnter.append(anchor) }
             view.autoScales = false
-            // 钉住倍率**之后**再冻结：两者是配套的——倍率不变 ⇒ 页面内容尺寸不变
-            // ⇒ 接下来的重排重绘画的是同一批像素，可以整个省掉。
-            if freezesRelayout { view.isRelayoutFrozen = true }
         } else {
+            panelAdjustments.remove(kind)
+            guard panelAdjustments.isEmpty else { return }
             guard let (page, point, automatic) = resizeAnchor else { return }
-            resizeAnchor = nil
+            let expectedGeneration = panelRestoreGeneration
+            let expectedDocument = document
             panelTrace.exits += 1
             panelTrace.restoreTargets.append(automatic)
             DispatchQueue.main.async { [weak self] in
-                guard let self, self.resizeAnchor == nil else { return }
-                // 解冻必须在恢复 autoScales / 重排之前：反过来的话，下面那句
-                // `layoutDocumentView()` 会被冻结的门挡掉，画面停在旧尺寸上。
-                if freezesRelayout { self.view.isRelayoutFrozen = false }
+                guard let self, self.panelRestoreGeneration == expectedGeneration,
+                      self.document === expectedDocument, self.panelAdjustments.isEmpty else { return }
+                self.resizeAnchor = nil
                 self.view.autoScales = automatic
                 if automatic { self.view.scaleFactor = self.view.scaleFactorForSizeToFit }
                 self.view.layoutDocumentView()
@@ -399,6 +397,9 @@ final class PDFController: NSObject, ObservableObject {
     @discardableResult
     func load(url: URL) -> PDFDocument? {
         guard let doc = PDFDocument(url: url) else { return nil }
+        panelRestoreGeneration = UUID()
+        panelAdjustments.removeAll()
+        resizeAnchor = nil
         viewportIdleWork?.cancel()
         viewportIdleWork = nil
         viewportThrottleWork?.cancel()
@@ -419,6 +420,8 @@ final class PDFController: NSObject, ObservableObject {
 
     func unload() {
         suppressCallbacks = true
+        panelRestoreGeneration = UUID()
+        panelAdjustments.removeAll()
         viewportIdleWork?.cancel()
         viewportIdleWork = nil
         viewportThrottleWork?.cancel()
@@ -454,6 +457,7 @@ final class PDFController: NSObject, ObservableObject {
 
     /// 页号发布的唯一出口：去重（`lastPublishedPage`）在这里做，两条发布路径共用。
     private func publishPageIndex(_ index: Int) {
+        viewportState?.updateLivePage(index)
         guard lastPublishedPage != index else { return }
         lastPublishedPage = index
         onPositionChange?(index, pageCount)
@@ -1608,25 +1612,6 @@ final class AnnotatedPDFView: PDFView {
     /// `menu(for:)` 只读它。默认空闲。
     var ocrMenuDescriptor: OCRMenuDescriptor = .idle
 
-    /// 面板宽度正在变化（拖分隔线 / 面板显隐动画）时冻结**内部重排与重绘**。
-    ///
-    /// 为什么钉住 `autoScales` 还不够：它只保证**倍率**不变，挡不住父布局每帧把框改窄
-    /// 之后 PDFKit 的重新排版——真机实测一段面板动画里 `PDFView.layout` / `draw`
-    /// 各涨了 308 次（2 秒 ≈ 每帧 2.5 次），卡顿全在这里。
-    ///
-    /// 而既然倍率已被钉住，**页面内容尺寸一点没变**，那些重排重绘画的还是同一批像素，
-    /// 是纯浪费。冻结期间让 PDFKit 什么都不做，动画结束再一次性归位。
-    var isRelayoutFrozen = false {
-        didSet {
-            // 解冻这一刻补一次「该重排了」：父布局在冻结期间改过框，
-            // 而那些 `layout()` 调用全被挡掉了，没有这一下画面会停在旧尺寸上。
-            if !isRelayoutFrozen, oldValue {
-                needsLayout = true
-                needsDisplay = true
-            }
-        }
-    }
-
     // MARK: 卡顿自检
 
     /// 卡顿自检：统计 PDFView 每步重排了几次。
@@ -1635,13 +1620,8 @@ final class AnnotatedPDFView: PDFView {
     /// 如果一步拖动换来的是一次 `layout`，而其中又开着 `autoScales`，PDFKit 就会
     /// 为新的宽度重新绘制当前页——那正是手感抖动的来源。
     ///
-    /// 冻结期间**不计数**：要证明的是「重排没发生」，`frozen` 那条计数负责证明
-    /// 「门确实被敲过、是被挡掉的」，两者分开才说得清。
+    /// These counters measure PDFView callbacks, not tile-render completion.
     override func layout() {
-        guard !isRelayoutFrozen else {
-            Jank.tick(.pdfViewFrozen)
-            return
-        }
         Jank.tick(.pdfViewLayout)
         super.layout()
     }
@@ -1652,10 +1632,6 @@ final class AnnotatedPDFView: PDFView {
     /// 若两者一起涨，就坐实了「每帧重排 + 每帧重光栅化」这条链路；若只有 `layout` 涨、
     /// `draw` 不涨，那重光栅化其实是 PDFKit 在别处懒做的，优化点也就不在这一层。
     override func draw(_ dirtyRect: NSRect) {
-        guard !isRelayoutFrozen else {
-            Jank.tick(.pdfViewFrozen)
-            return
-        }
         Jank.tick(.pdfViewDraw)
         super.draw(dirtyRect)
     }
