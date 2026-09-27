@@ -11,7 +11,7 @@ swift test --disable-sandbox
 
 版本号必须为 `vN.M.P`，且等于 `Resources/Info.plist` 的 `CFBundleShortVersionString`。普通构建写到 `dist/Lumen.app`；本地打包写到 `releases/vN.M.P/`。`--no-upload` 不创建标签、不推送、不建立 GitHub Release，允许包含未提交改动以供审阅，`build-info.txt` 会标记 dirty。
 
-发布目录包含 ZIP、可选 DMG、SHA256SUMS、build-info.txt 与 build-stamp.txt。同版本重复本地打包会替换该目录中的同名包；正式发布版应保留，下一次发布递增版本。ZIP 内顶层为 Lumen.app。当前只构建本机架构，不能宣传为 Universal。
+发布目录包含 ZIP、可选 DMG、SHA256SUMS、build-info.txt 与 build-stamp.txt。`build-info.txt` 记录版本、构建号、提交、架构、签名身份及签名验证结果。同版本重复本地打包会替换该目录中的同名包；正式发布版应保留，下一次发布递增版本。ZIP 内顶层为 Lumen.app。当前只构建本机架构，不能宣传为 Universal。
 
 ```bash
 cd releases/v1.1.0

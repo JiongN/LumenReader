@@ -99,10 +99,14 @@ fi
 
 # Local review must not create tags or contact the remote.
 cp "$BUNDLE/Contents/Resources/lumen-build-stamp" "$OUT_DIR/build-stamp.txt"
+SIGNATURE="$(codesign -dv --verbose=2 "$BUNDLE" 2>&1 | awk -F= '/^Authority=/{print $2; exit} /^Signature=/{print $2; exit}')"
 {
     echo "version=$VERSION"
+    echo "bundle_version=$PLIST_BUILD"
     echo "commit=$(git rev-parse HEAD)"
     echo "architecture=$(uname -m)"
+    echo "signature=${SIGNATURE:-unknown}"
+    echo "signature_verified=true"
     echo "working_tree_dirty=$(test -z "$(git status --porcelain)" && echo false || echo true)"
 } > "$OUT_DIR/build-info.txt"
 (cd "$OUT_DIR" && shasum -a 256 "$(basename "$ZIP")" > SHA256SUMS)
