@@ -99,7 +99,11 @@ fi
 
 # Local review must not create tags or contact the remote.
 cp "$BUNDLE/Contents/Resources/lumen-build-stamp" "$OUT_DIR/build-stamp.txt"
-SIGNATURE="$(codesign -dv --verbose=2 "$BUNDLE" 2>&1 | awk -F= '/^Authority=/{print $2; exit} /^Signature=/{print $2; exit}')"
+SIGNATURE="$(codesign -dv --verbose=2 "$BUNDLE" 2>&1 | awk -F= '
+    /^Authority=/ && authority == "" { authority=$2 }
+    /^Signature=/ && signature == "" { signature=$2 }
+    END { if (authority != "") print authority; else print signature }
+')"
 {
     echo "version=$VERSION"
     echo "bundle_version=$PLIST_BUILD"
