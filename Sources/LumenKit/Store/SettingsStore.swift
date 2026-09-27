@@ -144,12 +144,7 @@ public final class SettingsStore: ObservableObject {
 
     // MARK: - 面板宽度
 
-    /// 提交侧栏宽度。**兼容保留，布局已不再读取它。**
-    ///
-    /// 侧栏宽度自本批起固定为 `DS.Size.sidebarIdeal`（248pt），界面上也没有拖它的
-    /// 入口了。这个方法保留下来只为「旧 `--panel-width` 的侧栏分量仍被写一处」——
-    /// 写进去的值会经过与从前完全相同的钳制，但不会再影响版面。
-    /// 新代码请用 `commitAIPanelWidth`。
+    /// 提交侧栏宽度；拖拽结束与双击复位均走此处。
     ///
     /// - Parameter maxWidth: 按当前窗口宽度算出的动态上限；`nil` 表示只按静态范围钳。
     public func commitSidebarWidth(_ value: Double, maxWidth: Double? = nil) {

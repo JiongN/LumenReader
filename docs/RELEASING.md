@@ -44,4 +44,4 @@ codesign --verify --strict --deep ../../dist/Lumen.app
 - `./build.sh clean` 清构建缓存与当前 app；失败会非零退出，不触碰 releases 或应用数据。
 - 不把 credentials、真实 PDF、用户聊天或密钥复制进发布包。
 
-本次审计只进行本地修改和本地打包，未推送源码、tag 或创建新 GitHub Release。
+每次发布以实际 GitHub tag、Release 资产和 `SHA256SUMS` 核验结果为准；本地构建成功不等于远端发布成功。

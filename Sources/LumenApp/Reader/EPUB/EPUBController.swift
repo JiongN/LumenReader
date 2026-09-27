@@ -34,6 +34,7 @@ final class EPUBController: NSObject, ObservableObject {
     /// 不是文本的一部分，模型层不该为它加字段。两条回调在同一轮 runloop 里先后触发，
     /// 视图层用它们一起写 `ReaderBridge.selection / selectionFromDrag`，不会错位。
     var onSelectionSourceChange: ((Bool) -> Void)?
+    var onSelectionAnchorChange: ((CGPoint) -> Void)?
     /// (chapterIndex, chapterCount, 章节内进度 0…1, 是否已到章末)
     var onProgress: ((Int, Int, Double, Bool) -> Void)?
     /// 点中正文里的批注高亮（<mark class="lumen-hl">）时回调，参数是批注条目 id。
@@ -53,7 +54,7 @@ final class EPUBController: NSObject, ObservableObject {
     /// 做成闭包而不是让 Controller 持有存储：Controller 只管渲染，
     /// 「批注存在哪里」是视图层的事——PDF 那边批注写在文件里，两条路径的存储完全不同，
     /// 在这里注入一个「取批注」的口子，两边就能共用同一套 JS。
-    var highlightsProvider: ((_ chapterIndex: Int) -> [(id: String, quote: String)])?
+    var highlightsProvider: ((_ chapterIndex: Int) -> [(id: String, quote: String, hex: String)])?
 
     private var theme: ReadingTheme
     private var reader: ReaderSettings
@@ -66,7 +67,9 @@ final class EPUBController: NSObject, ObservableObject {
 
         let configuration = WKWebViewConfiguration()
         configuration.suppressesIncrementalRendering = false
-        configuration.defaultWebpagePreferences.allowsContentJavaScript = true
+        // EPUB 是不受信任的内容。禁止书内 script / 内联事件；Lumen 的 WKUserScript
+        // 仍在应用管理的内容世界中运行，负责排版、选区和逐段翻译。
+        configuration.defaultWebpagePreferences.allowsContentJavaScript = false
 
         let controller = WKUserContentController()
         configuration.userContentController = controller
@@ -148,7 +151,7 @@ final class EPUBController: NSObject, ObservableObject {
             // 用「引文匹配」而不是字符偏移：EPUB 重新排版（换字号、换字体会重排）
             // 之后偏移量全部失效，而引文还在。找不到引文就不画——宁可少一个高亮，
             // 也不要在错误的位置划出一条线，那会让读者以为批注挂错了地方。
-            highlight: function (id, quote) {
+            highlight: function (id, quote, hex) {
               if (!quote) { return false; }
               var norm = function (s) { return (s || '').replace(/\\s+/g, ' ').trim(); };
               var target = norm(quote);
@@ -194,6 +197,10 @@ final class EPUBController: NSObject, ObservableObject {
                   var mark = document.createElement('mark');
                   mark.className = 'lumen-hl';
                   mark.setAttribute('data-lumen-id', id);
+                  if (/^#[0-9a-fA-F]{6}$/.test(hex)) {
+                    var rgb = [1, 3, 5].map(function (offset) { return parseInt(hex.slice(offset, offset + 2), 16); });
+                    mark.style.setProperty('--lm-highlight-rgb', rgb.join(', '));
+                  }
                   range.surroundContents(mark);
                 } catch (e) {
                   // surroundContents 遇到跨元素边界会抛错；跳过这一段，其余照画
@@ -212,6 +219,13 @@ final class EPUBController: NSObject, ObservableObject {
                 parent.normalize();
               }
               return true;
+            },
+            recolorHighlight: function (id, hex) {
+              if (!/^#[0-9a-fA-F]{6}$/.test(hex)) { return false; }
+              var rgb = [1, 3, 5].map(function (offset) { return parseInt(hex.slice(offset, offset + 2), 16); });
+              var marks = document.querySelectorAll('mark.lumen-hl[data-lumen-id="' + id + '"]');
+              marks.forEach(function (mark) { mark.style.setProperty('--lm-highlight-rgb', rgb.join(', ')); });
+              return marks.length > 0;
             },
             clearHighlights: function () {
               var marks = document.querySelectorAll('mark.lumen-hl');
@@ -345,6 +359,7 @@ final class EPUBController: NSObject, ObservableObject {
               return;
             }
             var range = sel.getRangeAt(0);
+            var rect = range.getBoundingClientRect();
             var node = range.startContainer;
             var block = node.nodeType === 1 ? node : node.parentElement;
             while (block && block !== document.body) {
@@ -360,7 +375,9 @@ final class EPUBController: NSObject, ObservableObject {
               offset: index < 0 ? 0 : index,
               preceding: index > 0 ? full.slice(Math.max(0, index - 900), index) : '',
               following: index >= 0 ? full.slice(index + text.length, index + text.length + 900) : '',
-              fromDrag: __lumenDragGesture || deliberate === true
+              fromDrag: __lumenDragGesture || deliberate === true,
+              anchorX: Math.max(0, Math.min(1, (rect.right || rect.left) / window.innerWidth)),
+              anchorY: Math.max(0, Math.min(1, rect.bottom / window.innerHeight))
             });
           }
           // 键盘框选（shift+方向键）与触摸选择都是**有意为之**的选择，不算单击，放行；
@@ -376,7 +393,11 @@ final class EPUBController: NSObject, ObservableObject {
             if (!mark) { return; }
             var id = mark.getAttribute('data-lumen-id');
             if (id) {
-              window.webkit.messageHandlers.\(Self.messageHandlerName).postMessage({ type: 'highlight', id: id });
+              window.webkit.messageHandlers.\(Self.messageHandlerName).postMessage({
+                type: 'highlight', id: id,
+                anchorX: e.clientX / window.innerWidth,
+                anchorY: e.clientY / window.innerHeight
+              });
             }
           });
         })();
@@ -409,13 +430,13 @@ final class EPUBController: NSObject, ObservableObject {
     /* 批注高亮。半透明黄底 + 极淡的下划线：既要一眼看见，又不能把正文压得看不清。
        用 background 而不是 border，是因为高亮常跨行，border 会在行间断开。 */
     mark.lumen-hl {
-      background: rgba(255, 214, 64, 0.42) !important;
+      background: rgba(var(--lm-highlight-rgb, 255, 214, 64), 0.42) !important;
       color: inherit !important;
       border-radius: 2px;
       padding: 0 1px;
     }
     html.lumen-dark mark.lumen-hl {
-      background: rgba(255, 214, 64, 0.28) !important;
+      background: rgba(var(--lm-highlight-rgb, 255, 214, 64), 0.28) !important;
     }
     html.lumen-dark body, html.lumen-dark p, html.lumen-dark div, html.lumen-dark span,
     html.lumen-dark li, html.lumen-dark td, html.lumen-dark th, html.lumen-dark dd,
@@ -503,7 +524,12 @@ extension EPUBController {
 
         let chapter = source.chapters[index]
         // 允许访问整个解包目录，这样 ../images/ 这类相对资源才能被加载
-        webView.loadFileURL(chapter.fileURL, allowingReadAccessTo: source.rootURL)
+        if LaunchOptions.flag("--epub-layout-report") {
+            NSLog("[Lumen][epub-load] chapter=%@ root=%@", chapter.fileURL.path, source.rootURL.path)
+        }
+        // /private/tmp 与 /tmp 指向同一目录，但 WebKit 的文件读取授权按 URL
+        // 路径生效。章节 URL 已由 resourceURL 解析符号链接；根目录必须同样解析。
+        webView.loadFileURL(chapter.fileURL, allowingReadAccessTo: source.rootURL.resolvingSymlinksInPath())
 
         pendingAnchor = anchor
     }
@@ -550,8 +576,13 @@ extension EPUBController {
         for item in provider(currentChapterIndex) {
             let id = Self.jsString(item.id)
             let quote = Self.jsString(item.quote)
-            webView.evaluateJavaScript("window.__lumen && window.__lumen.highlight(\(id), \(quote));")
+            let hex = Self.jsString(item.hex)
+            webView.evaluateJavaScript("window.__lumen && window.__lumen.highlight(\(id), \(quote), \(hex));")
         }
+    }
+
+    func recolorHighlight(id: String, hex: String) {
+        webView.evaluateJavaScript("window.__lumen && window.__lumen.recolorHighlight(\(Self.jsString(id)), \(Self.jsString(hex)));")
     }
 
     /// 移除一条高亮。删除批注时立刻反映到页面上，不必重新加载章节。
@@ -678,6 +709,7 @@ extension EPUBController {
 extension EPUBController: WKNavigationDelegate {
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        if LaunchOptions.flag("--epub-layout-report") { NSLog("[Lumen][epub-load] didFinish") }
         isLoadingChapter = false
         applyTheme(theme, reader: reader)
         if !pendingAnchor.isEmpty {
@@ -711,6 +743,9 @@ extension EPUBController: WKNavigationDelegate {
 
     private func reportLoadFailure(_ error: Error) {
         guard (error as NSError).code != NSURLErrorCancelled else { return }
+        if LaunchOptions.flag("--epub-layout-report") {
+            NSLog("[Lumen][epub-load] navigation failed: %@", error.localizedDescription)
+        }
         isLoadingChapter = false
         onLoadError?(error.localizedDescription)
     }
@@ -725,7 +760,7 @@ extension EPUBController: WKNavigationDelegate {
     func webView(
         _ webView: WKWebView,
         decidePolicyFor navigationAction: WKNavigationAction,
-        decisionHandler: @escaping (WKNavigationActionPolicy) -> Void
+        decisionHandler: @escaping @MainActor @Sendable (WKNavigationActionPolicy) -> Void
     ) {
         guard let url = navigationAction.request.url else {
             decisionHandler(.allow)
@@ -733,6 +768,9 @@ extension EPUBController: WKNavigationDelegate {
         }
 
         if url.isFileURL {
+            if LaunchOptions.flag("--epub-layout-report") {
+                NSLog("[Lumen][epub-load] navigation=%@ type=%d", url.path, navigationAction.navigationType.rawValue)
+            }
             guard let source,
                   url.standardizedFileURL.resolvingSymlinksInPath().path.hasPrefix(
                     source.rootURL.standardizedFileURL.resolvingSymlinksInPath().path + "/"
@@ -798,6 +836,9 @@ extension EPUBController: WKScriptMessageHandler {
                 return
             }
             let offset = body["offset"] as? Int ?? 0
+            if let x = body["anchorX"] as? Double, let y = body["anchorY"] as? Double {
+                onSelectionAnchorChange?(CGPoint(x: x, y: y))
+            }
             onSelectionSourceChange?(fromDrag)
             onSelection?(ReaderSelection(
                 text: text,
@@ -818,6 +859,9 @@ extension EPUBController: WKScriptMessageHandler {
 
         case "highlight":
             if let id = body["id"] as? String, !id.isEmpty {
+                if let x = body["anchorX"] as? Double, let y = body["anchorY"] as? Double {
+                    onSelectionAnchorChange?(CGPoint(x: x, y: y))
+                }
                 onHighlightTapped?(id)
             }
 

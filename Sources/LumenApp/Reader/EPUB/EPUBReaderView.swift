@@ -236,6 +236,10 @@ struct EPUBReaderView: View {
         // 划词条只在 `isUsable && selectionFromDrag` 时出现（单击不弹）。
         controller.onSelectionSourceChange = { [weak bridge] fromDrag in
             bridge?.selectionFromDrag = fromDrag
+            if fromDrag { bridge?.selectedAnnotationID = nil }
+        }
+        controller.onSelectionAnchorChange = { [weak bridge] anchor in
+            bridge?.selectionAnchor = anchor
         }
 
         // 生效栏数由排版脚本回传（窄窗口会把双栏压回单栏），外壳的文案据此写。
@@ -373,10 +377,10 @@ struct EPUBReaderView: View {
         controller.highlightsProvider = { chapter in
             store.items
                 .filter { $0.locator.chapterIndex == chapter && $0.hasHighlight && !$0.quote.isEmpty }
-                .map { (id: $0.id, quote: $0.quote) }
+                .map { (id: $0.id, quote: $0.quote, hex: $0.highlightHex ?? "#FFD640") }
         }
 
-        bridge.addHighlight = { note in
+        func addHighlight(_ note: String, hex: String) {
             guard let selection = bridge.selection, selection.isUsable else {
                 state.showToast("先在正文里划选一段文字", isError: true)
                 return
@@ -387,7 +391,8 @@ struct EPUBReaderView: View {
                 quote: selection.text,
                 note: note,
                 hasHighlight: true,
-                createdAt: Date()
+                createdAt: Date(),
+                highlightHex: hex
             )
             guard store.add(item) else {
                 state.showToast("这一处已经标注过了")
@@ -396,6 +401,14 @@ struct EPUBReaderView: View {
             controller.applyHighlights()
             bridge.annotationRevision += 1
             state.showToast(note.isEmpty ? "已高亮" : "已加入批注")
+        }
+        bridge.addHighlight = { note in addHighlight(note, hex: "#FFD640") }
+        bridge.addHighlightWithColor = { note, hex in addHighlight(note, hex: hex) }
+        bridge.updateHighlightColor = { id, hex in
+            guard store.updateHighlightColor(id: id, hex: hex) else { return false }
+            controller.recolorHighlight(id: id, hex: hex)
+            bridge.annotationRevision += 1
+            return true
         }
 
         bridge.addPageNote = { chapterIndex, anchorText, body in
@@ -463,9 +476,10 @@ struct EPUBReaderView: View {
             return item
         }
         // 正文里点高亮 → 侧栏聚焦对应行（与 PDF 侧的 onAnnotationTapped 对应）
-        controller.onHighlightTapped = { [weak bridge, weak state] id in
+        controller.onHighlightTapped = { [weak bridge] id in
+            bridge?.selectedAnnotationID = id
+            bridge?.selectionFromDrag = false
             bridge?.focusAnnotation(id)
-            state?.revealSidebar(tab: .annotations)
         }
     }
 

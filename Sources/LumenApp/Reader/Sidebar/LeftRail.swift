@@ -18,7 +18,7 @@ struct LeftRail: View {
     /// 图标栏宽度。52pt 是「看着窄、点得中」的折中：
     /// 44pt 时手指（触控板光标）落在两个图标之间的空隙概率明显上升，
     /// 60pt 以上则在 920pt 的最小窗口里开始明显吃掉阅读区。
-    static let width: CGFloat = 56
+    nonisolated static let width: CGFloat = 56
 
     let tabs: [SidebarTab]
     let activeTab: SidebarTab

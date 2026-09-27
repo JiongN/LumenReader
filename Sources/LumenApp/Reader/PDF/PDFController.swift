@@ -15,14 +15,18 @@ final class PDFController: NSObject, ObservableObject {
     private(set) var document: PDFDocument?
     private(set) var documentURL: URL?
     private(set) var pageCount = 0
-    private var observers: [NSObjectProtocol] = []
+    private var saveTail: Task<PDFLargeAnnotationSave.Fingerprint?, Never>?
+    private(set) var pendingSaveCount = 0
+    private var dirtyLumenPages = Set<Int>()
+    private var saveGeneration = UUID()
+    private nonisolated(unsafe) var observers: [NSObjectProtocol] = []
     private var suppressCallbacks = false
     private var lastPublishedPage: Int?
     private weak var viewportState: PDFViewportState?
-    private var viewportObserver: NSObjectProtocol?
-    private var viewportIdleWork: DispatchWorkItem?
+    private nonisolated(unsafe) var viewportObserver: NSObjectProtocol?
+    private nonisolated(unsafe) var viewportIdleWork: DispatchWorkItem?
     /// 滚动期间「轻发布」的在途工作。非 nil 表示已经排了一个，不必再排。
-    private var viewportThrottleWork: DispatchWorkItem?
+    private nonisolated(unsafe) var viewportThrottleWork: DispatchWorkItem?
 
     /// 停稳多久算「滚完了」：到点后补发整份视口几何（重活）。
     private static let viewportSettleDelay: Double = 0.22
@@ -225,7 +229,9 @@ final class PDFController: NSObject, ObservableObject {
             panelTrace.enters += 1
             panelTrace.autoScalesAtEnter.append(view.autoScales)
             if let anchor = panelAnchor() { panelTrace.anchorAtEnter.append(anchor) }
-            view.autoScales = false
+            // 显隐动画仍钉住倍率；分隔线拖动要让适宽 PDF 随正文宽度实时缩放。
+            // 拖动事件已经由 LivePanelWidth 按显示帧合并，避免重复重排。
+            if kind == .visibility { view.autoScales = false }
         } else {
             panelAdjustments.remove(kind)
             guard panelAdjustments.isEmpty else { return }
@@ -275,6 +281,7 @@ final class PDFController: NSObject, ObservableObject {
 
     var onPositionChange: ((Int, Int) -> Void)?          // (pageIndex, pageCount)
     var onSelectionChange: ((ReaderSelection?) -> Void)?
+    var onInteractionAnchor: ((CGPoint) -> Void)?
     var onOutline: (([OutlineNode]) -> Void)?
 
     /// 右键菜单点了「识别本页文字（OCR）」时递增。
@@ -352,9 +359,12 @@ final class PDFController: NSObject, ObservableObject {
         observers.append(center.addObserver(
             forName: .PDFViewAnnotationHit, object: view, queue: .main
         ) { [weak self] notification in
+            // The observer explicitly runs on OperationQueue.main. Foundation's
+            // callback signature does not encode that isolation in Swift 6.
+            nonisolated(unsafe) let mainQueueNotification = notification
             MainActor.assumeIsolated {
                 guard let self,
-                      let annotation = notification.userInfo?["PDFAnnotationHitKey"] as? PDFAnnotation
+                      let annotation = mainQueueNotification.userInfo?["PDFAnnotationHitKey"] as? PDFAnnotation
                 else { return }
                 // 搜索临时高亮与便签自动带的 Popup 影子不是批注条目，点了不响应
                 guard annotation.userName != Self.searchHighlightMarker,
@@ -398,6 +408,8 @@ final class PDFController: NSObject, ObservableObject {
     func load(url: URL) -> PDFDocument? {
         guard let doc = PDFDocument(url: url) else { return nil }
         panelRestoreGeneration = UUID()
+        saveGeneration = UUID()
+        dirtyLumenPages.removeAll()
         panelAdjustments.removeAll()
         resizeAnchor = nil
         viewportIdleWork?.cancel()
@@ -421,6 +433,8 @@ final class PDFController: NSObject, ObservableObject {
     func unload() {
         suppressCallbacks = true
         panelRestoreGeneration = UUID()
+        saveGeneration = UUID()
+        dirtyLumenPages.removeAll()
         panelAdjustments.removeAll()
         viewportIdleWork?.cancel()
         viewportIdleWork = nil
@@ -503,7 +517,7 @@ final class PDFController: NSObject, ObservableObject {
     /// 视图层据此写进 `ReaderBridge.selectionFromDrag`。程序化选区（搜索定位、侧栏
     /// 联动）不经过鼠标手势，会保留上一次手势的值——这不影响主诉求（单击不弹），
     /// 且程序化选中一段并显示浮条在语义上也说得通。
-    var isSelectionFromDrag: Bool { view.lastGestureWasDrag }
+    var isSelectionFromDrag: Bool { view.lastGestureWasDrag && !view.isSelectionGestureActive }
 
     /// 当前页此刻的 OCR 菜单状态。视图层把它写进 `AnnotatedPDFView.ocrMenuDescriptor`。
     func ocrMenuDescriptor(isRunning: Bool) -> OCRMenuDescriptor {
@@ -771,7 +785,7 @@ final class PDFController: NSObject, ObservableObject {
     ///   - progress: 每页回调一次，用来驱动进度卡片。
     func extractFullText(
         allowOCR: Bool,
-        progress: (TextExtractionProgress) -> Void
+        progress: @MainActor (TextExtractionProgress) -> Void
     ) async -> DocumentTextReport {
         guard let doc = document else { return DocumentTextReport() }
 
@@ -936,7 +950,7 @@ final class PDFController: NSObject, ObservableObject {
     // MARK: - 批注（写入原 PDF 文件）
 
     /// 我们创建的批注都带这个作者标记，与搜索高亮、外来批注（Preview / Acrobat 画的）区分。
-    private static let annotationAuthor = "Lumen"
+    nonisolated static let annotationAuthor = "Lumen"
 
     /// 把「划线片段」扩成它所在的**整行**。
     ///
@@ -1018,13 +1032,16 @@ final class PDFController: NSObject, ObservableObject {
     /// 每页使用一个标准 QuadPoints 高亮，跨行仍属于同一条批注。
     /// - Returns: 是否至少画上了一处（扫描件上没有文本层时选区是空的）。
     @discardableResult
-    func addHighlight(fromCurrentSelection note: String) -> Bool {
+    func addHighlight(fromCurrentSelection note: String, colorHex: String = "#FFD54F") -> Bool {
         guard let selection = view.currentSelection, document != nil else { return false }
 
-        guard addMarkup(selection: selection, note: note, color: NSColor.systemYellow.withAlphaComponent(0.45)) else { return false }
+        let rgb = UInt32(colorHex.dropFirst(colorHex.hasPrefix("#") ? 1 : 0), radix: 16) ?? 0xFFD54F
+        guard addMarkup(selection: selection, note: note,
+                        color: NSColor(hex: rgb).withAlphaComponent(0.45)) else { return false }
         // 选区已被「用掉」：高亮之后还留着蓝色选区会让人以为没生效
         view.setCurrentSelection(nil, animate: false)
-        return saveToFile()
+        let pages = Set(selection.pages.compactMap { document?.index(for: $0) })
+        return saveToFile(changedLumenPages: pages)
     }
 
     private func addMarkup(selection: PDFSelection, note: String, color: NSColor) -> Bool {
@@ -1056,7 +1073,7 @@ final class PDFController: NSObject, ObservableObject {
         // 锚文本定位：在**本页**范围内找，避免全书 findString 把别的页的同名句抢走
         if trimmedAnchor.count >= 6, let anchorSelection = selection(of: trimmedAnchor, on: pageIndex) {
             if addMarkup(selection: anchorSelection, note: body, color: NSColor.systemTeal.withAlphaComponent(0.40)) {
-                return saveToFile()
+                return saveToFile(changedLumenPages: [pageIndex])
             }
         }
 
@@ -1070,7 +1087,7 @@ final class PDFController: NSObject, ObservableObject {
         annotation.modificationDate = stamp
         annotation.color = NSColor.systemTeal
         page.addAnnotation(annotation)
-        return saveToFile()
+        return saveToFile(changedLumenPages: [pageIndex])
     }
 
     /// 当前选区的划线原文（创建批注条目时用）。
@@ -1299,8 +1316,11 @@ final class PDFController: NSObject, ObservableObject {
         guard let doc = document,
               let entry = enumerateAnnotationEntries().first(where: { $0.id == id }),
               let page = doc.page(at: entry.pageIndex) else { return false }
+        guard entry.members.allSatisfy({ $0.userName == Self.annotationAuthor }) || pendingSaveCount == 0
+        else { onFileSaved?(false, "请等待当前 PDF 保存完成后再修改外部批注"); return false }
         entry.members.forEach { page.removeAnnotation($0) }
-        return saveToFile()
+        return saveToFile(changedLumenPages:
+            entry.members.allSatisfy { $0.userName == Self.annotationAuthor } ? [entry.pageIndex] : nil)
     }
 
     /// 清单条目 id 的**基串**（列表、删除、更新、定位共用）。
@@ -1331,8 +1351,29 @@ final class PDFController: NSObject, ObservableObject {
     @discardableResult
     func updateNote(id: String, body: String) -> Bool {
         guard let entry = enumerateAnnotationEntries().first(where: { $0.id == id }) else { return false }
+        guard entry.members.allSatisfy({ $0.userName == Self.annotationAuthor }) || pendingSaveCount == 0
+        else { onFileSaved?(false, "请等待当前 PDF 保存完成后再修改外部批注"); return false }
         entry.members.forEach { $0.contents = body }
-        return saveToFile()
+        return saveToFile(changedLumenPages:
+            entry.members.allSatisfy { $0.userName == Self.annotationAuthor } ? [entry.pageIndex] : nil)
+    }
+
+    @discardableResult
+    func updateHighlightColor(id: String, hex: String) -> Bool {
+        guard let entry = enumerateAnnotationEntries().first(where: { $0.id == id }),
+              entry.members.allSatisfy(\.lumenIsMarkup) else { return false }
+        guard entry.members.allSatisfy({ $0.userName == Self.annotationAuthor }) || pendingSaveCount == 0
+        else { onFileSaved?(false, "请等待当前 PDF 保存完成后再修改外部批注"); return false }
+        guard let rgb = UInt32(hex.dropFirst(hex.hasPrefix("#") ? 1 : 0), radix: 16) else { return false }
+        let color = NSColor(hex: rgb).withAlphaComponent(0.45)
+        let previous = entry.members.map(\.color)
+        entry.members.forEach { $0.color = color }
+        guard saveToFile(changedLumenPages:
+            entry.members.allSatisfy { $0.userName == Self.annotationAuthor } ? [entry.pageIndex] : nil) else {
+            for (annotation, oldColor) in zip(entry.members, previous) { annotation.color = oldColor }
+            return false
+        }
+        return true
     }
 
     /// 按 id 定位一条批注：翻到所在页、滚到批注的位置，划线类还会短暂选中原文——
@@ -1376,6 +1417,7 @@ final class PDFController: NSObject, ObservableObject {
     func normalizeAnnotationRows() -> Int {
         guard let doc = document else { return 0 }
         var changed = 0
+        var changedPages = Set<Int>()
         for entry in enumerateAnnotationEntries() {
             guard let page = doc.page(at: entry.pageIndex) else { continue }
             var groupChanged = false
@@ -1388,10 +1430,10 @@ final class PDFController: NSObject, ObservableObject {
                 annotation.bounds = row
                 groupChanged = true
             }
-            if groupChanged { changed += 1 }
+            if groupChanged { changed += 1; changedPages.insert(entry.pageIndex) }
         }
         guard changed > 0 else { return 0 }
-        return saveToFile() ? changed : 0
+        return saveToFile(changedLumenPages: changedPages) ? changed : 0
     }
 
     /// 在当前页加一条空白便签并返回它的清单条目（批注面板「新建」走这里）。
@@ -1412,7 +1454,7 @@ final class PDFController: NSObject, ObservableObject {
         annotation.modificationDate = stamp
         annotation.color = NSColor.systemTeal
         page.addAnnotation(annotation)
-        guard saveToFile() else { return nil }
+        guard saveToFile(changedLumenPages: [pageIndex]) else { return nil }
 
         // id 必须走与清单**同一个**枚举源：直接算 entryID 会漏掉 #k 序号，
         // 于是新建出来的那条 id 与列表里的对不上，紧接着的「编辑」会找不到它。
@@ -1442,11 +1484,81 @@ final class PDFController: NSObject, ObservableObject {
     /// 先摘除搜索临时高亮再取字节流，写完放回去——搜索痕迹绝不能固化进用户的书。
     /// 原子写：写坏一半的 PDF 比没有批注严重得多。
     @discardableResult
-    func saveToFile() -> Bool {
+    func saveToFile(changedLumenPages: Set<Int>? = nil) -> Bool {
         guard let doc = document, let url = documentURL else { return false }
+
+        // On a large book, copying the live document's entire byte stream can
+        // block the main thread for many seconds and double its memory use.
+        // Snapshot just our annotations, then open a *different* PDFDocument on
+        // a worker. External annotations use the conservative synchronous path.
+        let size = (try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0
+        if size >= 64 * 1_048_576 && changedLumenPages == nil && pendingSaveCount > 0 {
+            onFileSaved?(false, "请等待当前 PDF 保存完成后再保存")
+            return false
+        }
+        if size >= 64 * 1_048_576, let changedLumenPages, !changedLumenPages.isEmpty {
+            do {
+                dirtyLumenPages.formUnion(changedLumenPages)
+                let snapshot = try PDFLargeAnnotationSave.capture(document: doc, pages: dirtyLumenPages)
+                let expectedPages = doc.pageCount
+                let baseline = try PDFLargeAnnotationSave.fingerprint(of: url)
+                let previous = saveTail
+                let generation = saveGeneration
+                pendingSaveCount += 1
+                PDFPendingSaves.begin()
+                saveTail = Task { [weak self] in
+                    let prior = await previous?.value
+                    let expected = previous == nil ? baseline : prior
+                    let outcome = await Task.detached(priority: .utility) {
+                        do {
+                            guard let expected else { throw PDFLargeAnnotationSave.SaveError.previousFailed }
+                            let fingerprint = try PDFLargeAnnotationSave.write(
+                                url: url, expectedPages: expectedPages, pages: snapshot,
+                                expectedFingerprint: expected)
+                            return Result<PDFLargeAnnotationSave.Fingerprint, Error>.success(fingerprint)
+                        } catch { return Result<PDFLargeAnnotationSave.Fingerprint, Error>.failure(error) }
+                    }.value
+                    guard let self else { PDFPendingSaves.end(); return try? outcome.get() }
+                    self.pendingSaveCount -= 1
+                    PDFPendingSaves.end()
+                    if self.documentURL == url && self.saveGeneration == generation {
+                        switch outcome {
+                        case .success:
+                            if self.pendingSaveCount == 0 { self.dirtyLumenPages.removeAll() }
+                            self.onFileSaved?(true, "大文件批注已保存")
+                        case .failure(let error): self.onFileSaved?(false, "保存失败：\(error.localizedDescription)")
+                        }
+                    }
+                    if self.pendingSaveCount == 0 { self.saveTail = nil }
+                    return try? outcome.get()
+                }
+                return true // accepted; completion is reported through onFileSaved
+            } catch {
+                onFileSaved?(false, "无法准备批注保存：\(error.localizedDescription)")
+                return false
+            }
+        }
 
         detachSearchHighlights()
         defer { reattachSearchHighlights() }
+
+        if size >= 64 * 1_048_576 {
+            let temporary = url.deletingLastPathComponent()
+                .appendingPathComponent(".\(url.lastPathComponent).lumen-\(UUID().uuidString).tmp")
+            defer { try? FileManager.default.removeItem(at: temporary) }
+            guard PDFOriginalRendering.write(doc, to: temporary) else {
+                onFileSaved?(false, "无法写入临时 PDF")
+                return false
+            }
+            do {
+                _ = try FileManager.default.replaceItemAt(url, withItemAt: temporary)
+                onFileSaved?(true, "已保存到原文件")
+                return true
+            } catch {
+                onFileSaved?(false, "保存失败：\(error.localizedDescription)")
+                return false
+            }
+        }
 
         guard let data = PDFOriginalRendering.data(of: doc) else {
             onFileSaved?(false, "无法生成 PDF 数据")
@@ -1601,6 +1713,7 @@ final class AnnotatedPDFView: PDFView {
     private(set) var lastGestureWasDrag = false
     /// 按下点（视图坐标）。仅在手势进行中有值。
     private var gestureStart: NSPoint?
+    var isSelectionGestureActive: Bool { gestureStart != nil }
 
     /// 「识别本页文字（OCR）」被点中时的回调，由视图层接上 `Task { await runOCR() }`。
     ///
@@ -1664,13 +1777,19 @@ final class AnnotatedPDFView: PDFView {
                 lastGestureWasDrag = true
             }
         }
+        let location = convert(event.locationInWindow, from: nil)
+        if bounds.width > 0, bounds.height > 0 {
+            controller?.onInteractionAnchor?(CGPoint(
+                x: min(max(location.x / bounds.width, 0), 1),
+                y: min(max(isFlipped ? location.y / bounds.height : 1 - location.y / bounds.height, 0), 1)
+            ))
+        }
         gestureStart = nil
         super.mouseUp(with: event)
         // 手势结束后补发一次选区：PDFKit 在拖动过程中已经发过 selectionChanged，
         // 那一轮的来源标记可能还没越过阈值；松手这一刻再发布，保证最终状态同步到桥。
         controller?.refreshSelectionFromGesture()
         if !lastGestureWasDrag {
-            let location = convert(event.locationInWindow, from: nil)
             if let page = page(for: location, nearest: false) {
                 let point = convert(location, to: page)
                 if let annotation = page.annotations.reversed().first(where: {

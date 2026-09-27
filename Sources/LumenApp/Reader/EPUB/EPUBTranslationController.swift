@@ -1,6 +1,6 @@
 import Foundation
 import LumenKit
-import Translation
+@preconcurrency import Translation
 
 enum EPUBTranslationState: String, Sendable {
     case loading

@@ -75,8 +75,9 @@ CHAPTER_TEMPLATE = """<?xml version="1.0" encoding="UTF-8"?>
 <head>
   <title>{title}</title>
   <link rel="stylesheet" type="text/css" href="../css/book.css"/>
+  <script type="text/javascript">window.__lumenBookScriptRan = true;</script>
 </head>
-<body>
+<body onload="window.__lumenBookScriptRan = true">
 <h1>{title}</h1>
 {body}
 </body>

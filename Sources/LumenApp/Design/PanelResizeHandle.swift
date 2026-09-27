@@ -5,7 +5,7 @@ import LumenKit
 /// 三栏在某一时刻的**显示宽度**。
 ///
 /// 与「用户存了多少」是两件事：设置里存的是偏好，这里给的是**这一轮布局**
-/// 实际要给多少。侧栏宽度是固定的（248pt），只有 AI 面板参与「窗口变窄时谁让」。
+/// 实际要给多少。左右面板各有偏好，窄窗口按阅读区保底动态收窄。
 struct PanelLayout {
     /// nil = 这一栏当前不参与布局
     var sidebar: Double?
@@ -33,12 +33,7 @@ struct PanelLayout {
 /// 拖拽上限、显示宽度、自检断言必须走**同一条算式**，否则自检验的是一段死代码——
 /// 「改了算式只改一处」正是这类断言最容易悄悄失效的方式。
 ///
-/// ## 本批的语义变更：侧栏固定，只有 AI 面板可调
-///
-/// 从前两侧面板各有一个拖拽分隔线，`resolve` 要在「两个偏好」之间分配预算。
-/// 现在**侧栏宽度是常量**（`UISettings.PanelWidth.sidebarDefault` = 248pt，
-/// 与 `DS.Size.sidebarIdeal` 同源），界面上只剩 AI 面板那条分隔线。于是算式退化成：
-/// 侧栏先足额拿走 248pt，剩下的给 AI 面板，但 AI 面板不低于自己的下限、阅读区不低于保底。
+/// 左右面板分别可拖；优先保证阅读区保底，再给两侧各自的最小宽度。
 ///
 /// ## 为什么每次布局都要重算（而不是只在拖拽提交那一刻钳一次）
 ///
@@ -59,20 +54,11 @@ enum PanelWidthPolicy {
     /// 此时只能让正文被压一点（总好过面板点不到）。
     static var minimumReaderWidth: Double { UISettings.PanelWidth.minimumReaderWidth }
 
-    /// 分隔线占的**布局**宽度。
-    ///
-    /// 本批改成 0：分隔线改用 overlay 绘制（与 `LeftRail` 右侧那条分隔线同样的做法），
-    /// 不再在 `HStack` 里占 1pt。这不是审美问题——它决定下面这条等式成不成立：
-    ///
-    ///     图标栏(52) + 侧栏(248) + AI 面板下限(300) + 阅读区保底(320) = 920 = 最小窗口宽
-    ///
-    /// 若分隔线再吃 1pt，最小窗口下阅读区就只能拿到 319pt，「920pt 最挤时阅读区 ≥ 320」
-    /// 这条承诺永远差 1pt 兑现不了。把分隔线的绘制搬进 overlay 之后，
-    /// 这条等式在最小窗口下**刚好**成立。
-    static let handleWidth: Double = 0
+    /// 分隔线的真实命中宽度。零宽容器的 overlay 实际只剩细线可抓；
+    /// 给 12pt 布局命中区，窄窗口时由侧栏动态让出空间保留正文 320pt。
+    static let handleWidth: Double = 12
 
-    /// 侧栏固定宽度。与 `DS.Size.sidebarIdeal` 同值（都是 248），
-    /// 但这里刻意走配置层而不是界面层的令牌——`LumenKit` 拿不到 `DS`。
+    /// 侧栏默认宽度。
     static var fixedSidebarWidth: Double { UISettings.PanelWidth.sidebarDefault }
 
     /// 量出三栏此刻各该多宽。
@@ -91,11 +77,13 @@ enum PanelWidthPolicy {
         containerWidth: CGFloat,
         showsRail: Bool,
         sidebarVisible: Bool,
-        aiPanelPreferred: Double?
+        aiPanelPreferred: Double?,
+        sidebarPreferred: Double? = nil
     ) -> PanelLayout {
         let scale = Double(DS.Size.windowScale(for: containerWidth))
         let aiRange = (UISettings.PanelWidth.aiRange.lowerBound * scale)...(UISettings.PanelWidth.aiRange.upperBound * scale)
-        let sidebarWidth = fixedSidebarWidth * scale
+        let sidebarRange = (UISettings.PanelWidth.sidebarRange.lowerBound * scale)...(UISettings.PanelWidth.sidebarRange.upperBound * scale)
+        let sidebarWidth = clamped((sidebarPreferred ?? fixedSidebarWidth) * scale, to: sidebarRange)
 
         // 容器宽度还没量到（首帧、视图尚未出现）时不做任何压缩：
         // 此时 containerWidth 是 0，按它算会把两侧压成 0pt，界面先闪一下空面板。
@@ -110,15 +98,17 @@ enum PanelWidthPolicy {
         }
 
         let railWidth: Double = showsRail ? Double(LeftRail.width) * scale : 0
-        // 分隔线只算 AI 面板那一条（侧栏没有分隔线了）；handleWidth 现为 0，这一项恒为 0，
-        // 保留算式是为了将来若又需要给分隔线留位时只改一处。
-        let handleCount = aiPanelPreferred == nil ? 0 : 1
+        // 两侧各有一条 12pt 分隔线，必须从可用宽度里扣除。
+        let handleCount = (aiPanelPreferred == nil ? 0 : 1) + (sidebarVisible ? 1 : 0)
         // 扣掉图标栏与分隔线之后，面板与阅读区总共能分到的量
         let budget = max(0, Double(containerWidth) - railWidth - handleWidth * Double(handleCount))
         // 面板能拿走、且阅读区仍保底 320pt 的上限
         let available = budget - minimumReaderWidth
 
-        var sidebar: Double? = sidebarVisible ? sidebarWidth : nil
+        // 两侧都要保住下限和正文宽度；拖左侧时为右侧至少留出 AI 下限。
+        let sidebarLimit = available - (aiPanelPreferred == nil ? 0 : aiRange.lowerBound)
+        var sidebar: Double? = sidebarVisible
+            ? min(sidebarWidth, max(sidebarRange.lowerBound, sidebarLimit)) : nil
         var aiPanel: Double? = nil
         var belowGuarantee = false
 
@@ -169,7 +159,8 @@ enum PanelWidthPolicy {
     static func aiCap(
         containerWidth: CGFloat,
         showsRail: Bool,
-        sidebarVisible: Bool
+        sidebarVisible: Bool,
+        sidebarPreferred: Double? = nil
     ) -> Double {
         let scale = Double(DS.Size.windowScale(for: containerWidth))
         let upper = UISettings.PanelWidth.aiRange.upperBound
@@ -177,8 +168,19 @@ enum PanelWidthPolicy {
             containerWidth: containerWidth,
             showsRail: showsRail,
             sidebarVisible: sidebarVisible,
-            aiPanelPreferred: upper
+            aiPanelPreferred: upper,
+            sidebarPreferred: sidebarPreferred
         ).aiPanel ?? upper * scale
+    }
+
+    static func sidebarCap(containerWidth: CGFloat, showsRail: Bool, aiPanelVisible: Bool) -> Double {
+        let scale = Double(DS.Size.windowScale(for: containerWidth))
+        let rail = showsRail ? Double(LeftRail.width) * scale : 0
+        let reservedAI = aiPanelVisible ? UISettings.PanelWidth.aiRange.lowerBound * scale : 0
+        let handles = handleWidth * (aiPanelVisible ? 2 : 1)
+        let available = Double(containerWidth) - rail - handles - minimumReaderWidth - reservedAI
+        return max(UISettings.PanelWidth.sidebarRange.lowerBound * scale,
+                   min(UISettings.PanelWidth.sidebarRange.upperBound * scale, available))
     }
 
     private static func clamped(_ value: Double, to range: ClosedRange<Double>) -> Double {
@@ -189,16 +191,12 @@ enum PanelWidthPolicy {
 
 /// 面板之间那条「可以拖」的分隔线。
 ///
-/// 现在只剩 AI 面板左边这一条——侧栏宽度固定为 248pt，界面上不再给它入口。
+/// 左右面板共用；方向由 `panelIsLeading` 决定。
 ///
 /// 三个关键决定，都不是随意选的：
 ///
-/// 1. **布局 0pt，视觉 1pt，命中区 10pt。**
-///    布局宽度必须是 0：它决定「图标栏 + 侧栏 + AI 下限 + 阅读区保底 = 920」
-///    这条等式在最小窗口下成不成立（见 `PanelWidthPolicy.handleWidth`）。
-///    视觉上仍然画一条 1pt 的线（走 overlay，不占布局），否则阅读区与 AI 面板
-///    之间会失去分界；而 1pt 的线用鼠标抓不住，所以命中区用另一层完全透明的
-///    overlay 撑到 10pt。三层互不干扰。
+/// 1. **布局命中区 12pt，视觉线 1pt。**
+///    零宽 overlay 在真实界面中太难抓取；命中区参与布局，面板上限扣除它。
 ///
 /// 2. **拖动期间只写本地状态，不加动画。** 两点一起说：
 ///    - 不加动画：套上 `withAnimation` 的话面板会「追」着鼠标走，手感发飘，
@@ -239,15 +237,14 @@ struct PanelResizeHandle: View {
     @State private var widthAtDragStart: Double?
 
     /// 命中区宽度：够大才好抓，又不至于盖住相邻控件。
-    private let hitWidth: CGFloat = 10
+    private let hitWidth: CGFloat = CGFloat(PanelWidthPolicy.handleWidth)
 
     private var isDragging: Bool { liveWidth != nil }
     private var isActive: Bool { isHovering || isDragging }
 
     var body: some View {
         Color.clear
-            // **0pt 布局**：分隔线的绘制搬进 overlay（与 LeftRail 右侧那条线同做法），
-            // 把这一像素还给阅读区——最小窗口下它是「阅读区保底 320」能否兑现的关键。
+            // 命中区真实参与布局；视觉线仍只画在中间。
             .frame(width: PanelWidthPolicy.handleWidth)
             .frame(maxHeight: .infinity)
             .overlay {

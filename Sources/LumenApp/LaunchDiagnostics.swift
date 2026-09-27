@@ -100,9 +100,7 @@ enum LaunchOptions {
 
     /// 自检用：直接设定 AI 面板宽度，`--panel-width 400x300`。
     ///
-    /// 和 `--window-size` 一样走 `x` 分隔，但**只有第二个数（AI 面板）生效**：
-    /// 侧栏基准宽度固定为 248pt、再随窗口比例缩放且不从设置读取；第一个数（侧栏）仍被解析
-    /// 只为不破坏既有脚本，**不产生任何效果**。
+    /// 和 `--window-size` 一样走 `x` 分隔，两个宽度都参与布局。
     ///
     /// 值会经过与拖动分隔线相同的钳制，所以故意传越界值（如 `9999x10`）
     /// 就能验证 AI 面板真的被钳到下限 300。
@@ -482,18 +480,15 @@ enum LaunchOptions {
 
     /// 阅读区表面**分级降级**诊断：`--pdf-surface-level N`（0 = 现状，默认）。
     ///
-    /// 为什么是分级而不是一个开关：完整界面与「最小 SwiftUI 承载」之间隔着好几层
-    /// （主题垫色、调色蒙层、`compositingGroup`、常驻浮层），一次全剥掉只能回答
-    /// 「是不是这几层的错」，回答不了「是哪一层」。分级跑同一份二进制，逐级剥离：
+    /// 默认现已移除整块 `compositingGroup`；级别 1 保留为历史兼容别名。
     ///
     /// | 级别 | 剥掉的层 |
     /// | --- | -------- |
-    /// | 1 | `compositingGroup`（不再强制离屏合成整个阅读面） |
+    /// | 1 | 与默认相同（历史兼容） |
     /// | 2 | 调色蒙层（正文按原色光栅化） |
     /// | 3 | 主题垫色 + 扫描件提示条（阅读区只剩 `PDFKitRepresentable`） |
     ///
-    /// 读数看 `--jank-report` 的「CPU/步」与停顿 p95：哪一档掉下去，成本就在那一层。
-    /// 只用于定位，**不是功能**——正常使用恒为 0。
+    /// 只用于定位；真实触控板滚动的验收仍按 `docs/VERIFY.md`。
     static var pdfSurfaceLevel: Int {
         guard let raw = value(for: "--pdf-surface-level"), let n = Int(raw), n >= 0 else { return 0 }
         return min(n, 3)
@@ -633,7 +628,7 @@ enum ClipboardAudit {
     }
 }
 
-enum WindowCapture {
+@MainActor enum WindowCapture {
 
     /// 把主窗口内容渲染成 PNG。
     ///

@@ -10,16 +10,13 @@ import LumenKit
 /// 且**自己就能证伪**：
 ///
 /// 1. **翻页耗时**：连翻 N 页（默认 120，覆盖测试文档全本），逐页记时，报 p50/p95/max。
-/// 2. **滚动光栅化耗时**：按真实视口尺寸把每一页都真渲染一遍——这正是滚动时
-///    新页进入视口要付的那笔钱。若这里 p95 顶穿 16.7ms，滚动就会掉帧；若翻页快、
-///    这里慢，瓶颈就在渲染管线而不在翻页逻辑。
+/// 2. **整页离屏光栅化耗时**：按真实视口尺寸把每一页渲染一遍，观察文档内容的
+///    绘制成本。PDFKit 的响应式滚动采用后台 tile/合成管线，这个读数不能当帧率。
 /// 3. **内存**：翻页前后各取一次 `task_vm_info.phys_footprint`，报增量。另外单独量
 ///    「把全本缩略图都留在内存里」的代价——这是大文档「内存持续增长」的头号嫌疑。
 ///
-/// 翻页这条读数还带**两遍对照**：第一遍带正常回调（`onPositionChange` 会发布 `@Published`、
-/// 触发 SwiftUI 失效、按 5% 台阶写「最近打开」）；第二遍把 `onPositionChange` 摘成 `nil`，
-/// 只留 PDFKit 自身的翻页成本。**两者之差 = 我们这一层自己的每页开销**，差值接近 0
-/// 就说明瓶颈在 PDFKit 内部，不该往我们这层使劲——这是本通道的第一处证伪点。
+/// 翻页带回调 / 摘回调各跑一遍作趋势对照。两遍运行顺序不同，PDFKit 缓存状态也不同；
+/// 差值不能直接归因到应用回调，更不能据此证明真实触控板流畅。
 ///
 /// 为什么预热：PDFKit 首次 `page.string` / `thumbnail` 要建索引、加载字体资源，
 /// 实测首调分别是 19ms / 42ms。不预热的话这两笔一次性冷启动噪声会直接顶穿 p95，
@@ -30,7 +27,7 @@ enum PDFPerfAudit {
     /// 单页翻页耗时的目标上限（ms）。16.7ms = 60Hz 一帧；超过它这一页就会掉一帧。
     static let turnP95BudgetMs: Double = 16.7
 
-    /// 单页滚动光栅化耗时的目标上限（ms）。判据同 60Hz 一帧。
+    /// 整页离屏光栅化的参考线，不是滚动帧率的验收阈值。
     static let frameBudgetMs: Double = 16.7
 
     /// 二次遍历常驻内存增量的**参考预算**（MB）。**仅用于对照打印，不作断言**。
@@ -143,10 +140,8 @@ enum PDFPerfAudit {
 
     /// 滚动光栅化：按**真实视口尺寸**把每一页渲染一遍，逐页记时，返回耗时（ms）。
     ///
-    /// 为什么是它：翻页走的是 `view.go(to:)`，PDFKit 只把视口挪过去，真正的页面绘制
-    /// 发生在「页进入可视区」那一刻。滚动时每一帧都可能有新页进来，那笔绘制成本就是
-    /// 滚动卡顿的直接来源。用 `page.thumbnail(of: viewportSize, for: .mediaBox)`
-    /// 走同一条绘制管线，且尺寸用实际视口，读数才有意义。
+    /// `page.thumbnail(of:)` 会绘制整页，能比较文档内容成本，却不是响应式滚动
+    /// 的实际 tile/合成路径。因此只报告，不用 16.7ms 判定滚动是否流畅。
     private static func measureScrollRasterization(
         controller: PDFController,
         pageCount: Int
@@ -258,36 +253,36 @@ enum PDFPerfAudit {
         let s = stats(scroll)
 
         NSLog("%@", "[Lumen][perf] ── PDF 浏览性能（\(pageCount) 页，翻 \(turns) 页）──")
-        NSLog(String(
+        reportLine(String(
             format: "[Lumen][perf] ① 翻页·带回调（正常路径）：p50=%.2fms p95=%.2fms max=%.2fms 均值=%.2fms",
             a.p50, a.p95, a.max, a.mean
         ))
-        NSLog(String(
+        reportLine(String(
             format: "[Lumen][perf] ① 翻页·摘掉回调（纯 PDFKit）：p50=%.2fms p95=%.2fms max=%.2fms 均值=%.2fms",
             b.p50, b.p95, b.max, b.mean
         ))
-        NSLog(String(
-            format: "[Lumen][perf] ① 我们这一层的每页开销（p95 之差）：%.2fms；均值之差：%.2fms",
+        reportLine(String(
+            format: "[Lumen][perf] ① 带回调减去摘回调（顺序对照，非因果归因）：p95 %.2fms；均值 %.2fms",
             a.p95 - b.p95, a.mean - b.mean
         ))
-        NSLog(String(
+        reportLine(String(
             format: "[Lumen][perf] ② 滚动光栅化·按视口尺寸逐页渲染：p50=%.2fms p95=%.2fms max=%.2fms 均值=%.2fms",
             s.p50, s.p95, s.max, s.mean
         ))
 
         let firstPassMB = signedMB(from: footprintAfterWarmUp, to: footprintAfterFirstPass)
         let secondPassMB = signedMB(from: footprintAfterFirstPass, to: footprintAfterSecondPass)
-        NSLog(String(
+        reportLine(String(
             format: "[Lumen][perf] ③ 进程常驻内存 phys_footprint：预热后 %.1fMB → 首遍后 %.1fMB → 次遍后 %.1fMB",
             mb(footprintAfterWarmUp), mb(footprintAfterFirstPass), mb(footprintAfterSecondPass)
         ))
-        NSLog(String(
+        reportLine(String(
             format: "[Lumen][perf] ③ 翻页内存增量：首次遍历（含 PDFKit 一次性渲染缓存填充）%+.1fMB；"
                 + "第二次遍历（反复浏览同一批内容）%+.1fMB",
             firstPassMB, secondPassMB
         ))
         let policy = thumbs.capacity.map { "有上限 \($0) 张" } ?? "无上限"
-        NSLog(String(
+        reportLine(String(
             format: "[Lumen][perf] ④ 缩略图缓存（%@）：滚完全本 %d 页后仍驻留 %d 张；现场常驻内存净增 %+.1fMB",
             policy, thumbs.rendered, thumbs.resident, thumbs.footprintDeltaMB
         ))
@@ -304,15 +299,16 @@ enum PDFPerfAudit {
             a.p95 <= turnP95BudgetMs,
             String(format: "实测 p95=%.2fms", a.p95)
         )
-        check(
-            String(format: "② 滚动光栅化 p95 ≤ %.1fms（60Hz 一帧）", frameBudgetMs),
-            s.p95 <= frameBudgetMs,
-            String(format: "实测 p95=%.2fms", s.p95)
-        )
+        // thumbnail(of:) draws a whole page offscreen. PDFKit's responsive
+        // scroll composites partial tiles asynchronously, so this cost must
+        // never be presented as a real 60Hz pass/fail result.
+        reportLine(String(format:
+            "[Lumen][perf] ② 整页离屏光栅化 p95=%.2fms（%.1fms 仅参考；非真实滚动帧率，非断言）",
+            s.p95, frameBudgetMs))
         // ③ 内存增量只报不断言。详见 `footprintBudgetMB` 的说明：这个跨遍增量由 PDFKit
         // 内部缓存 churn 主导，同机多次跑到 −21…+68MB，不可复现；对它下断言等于抛硬币。
         // 「会不会持续增长」交给**确定性**的 ④（仍驻留的张数）把关。
-        NSLog(String(
+        reportLine(String(
             format: "[Lumen][perf] ③ 二次遍历增量 %+.1fMB（信息性读数；参考预算 ±%.0fMB，非断言）",
             secondPassMB, footprintBudgetMB
         ))
@@ -328,17 +324,17 @@ enum PDFPerfAudit {
                   + "驻留 \(thumbs.resident) 张 = 全本 \(thumbs.rendered) 页（证伪对照，不作断言）")
         }
 
-        // 「摘掉回调更快」本身不是断言——回调是功能的一部分，不能删。这里只把它记成
-        // 一条**诊断结论**，供后续优化判断该往哪一层使劲（见上文 ① 的差值行）。
-        NSLog("[Lumen][perf] 诊断：我们这层开销占带回调 p95 的 "
-              + String(format: "%.0f%%", a.p95 > 0 ? (a.p95 - b.p95) / a.p95 * 100 : 0)
-              + "（占比高 → 优化本层回调有意义；接近 0 → 瓶颈在 PDFKit 内部）")
+        // 把这个非配对差值当「我们的开销百分比」会出现负数甚至误导结论。
+        NSLog("%@", "[Lumen][perf] 诊断：两遍顺序与缓存状态不同，差值仅作线索；"
+              + "定位滚动瓶颈需结合被动观察，不能从本对照直接归因。")
 
         NSLog("%@", "[Lumen][perf] 自检：通过 \(passed) 项，失败 \(failures.count) 项"
               + (failures.isEmpty ? " ✅" : " ❌ " + failures.joined(separator: "；")))
     }
 
     private static func mb(_ bytes: UInt64) -> Double { Double(bytes) / 1_048_576 }
+
+    private static func reportLine(_ line: String) { NSLog("%@", line) }
 
     private static func signedMB(from: UInt64, to: UInt64) -> Double {
         Double(Int64(to) - Int64(from)) / 1_048_576

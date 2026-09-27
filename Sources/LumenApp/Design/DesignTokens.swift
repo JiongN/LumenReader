@@ -3,6 +3,7 @@ import AppKit
 import Observation
 
 @Observable
+@MainActor
 final class ThemePalette {
     static let shared = ThemePalette()
     var theme = ReadingTheme.paper
@@ -88,7 +89,7 @@ public enum DS {
 
     // MARK: 语义色
 
-    public enum Palette {
+    @MainActor public enum Palette {
         public static var accent: Color { ThemePalette.shared.theme.accent }
         public static var accentSoft: Color { accent.opacity(ThemePalette.shared.theme.isDark ? 0.18 : 0.10) }
         public static var textPrimary: Color { ThemePalette.shared.theme.text }

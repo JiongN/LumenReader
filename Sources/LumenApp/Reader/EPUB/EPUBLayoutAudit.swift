@@ -46,6 +46,8 @@ import WebKit
           // 双栏有最小宽度门槛（脚本里 760）：窄窗口下要的是单栏，不是「设置失
           // 效」。期望值必须跟着算出来的门槛走，否则窄窗口会永远判失败。
           result.expectedColumns = requested === 2 && innerWidth >= 760 ? 2 : 1;
+          result.bookScriptBlocked = window.__lumenBookScriptRan !== true;
+          result.appBridgeReady = typeof window.__lumen === 'object';
 
           layout.apply(); await frame();
           const cc = getComputedStyle(document.body).columnCount;
@@ -88,10 +90,14 @@ import WebKit
             result.horizontal = Math.max(0, root.scrollWidth - innerWidth);
             result.noSideways = result.horizontal <= 2;                 // 连续流不许横向溢出
             result.bodyWidth = document.body.getBoundingClientRect().width;
-            result.fillsWidth = Math.abs(result.bodyWidth - innerWidth) < 3;
+            // innerWidth includes the vertical scrollbar on macOS. The body
+            // fills the actual layout viewport (clientWidth), not that gutter.
+            result.layoutWidth = root.clientWidth;
+            result.fillsWidth = Math.abs(result.bodyWidth - result.layoutWidth) < 3;
           }
 
-          result.pass = result.matchesSetting && result.fillsWidth && !result.insufficient
+          result.pass = result.bookScriptBlocked && result.appBridgeReady
+            && result.matchesSetting && result.fillsWidth && !result.insufficient
             && (result.paged
               ? (result.forward && result.oneViewport && result.finalPartial
                  && result.endReached && result.endStops && result.backward && result.backwardMoved)

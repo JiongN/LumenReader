@@ -75,7 +75,7 @@ enum AgentAudit {
         return try? JSONDecoder().decode(AgentConfig.self, from: data)
     }
 
-    static func run() async {
+    @MainActor static func run() async {
         var passed = 0
         var failures: [String] = []
         func check(_ name: String, _ ok: Bool, _ detail: String = "") {
@@ -340,7 +340,7 @@ enum AgentAudit {
         // 温度覆盖：Agent 上那个值要盖掉服务商的，且**不能**回头改掉服务商设置本身。
         // 这是纯输入→输出的规则，可以直接实跑断言；不这么验的话，
         // 「温度到底有没有传出去」在这台没有视觉通道的机器上无从判断。
-        await checkTemperatureOverride(check)
+        checkTemperatureOverride(check)
 
         // 联网检索：真跑一次，把结果和失败原因都打出来
         let query = "cultural capital education inequality"

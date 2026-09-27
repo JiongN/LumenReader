@@ -278,6 +278,9 @@ final class AppState: ObservableObject {
         // 先记住邻接标签：关的是当前标签时，激活右侧（没有则左侧）那一个，
         // 而不是粗暴地回到第一个标签。
         if let index = sessions.firstIndex(where: { $0 === session }) {
+            if sessions.count == 1 && isImmersive {
+                setIsImmersive(false, animated: false)
+            }
             let wasActive = activeSessionID == session.id
             sessions.remove(at: index)
             forgetResidentReader(session.id)
@@ -296,7 +299,13 @@ final class AppState: ObservableObject {
 
     /// 关闭当前标签（菜单 ⌘W / 标签上的 ×）。
     func closeActiveTab() {
-        if let activeSession { close(activeSession) }
+        if homeTabIsActive {
+            closeHomeTab()
+        } else if let activeSession {
+            close(activeSession)
+        } else {
+            resolvedWindow()?.performClose(nil)
+        }
     }
 
     func closeOthers(keeping kept: ReaderSession) {

@@ -87,14 +87,14 @@ private struct ThumbnailGrid: View, Equatable {
     @State private var viewportHeight: CGFloat = 0
 
     private static let renderQueue = DispatchQueue(label: "com.jn.lumen.thumbnail", qos: .utility)
-    private static let pixelScale: CGFloat = 2
+    nonisolated static let pixelScale: CGFloat = 2
 
     private static let width: CGFloat = DS.Size.thumbnailWidth
     private static var rowPitch: CGFloat {
         DS.Size.thumbnailLabelGap + DS.Size.thumbnailLabelHeight + DS.Size.thumbnailGap
     }
 
-    static func == (lhs: ThumbnailGrid, rhs: ThumbnailGrid) -> Bool {
+    nonisolated static func == (lhs: ThumbnailGrid, rhs: ThumbnailGrid) -> Bool {
         lhs.currentPage == rhs.currentPage
             && lhs.scrollSettledRevision == rhs.scrollSettledRevision
             && lhs.unitCount == rhs.unitCount

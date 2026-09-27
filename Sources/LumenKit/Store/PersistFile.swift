@@ -23,6 +23,45 @@ import Foundation
 /// 2. ``write(_:to:label:)`` —— 原子写盘失败不再静默（`try? data.write` → 一行日志）。
 ///    写失败本身用户未必立刻发现，但至少要留下可查的线索。
 public enum PersistFile {
+    // A failed move leaves the corrupt original at its write path. Prevent any
+    // caller that fell back to defaults from replacing it during this process.
+    private final class RecoveryState: @unchecked Sendable {
+        let lock = NSLock()
+        var blockedWrites: Set<String> = []
+        var pendingRecoveryWarnings: Set<String> = []
+    }
+    private static let recovery = RecoveryState()
+
+    private static func markWriteBlocked(_ url: URL) {
+        recovery.lock.lock()
+        let path = url.standardizedFileURL.path
+        recovery.blockedWrites.insert(path)
+        recovery.pendingRecoveryWarnings.insert(path)
+        recovery.lock.unlock()
+    }
+
+    private static func clearWriteBlock(_ url: URL) {
+        recovery.lock.lock()
+        let path = url.standardizedFileURL.path
+        recovery.blockedWrites.remove(path)
+        recovery.pendingRecoveryWarnings.remove(path)
+        recovery.lock.unlock()
+    }
+
+    private static func isWriteBlocked(_ url: URL) -> Bool {
+        recovery.lock.lock()
+        defer { recovery.lock.unlock() }
+        return recovery.blockedWrites.contains(url.standardizedFileURL.path)
+    }
+
+    /// Startup UI consumes each recovery failure once, even with multiple windows.
+    public static func takeRecoveryWarnings() -> [String] {
+        recovery.lock.lock()
+        defer { recovery.lock.unlock() }
+        let warnings = recovery.pendingRecoveryWarnings.sorted()
+        recovery.pendingRecoveryWarnings.removeAll()
+        return warnings
+    }
 
     // MARK: - 解码：失败即备份
 
@@ -73,9 +112,11 @@ public enum PersistFile {
         let destination = uniqueBackupURL(for: fileURL, stamp: timestamp())
         do {
             try fm.moveItem(at: fileURL, to: destination)
+            clearWriteBlock(fileURL)
             NSLog("%@", "[Lumen][persist] 原文件已备份：\(fileURL.lastPathComponent) → \(destination.lastPathComponent)（\(reason)）")
             return destination
         } catch {
+            markWriteBlocked(fileURL)
             NSLog("%@", "[Lumen][persist] 备份失败：\(fileURL.lastPathComponent)：\(error)（\(reason)）")
             return nil
         }
@@ -92,6 +133,10 @@ public enum PersistFile {
     /// - Returns: 是否写成功。
     @discardableResult
     public static func write(_ data: Data, to fileURL: URL, label: String) -> Bool {
+        guard !isWriteBlocked(fileURL) else {
+            NSLog("%@", "[Lumen][persist] 拒绝覆盖备份失败的原文件：\(fileURL.lastPathComponent)（\(label)）")
+            return false
+        }
         do {
             try data.write(to: fileURL, options: .atomic)
             return true

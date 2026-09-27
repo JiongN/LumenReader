@@ -529,6 +529,20 @@ struct AnnotationRow: View {
                     .lineLimit(1)
                 Spacer(minLength: 0)
                 if isHovering && !isInEditMode {
+                    if item.hasHighlight, bridge.updateHighlightColor != nil {
+                        Menu {
+                            ForEach(HighlightSwatches.all, id: \.hex) { swatch in
+                                Button(swatch.name) {
+                                    Task { _ = await bridge.updateHighlightColor?(item.id, swatch.hex) }
+                                }
+                            }
+                        } label: {
+                            Image(systemName: "paintpalette")
+                        }
+                        .menuStyle(.borderlessButton)
+                        .frame(width: 24)
+                        .help("更改高亮颜色")
+                    }
                     HoverActionButton(systemImage: "pencil", help: "编辑批注", role: .normal) {
                         draft = item.note
                         onBeginEdit()

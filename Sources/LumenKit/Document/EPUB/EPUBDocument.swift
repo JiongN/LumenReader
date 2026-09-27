@@ -44,7 +44,9 @@ public struct EPUBChapter: Sendable, Identifiable, Equatable {
 /// 解包策略：用系统 `ditto` 把 EPUB（本质是 zip）解到缓存目录，而不是自己解析 zip。
 /// 这样有两个好处——零第三方依赖；WebKit 能直接用 `loadFileURL` 加载章节 XHTML，
 /// 图片、CSS、内嵌字体这些相对资源全部由 WebKit 原生解析，不需要我们拦截资源请求。
-public final class EPUBDocumentSource: DocumentSource {
+// Immutable document metadata can cross actors. The only mutable member is the
+// chapter text cache, whose every access is protected by cacheLock.
+public final class EPUBDocumentSource: DocumentSource, @unchecked Sendable {
 
     public let kind: DocumentKind = .epub
     /// 解包根目录

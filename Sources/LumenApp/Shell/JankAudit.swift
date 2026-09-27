@@ -52,7 +52,7 @@ enum JankCounter: String, CaseIterable {
 
 /// 计数累加器。用锁而不是 `@MainActor`：`PDFView.layout` 理论上可能被非主线程触发，
 /// 计数本身不该因此崩掉或漏记。
-final class JankTally {
+final class JankTally: @unchecked Sendable {
     static let shared = JankTally()
     private var counts: [JankCounter: Int] = [:]
     private let lock = NSLock()
@@ -224,6 +224,7 @@ enum JankAudit {
     static func run(
         scrollSurface: @escaping () -> NSView?,
         liveWidth: (any LiveWidthApplying)?,
+        onDragStateChange: @escaping (Bool) -> Void = { _ in },
         committedWidth: Double,
         range: ClosedRange<Double>,
         steps: Int
@@ -246,6 +247,7 @@ enum JankAudit {
         if LaunchOptions.flag("--jank-scroll-only") { return }
 
         // —— 阶段二：拖动分隔线 ——
+        onDragStateChange(true)
         await measureDrag(
             liveWidth: liveWidth,
             committedWidth: committedWidth,
@@ -256,6 +258,7 @@ enum JankAudit {
 
         // 收尾：把宽度释放回「不在拖」的状态（走与手势结束同一条路径）。
         liveWidth?.submit(nil)
+        onDragStateChange(false)
         // 松手也是一次值变化，要让它真的进布局——等一帧，别让进程在布局落定前退出
         // （退出前那次「值回 nil」若没被消费，下次读到的会是拖动残留态）。
         await awaitFrame()
@@ -629,8 +632,9 @@ enum JankAudit {
         } else if containerBody == 0 {
             verdict = "⚠️ 应用了 \(applied) 次但容器 body 未重算：AI 面板此刻不参与布局"
                 + "（被收起 / 沉浸 / 未装好），这次拖动没能落到版面上——本段读数无效"
-        } else if applied * 2 < steps {
-            verdict = "⚠️ 应用仅 \(applied) 次（< 步数一半）：合并节拍没跟上，拖动没真正连续——读数存疑"
+        } else if applied < max(2, Int(Double(samples.count) * MainStallMeter.frameMs
+            / 1000 / LivePanelWidth.tickInterval * 0.6)) {
+            verdict = "⚠️ 应用仅 \(applied) 次，低于当前合并节拍预期：拖动没真正连续——读数存疑"
         } else {
             verdict = "✅ 应用 \(applied) 次、容器重算 \(containerBody) 次——布局真的跟着动了"
         }

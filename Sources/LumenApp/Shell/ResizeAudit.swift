@@ -4,10 +4,10 @@ import LumenKit
 
 /// 面板宽度自检：`--resize-report 1`。
 ///
-/// 十二条断言，分两组。本批的语义是「**侧栏固定、只有 AI 面板可调**」：
+/// 面板宽度断言：左右面板都可调，且共同受阅读区保底限制。
 ///
 /// **写入组**（①–⑦）：验「写进 AI 面板宽度 → 布局跟随」，以及拖拽提交路径上的钳制
-/// （上限、下限、逐帧连写），外加一条「侧栏宽度是常量、不受设置影响」。
+/// （上限、下限、逐帧连写），外加侧栏落库值与布局跟随。
 ///
 /// | # | 断言 | 防的是什么 |
 /// | - | ---- | ---------- |
@@ -17,7 +17,7 @@ import LumenKit
 /// | ④ | 逐帧写入期间不越界 | 拖拽中间态越界 |
 /// | ⑤ | 逐帧写入后终值等于上限 | 钳制算式与写入不同源 |
 /// | ⑥ | 逐帧写入后布局与终值一致 | 写入与渲染脱节 |
-/// | ⑦ | 侧栏宽度是常量，不受 `settings.ui.sidebarWidth` 影响 | 有人悄悄把侧栏又接回了设置 |
+/// | ⑦ | 侧栏宽度随 `settings.ui.sidebarWidth` 改变 | 左侧拖拽入口失效 |
 ///
 /// **窗口缩放组**（⑧–⑫）：起因是一个真实缺陷——钳制只发生在拖拽提交那一刻，
 /// 窗口被拉小之后**没有任何一次提交**，落库的旧宽度原样参与布局，阅读区被挤没、
@@ -89,7 +89,7 @@ enum ResizeAudit {
         let baseCap = cap / scale
         NSLog("%@", "[Lumen][resize] 窗口可用宽度 \(Int(Self.containerWidth()))pt；"
               + "AI 面板上限 静态 \(Int(staticUpper))pt / 按窗口 \(Int(cap))pt；下限 \(Int(lowerBound))pt；"
-              + "侧栏固定 \(Int(UISettings.PanelWidth.sidebarDefault))pt")
+              + "侧栏偏好 \(Int(store.ui.sidebarWidth))pt")
 
         guard let beforeFrame = LayoutAuditLog.shared.frame(named: "aiPanel") else {
             NSLog("[Lumen][resize] ❌ 没有读到 AI 面板布局探针（--open 打开文档了吗？）")
@@ -168,24 +168,23 @@ enum ResizeAudit {
         check("逐帧写入后布局与终值一致", layoutMatches,
               "布局 \(Int(frameAfterBurst.width))pt vs 设置 \(Int(finalValue))pt")
 
-        // ⑦ 侧栏宽度是常量：把兼容字段写成一个明显不同的值，渲染宽度必须纹丝不动。
+        // ⑦ 修改侧栏偏好后，渲染宽度必须跟随（受动态窗口上限约束）。
         //
         // 这条盯的是「有人悄悄把侧栏又接回了设置」——例如把 `.frame(width:)` 改回
         // `settings.ui.sidebarWidth`。那种改法不会崩溃、截图也看不出，
         // 只有把设置写成一个不同的值、再看渲染宽度才抓得住。
-        let fixedSidebar = UISettings.PanelWidth.sidebarDefault * scale
-        store.commitSidebarWidth(fixedSidebar + 120)
+        let sidebarTarget = min(UISettings.PanelWidth.sidebarDefault * scale + 60,
+            PanelWidthPolicy.sidebarCap(containerWidth: Self.containerWidth(),
+                showsRail: true, aiPanelVisible: true))
+        store.commitSidebarWidth(sidebarTarget / scale)
         try? await Task.sleep(nanoseconds: 800_000_000)
         if let sidebarFrame = LayoutAuditLog.shared.frame(named: "sidebar") {
-            NSLog("%@", "[Lumen][resize] 侧栏兼容字段写入 \(Int(fixedSidebar + 120))pt → 实际渲染 "
-                  + "\(Int(sidebarFrame.width))pt（期望常量 \(Int(fixedSidebar))pt）")
-            check("侧栏宽度按窗口比例计算，不受设置影响",
-                  abs(sidebarFrame.width - fixedSidebar) < 2,
-                  "落库 \(Int(store.ui.sidebarWidth))pt，实渲染 \(Int(sidebarFrame.width))pt"
-                      + "（侧栏又接回了设置？）")
+            check("侧栏宽度写入后布局跟随",
+                  abs(sidebarFrame.width - sidebarTarget) < 2,
+                  "落库 \(Int(store.ui.sidebarWidth))pt，实渲染 \(Int(sidebarFrame.width))pt")
         } else {
             NSLog("[Lumen][resize] ❌ 读不到侧栏布局探针")
-            failures.append("侧栏宽度按窗口比例计算，不受设置影响")
+            failures.append("侧栏宽度写入后布局跟随")
         }
 
         // ⑧–⑫ 窗口缩放
@@ -273,9 +272,9 @@ enum ResizeAudit {
         // 显示器比这还窄时如实跳过，而不是把期望值改成实现算出来的数。
         let wideScale = Double(DS.Size.windowScale(for: wideWidth))
         let expectedWideAI = preference * wideScale
-        let needed = expectedWideAI + UISettings.PanelWidth.sidebarDefault * wideScale
+        let needed = expectedWideAI + store.ui.sidebarWidth * wideScale
             + Double(LeftRail.width) * wideScale
-            + PanelWidthPolicy.handleWidth
+            + 2 * PanelWidthPolicy.handleWidth
             + minimumReader
         store.ui.aiPanelWidth = preference
         await setContentSize(width: wideWidth, on: window)
@@ -305,7 +304,7 @@ enum ResizeAudit {
         // 它盯的是 `PanelWidthPolicy` 最后那道等比压缩的闸——那道闸一旦被删，
         // 这个不变量就破，而界面上没有任何一条路径能替它报警。
         let extremeContainer: CGFloat = 500
-        let railAndHandles = Double(LeftRail.width) + PanelWidthPolicy.handleWidth
+        let railAndHandles = Double(LeftRail.width) + 2 * PanelWidthPolicy.handleWidth
         let extreme = PanelWidthPolicy.resolve(
             containerWidth: extremeContainer,
             showsRail: true,
@@ -389,7 +388,8 @@ enum ResizeAudit {
         PanelWidthPolicy.aiCap(
             containerWidth: containerWidth(),
             showsRail: !state.isImmersive,
-            sidebarVisible: state.isSidebarVisible && !state.isImmersive
+            sidebarVisible: state.isSidebarVisible && !state.isImmersive,
+            sidebarPreferred: state.settingsStore.ui.sidebarWidth
         )
     }
 }

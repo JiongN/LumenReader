@@ -62,7 +62,9 @@ extension LumenAction {
         case .openMostRecent:
             // 明确保持可用：没有最近记录时给一句提示，比一个点不动又不说原因的菜单项好。
             return true
-        case .closeDocument, .copyFile, .nextUnit, .previousUnit, .goToPage:
+        case .closeDocument:
+            return true
+        case .copyFile, .nextUnit, .previousUnit, .goToPage:
             return hasDocument
         // 字号两个动作只对 EPUB 生效（PDF 走另一条渲染链，本轮不动）。
         // 曾经过度放宽成「只要有文档就可用」，导致 PDF 下快捷键被吞却什么也不发生，

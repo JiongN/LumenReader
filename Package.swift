@@ -12,14 +12,14 @@ let package = Package(
         .target(
             name: "LumenKit",
             path: "Sources/LumenKit",
-            swiftSettings: [.swiftLanguageMode(.v5)]
+            swiftSettings: [.swiftLanguageMode(.v6)]
         ),
         // 界面层：SwiftUI。
         .executableTarget(
             name: "LumenApp",
             dependencies: ["LumenKit"],
             path: "Sources/LumenApp",
-            swiftSettings: [.swiftLanguageMode(.v5)]
+            swiftSettings: [.swiftLanguageMode(.v6)]
         ),
         // 引擎层回归测试。运行：swift test --disable-sandbox
         .testTarget(

@@ -99,7 +99,7 @@ final class ReaderBridge: ObservableObject {
     /// 缩略图提供者（PDF 专用）
     let viewport = PDFViewportState()
     var closeReader: (() -> Void)?
-    /// 面板**显隐动画**期间：钉住 autoScales + 冻结重排（`PDFController.setPanelResizing`）。
+    /// PDF 面板显隐时保留缩放模式与阅读锚点；正文仍正常布局和绘制。
     var setPanelResizing: ((Bool) -> Void)?
     /// 拖动分隔线期间：只钉 autoScales，保留实时重排（`PDFController.setPanelWidthDragging`）。
     ///
@@ -116,7 +116,7 @@ final class ReaderBridge: ObservableObject {
     /// 也别塞一个编造的默认值进去（那会造出恒真断言）。
     var panelTransitionProbe: (() -> PDFController.PanelTransitionProbe?)?
     var resetPanelTransitionTrace: (() -> Void)?
-    var thumbnailProvider: ((Int, CGSize) -> NSImage?)?
+    var thumbnailProvider: (@Sendable (Int, CGSize) -> NSImage?)?
     /// 卡顿自检（`--jank-report`）用：真正被滚动的那个视图（PDF 侧是 `PDFView`）。
     ///
     /// 取 `NSView` 而不是 `PDFView`：桥不做 PDFKit 的决策，由自检自己转型。
@@ -161,13 +161,17 @@ final class ReaderBridge: ObservableObject {
     ///
     /// 做成异步而不是同步返回字符串：扫描件要靠逐页 OCR 补齐，那是分钟级的事；
     /// 同步接口会逼调用方在主线程上干等。`progress` 每页回调一次，驱动进度卡片。
-    var extractFullText: ((_ allowOCR: Bool, _ progress: (TextExtractionProgress) -> Void) async -> DocumentTextReport)?
+    var extractFullText: ((_ allowOCR: Bool, _ progress: @MainActor (TextExtractionProgress) -> Void) async -> DocumentTextReport)?
 
     // MARK: 批注（外壳 → 视图）
 
     /// 高亮当前选区并写盘。note 为批注正文，可为空串。
     /// PDF 直接写回原文件；EPUB 存应用数据目录并在页面里画高亮。
     var addHighlight: ((_ note: String) -> Void)?
+    var addHighlightWithColor: ((_ note: String, _ hex: String) -> Void)?
+    var updateHighlightColor: ((_ id: String, _ hex: String) async -> Bool)?
+    @Published var selectedAnnotationID: String?
+    @Published var selectionAnchor: CGPoint?
     /// 把一段文字作为批注插到指定页 / 章。AI「添加到批注」用：
     /// 给得出锚文本时优先锚到原文，否则退为页面便签 / 章节批注。
     var addPageNote: ((_ unitIndex: Int, _ anchorText: String, _ body: String) -> Void)?
@@ -239,6 +243,10 @@ final class ReaderBridge: ObservableObject {
         unitSnippetProvider = nil
         sectionTextProvider = nil
         addHighlight = nil
+        addHighlightWithColor = nil
+        updateHighlightColor = nil
+        selectedAnnotationID = nil
+        selectionAnchor = nil
         addPageNote = nil
         annotationsProvider = nil
         deleteAnnotation = nil

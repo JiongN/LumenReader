@@ -29,13 +29,16 @@ struct ReaderContainerView: View {
     /// 整棵失效——阅读区（PDFKit / WKWebView）与两块 `.regularMaterial` 都在其中，
     /// 表现就是拖动手感抖动。松手时由 `PanelResizeHandle` 提交一次。
     ///
-    /// 交由 `LivePanelWidth` 持有并**按显示刷新合并**：指针事件率高于屏幕刷新率
+    /// 交由 `LivePanelWidth` 持有并**按节拍合并**：指针事件率高于屏幕刷新率
     /// （触控板 90–120Hz、游戏鼠标上千 Hz），每个事件都重排 + 重光栅化是拖动手感抖动的
     /// 直接来源（实测「每帧 3 次指针写入 → 3 次 PDFView 重光栅化」）。详见 `LivePanelWidth`。
     ///
     /// 它**不是**第二份真相源：仅在一个手势期间有效，手势结束立刻置回 nil，
     /// 之后一律读设置。所以「双击复位」这类外部改动照旧实时生效。
     @StateObject private var livePanelWidth = LivePanelWidth(
+        coalescesFrames: !LaunchOptions.jankNoCoalesce
+    )
+    @StateObject private var liveSidebarWidth = LivePanelWidth(
         coalescesFrames: !LaunchOptions.jankNoCoalesce
     )
     /// 容器（窗口内容区）的可用宽度。面板上限要按它动态收窄。
@@ -70,15 +73,24 @@ struct ReaderContainerView: View {
 
             if state.isSidebarVisible && !state.isImmersive {
                 SidebarColumn()
-                    // 宽度**固定**（DS.Size.sidebarIdeal = 248pt），不再从设置读取，
-                    // 也不再挂拖拽分隔线。侧栏装的是目录 / 搜索结果 / 批注这类结构化列表，
-                    // 宽度该由版式决定；用户想腾出阅读区空间，收起整块面板即可。
                     .frame(width: sidebarWidth)
                     .layoutProbe("sidebar")
                     .background(DS.Palette.surfaceSunken)
                     // 淡入 + 10pt 位移，而不是 `.move(edge: .leading)`：
                     // 整宽滑入会让阅读区看起来被「推」了一下，三栏同时在场时尤其晃眼。
                     .transition(.opacity.combined(with: .offset(x: -10)))
+                PanelResizeHandle(
+                    committedWidth: sidebarWidth,
+                    liveWidth: liveSidebarBinding,
+                    range: sidebarRange,
+                    defaultWidth: UISettings.PanelWidth.sidebarDefault * Double(layoutScale),
+                    panelIsLeading: true,
+                    onCommit: { value in
+                        let scale = Double(layoutScale)
+                        settings.commitSidebarWidth(value / scale, maxWidth: sidebarCap / scale)
+                    },
+                    onDragStateChange: { bridge.setPanelWidthDragging?($0) }
+                )
             }
 
             // 沉浸模式：两侧各加一个 Spacer 把正文挤到中间并限宽。
@@ -105,7 +117,7 @@ struct ReaderContainerView: View {
                     // 随 AI 面板的显隐漂移。浮层本来就是给阅读区用的（页码、缩放、划词），
                     // 锚在阅读区才是它的语义位置。
                     // 划词条在沉浸模式下同样保留：沉浸只是收起面板，不是收起「选中文字后能做的事」。
-                    .overlay(alignment: .bottom) {
+                    .overlay {
                         if !LaunchOptions.pdfBareOverlays { SelectionActionBarLayer() }
                     }
                     // 沉浸时收起状态条：页码已经在底部 HUD 上显示，再留一条属于重复信息，
@@ -184,7 +196,7 @@ struct ReaderContainerView: View {
     private var railWidth: CGFloat { LeftRail.width * layoutScale }
 
     /// 分隔线用的即时宽度绑定。读的是**已应用**值；写走 `LivePanelWidth.submit`，
-    /// 由它按显示刷新合并（不是在绑定这层直接落状态，否则合并就白做了）。
+    /// 由它按节拍合并（不是在绑定这层直接落状态，否则合并就白做了）。
     private var liveWidthBinding: Binding<Double?> {
         Binding(
             get: { self.livePanelWidth.value },
@@ -192,11 +204,14 @@ struct ReaderContainerView: View {
         )
     }
 
-    /// 三栏此刻的显示宽度。
-    ///
-    /// **侧栏是常量，AI 面板按需分配**：侧栏宽度固定 248pt（不再读设置、
-    /// 也没有拖拽入口），AI 面板拿「剩下但不超过它自己要的、且不低于下限 300pt」，
-    /// 阅读区低于保底 320pt 时由 AI 面板顶住下限、阅读区让位。
+    private var liveSidebarBinding: Binding<Double?> {
+        Binding(
+            get: { self.liveSidebarWidth.value },
+            set: { self.liveSidebarWidth.submit($0) }
+        )
+    }
+
+    /// 三栏此刻的显示宽度。两侧使用独立的本地拖动值，窗口变窄时动态钳制。
     ///
     /// 落库值只是「用户想要多少」，本轮布局能给多少要按当前容器宽度重算：
     /// 窗口被拉小之后不会有任何一次拖拽提交，若不重算，旧宽度会原样参与布局——
@@ -209,11 +224,13 @@ struct ReaderContainerView: View {
             sidebarVisible: sidebarIsVisible,
             aiPanelPreferred: aiPanelIsVisible
                 ? (livePanelWidth.value.map { $0 / Double(layoutScale) } ?? settings.ui.aiPanelWidth)
-                : nil
+                : nil,
+            sidebarPreferred: liveSidebarWidth.value.map { $0 / Double(layoutScale) }
+                ?? settings.ui.sidebarWidth
         )
     }
 
-    /// 侧栏**当前应当显示**的宽度。固定值——侧栏不再接受任何宽度输入。
+    /// 侧栏当前应显示的宽度，由偏好、拖动态和窗口预算共同决定。
     private var sidebarWidth: Double {
         panelLayout.sidebar ?? UISettings.PanelWidth.sidebarDefault * Double(layoutScale)
     }
@@ -230,8 +247,19 @@ struct ReaderContainerView: View {
         PanelWidthPolicy.aiCap(
             containerWidth: containerWidth,
             showsRail: !state.isImmersive,
-            sidebarVisible: sidebarIsVisible
+            sidebarVisible: sidebarIsVisible,
+            sidebarPreferred: liveSidebarWidth.value.map { $0 / Double(layoutScale) }
+                ?? settings.ui.sidebarWidth
         )
+    }
+
+    private var sidebarCap: Double {
+        PanelWidthPolicy.sidebarCap(containerWidth: containerWidth,
+            showsRail: !state.isImmersive, aiPanelVisible: aiPanelIsVisible)
+    }
+
+    private var sidebarRange: ClosedRange<Double> {
+        (UISettings.PanelWidth.sidebarRange.lowerBound * Double(layoutScale))...sidebarCap
     }
 
     /// 点图标栏：点已激活的那一格 = 收起内容面板；点别的 = 展开并切过去。
@@ -315,6 +343,7 @@ struct ReaderContainerView: View {
                 // 自检要能读到「写入次数 / 实际应用次数 / 显示刷新回调次数」，用来把
                 // 「没写」「写了没应用」分开（否则拖动段计数恒 0 时无法判断是不是没等到刷新）。
                 liveWidth: livePanelWidth,
+                onDragStateChange: { bridge.setPanelWidthDragging?($0) },
                 committedWidth: aiPanelWidth,
                 range: aiPanelRange,
                 steps: LaunchOptions.jankSteps
@@ -857,11 +886,16 @@ struct ControlChip: View {
 
 // MARK: - 划词浮动条
 
-/// 划词后从底部中央升起的操作条。
-///
-/// 没有做成跟随选区的浮动气泡：PDF 里把选区矩形换算成窗口坐标要跨 PDFKit / AppKit / SwiftUI
-/// 三层坐标系，缩放与滚动时极易错位；EPUB 里虽然能用 JS 拿到 rect，但两者行为就不一致了。
-/// 固定在底部中央既稳定又不会遮挡正在读的那一行。
+enum HighlightSwatches {
+    struct Swatch { let name: String; let hex: String }
+    static let all: [Swatch] = [
+        .init(name: "黄色", hex: "#FFD54F"), .init(name: "绿色", hex: "#81C784"),
+        .init(name: "蓝色", hex: "#64B5F6"), .init(name: "粉色", hex: "#F48FB1"),
+        .init(name: "橙色", hex: "#FFB74D")
+    ]
+}
+
+/// 选区松手或点中已有高亮后，在操作点附近显示；坐标在阅读面内部归一化。
 ///
 /// **只在拖动划选时出现**（见 `ReaderBridge.selectionFromDrag`）：单击产生的 1 字符选区
 /// 不该把它叫出来。
@@ -873,17 +907,59 @@ struct SelectionActionBarLayer: View {
     var body: some View {
         // **只在拖动划选时出现**。`selectionFromDrag` 是新加的门：单击也会产生
         // 一个 1 字符选区，没有这道门的话随手点一下正文就会弹出浮条（用户明确否掉了这种）。
-        if let selection = bridge.selection, selection.isUsable, bridge.selectionFromDrag {
-            SelectionActionBar(selection: selection)
-                // 76 而不是默认的 32：阅读区右下角常驻一条状态条（页码 + 缩放），
-                // 它从底边起占到约 64pt。划词条按 32 起算会正好压在它上面——实测
-                // 「追问」按钮被状态条盖住一半。抬高到与状态条完全错开。
-                .padding(.bottom, 76)
-                // 打在 padding 之后：报的是划词条最终落点（含那段抬升），
-                // 这样和状态条的框能直接比出有没有重叠。
-                .layoutProbe("selectionBar")
-                .transition(.opacity.combined(with: .offset(y: 10)))
+        GeometryReader { geometry in
+            if let id = bridge.selectedAnnotationID {
+                ExistingHighlightBar(id: id)
+                    .position(position(in: geometry.size))
+                    .layoutProbe("selectionBar")
+            } else if let selection = bridge.selection, selection.isUsable, bridge.selectionFromDrag {
+                SelectionActionBar(selection: selection)
+                    .position(position(in: geometry.size))
+                    .layoutProbe("selectionBar")
+                    .transition(.opacity.combined(with: .offset(y: 10)))
+            }
         }
+    }
+
+    private func position(in size: CGSize) -> CGPoint {
+        let anchor = bridge.selectionAnchor ?? CGPoint(x: 0.5, y: 0.8)
+        let halfWidth = min(max(0, size.width - 12), 280) / 2
+        let x = min(max(anchor.x * size.width, halfWidth), max(halfWidth, size.width - halfWidth))
+        let y = min(max(anchor.y * size.height + 30, 35), max(35, size.height - 76))
+        return CGPoint(x: x, y: y)
+    }
+}
+
+private struct ExistingHighlightBar: View {
+    let id: String
+    @EnvironmentObject private var bridge: ReaderBridge
+    @EnvironmentObject private var state: AppState
+
+    var body: some View {
+        HStack(spacing: DS.Space.s) {
+            if bridge.updateHighlightColor != nil {
+                Menu {
+                    ForEach(HighlightSwatches.all, id: \.hex) { swatch in
+                        Button(swatch.name) {
+                            Task { _ = await bridge.updateHighlightColor?(id, swatch.hex) }
+                        }
+                    }
+                } label: { Label("颜色", systemImage: "paintpalette") }
+                    .menuStyle(.borderlessButton)
+                    .frame(width: 70)
+            }
+            Button("查看批注") { state.revealSidebar(tab: .annotations) }
+            Button { bridge.selectedAnnotationID = nil } label: {
+                Image(systemName: "xmark")
+            }
+            .help("关闭工具栏")
+        }
+        .buttonStyle(.plain)
+        .font(DS.Typo.ui(size: 12, weight: .medium))
+        .padding(.horizontal, DS.Space.s)
+        .padding(.vertical, DS.Space.xs)
+        .background(Capsule().fill(.thickMaterial))
+        .shadow(color: .black.opacity(0.10), radius: 8, y: 3)
     }
 }
 
@@ -907,11 +983,12 @@ struct SelectionActionBar: View {
             buttonRow
         }
         .background(
-            Capsule(style: .continuous)
-                .fill(.thickMaterial)
-                .overlay(Capsule(style: .continuous).strokeBorder(DS.Palette.separator, lineWidth: 0.5))
+            RoundedRectangle(cornerRadius: 11, style: .continuous)
+                .fill(.regularMaterial)
+                .overlay(RoundedRectangle(cornerRadius: 11, style: .continuous)
+                    .strokeBorder(DS.Palette.separator, lineWidth: 0.5))
         )
-        .shadow(color: .black.opacity(0.18), radius: 16, y: 6)
+        .shadow(color: .black.opacity(0.10), radius: 8, y: 3)
         // 展开输入条时不重排布局：整条浮层本来就锚在底部中央
         .animation(DS.Motion.reveal, value: isNoteEditing)
     }
@@ -919,38 +996,39 @@ struct SelectionActionBar: View {
     private var buttonRow: some View {
         HStack(spacing: DS.Space.xs) {
             if isNoteEditing {
-                Label("批注", systemImage: "square.and.pencil")
-                    .font(DS.Typo.caption)
+                Image(systemName: "square.and.pencil")
+                    .font(DS.Typo.ui(size: 12))
                     .foregroundStyle(DS.Palette.accent)
-                    .padding(.horizontal, DS.Space.s)
-                    .labelStyle(.titleAndIcon)
             } else {
-                Label("\(selection.text.count) 字", systemImage: "text.quote")
-                    .font(DS.Typo.caption)
-                    .foregroundStyle(DS.Palette.textTertiary)
-                    .padding(.horizontal, DS.Space.s)
-                    .labelStyle(.titleAndIcon)
-
-                Divider().frame(height: 16)
-
-                // 高亮与批注是「留在书里」的动作，排在 AI 三件套之前：
+                // 高亮与批注是「留在书里」的动作，排在 AI 动作之前：
                 // 划词的瞬间最清楚自己要标哪句，等 AI 回答完再回来找就找不着了。
                 actionButton("高亮", icon: "highlighter") { highlight() }
+                if bridge.addHighlightWithColor != nil {
+                    Menu {
+                        ForEach(HighlightSwatches.all, id: \.hex) { swatch in
+                            Button(swatch.name) { bridge.addHighlightWithColor?("", swatch.hex) }
+                        }
+                    } label: {
+                        Image(systemName: "paintpalette")
+                            .font(DS.Typo.ui(size: 13, weight: .medium))
+                    }
+                    .menuStyle(.borderlessButton)
+                    .frame(width: 26)
+                    .help("选择高亮颜色")
+                    .accessibilityLabel("选择高亮颜色")
+                }
                 actionButton("批注", icon: "square.and.pencil") { startNote() }
             }
 
-            Divider().frame(height: 16)
+            Divider().frame(height: 15)
 
             actionButton("解释", icon: "sparkles") { trigger(.explain) }
             actionButton("翻译", icon: "character.book.closed") { trigger(.translate) }
-            actionButton("追问", icon: "bubble.left.and.text.bubble.right") { trigger(.ask) }
         }
-        // 防压缩：整条浮层锚在底部中央、内容宽度本来就固定，没有 `.fixedSize()` 时
-        // 父级会把最右那一项（追问）压成省略号——实测「追问 → …」。
-        // 这是「文字被渲染成 …」的定义级缺陷，加一行把它钉死。
+        // 防压缩：整条浮层锚在底部中央，文字动作不可被压成省略号。
         .fixedSize()
-        .padding(.horizontal, DS.Space.s)
-        .padding(.vertical, DS.Space.xs)
+        .padding(.horizontal, 6)
+        .padding(.vertical, 4)
     }
 
     private var noteEditor: some View {
@@ -1008,13 +1086,14 @@ struct SelectionActionBar: View {
 
     private func actionButton(_ title: String, icon: String, action: @escaping () -> Void) -> some View {
         Button(action: action) {
-            Label(title, systemImage: icon)
-                .font(DS.Typo.ui(size: 12, weight: .medium))
-                .padding(.horizontal, DS.Space.s)
-                .padding(.vertical, 5)
+            Image(systemName: icon)
+                .font(DS.Typo.ui(size: 13, weight: .medium))
+                .frame(width: 30, height: 27)
                 .contentShape(Rectangle())
         }
         .buttonStyle(SelectionBarButtonStyle())
+        .help(title)
+        .accessibilityLabel(title)
     }
 }
 

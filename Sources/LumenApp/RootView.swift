@@ -82,6 +82,15 @@ struct RootView: View {
         .windowAppearance(isDark: effectiveIsDark)
         .windowState(state)
         .task {
+            let recoveryWarnings = PersistFile.takeRecoveryWarnings()
+            if !recoveryWarnings.isEmpty {
+                state.presentAlert(
+                    title: "数据恢复未完成",
+                    message: "以下文件损坏且备份失败，本次运行已暂停向原路径写入，防止覆盖原件：\n"
+                        + recoveryWarnings.joined(separator: "\n")
+                        + "\n请检查文件权限或可用空间，再重新启动 Lumen 重试。当前运行中的相关改动可能无法保存。"
+                )
+            }
             if let size = LaunchOptions.windowSize {
                 await Self.applyWindowSize(size)
             }

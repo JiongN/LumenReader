@@ -439,19 +439,19 @@ final class PDFTranslationController: ObservableObject {
             // 判可信度：抽几页当样本，逐页「文字层读数 vs 渲染后 OCR 读数」比一次。
             // 样本页取**正文中段**而不是开头 —— 开头是封面 / 版权页 / 目录，
             // 那几页几乎没有正文，拿它们判会把整本书误判（封面页文字层本来就短）。
-            let probe = await samplePages(pageCount: doc.pageCount, count: 3)
+            let probe = samplePages(pageCount: doc.pageCount, count: 3)
             var needsOCR = false
             if lines.isEmpty {
                 needsOCR = true          // 一个字的文字层都没有 = 扫描件
             } else if !probe.isEmpty {
-                needsOCR = await pageSamplesSayOCRNeeded(pages: probe, doc: doc)
+                needsOCR = pageSamplesSayOCRNeeded(pages: probe, doc: doc)
             }
             return (lines, sizes, needsOCR)
         }.value
     }
 
     /// 采样页号：跳过前 10% 与后 5%（封面、目录、索引），在正文区间里均匀取。
-    static func samplePages(pageCount: Int, count: Int) -> [Int] {
+    nonisolated static func samplePages(pageCount: Int, count: Int) -> [Int] {
         guard pageCount > 0, count > 0 else { return [] }
         let lower = pageCount / 10
         let upper = max(lower, pageCount - pageCount / 20 - 1)
@@ -462,19 +462,19 @@ final class PDFTranslationController: ObservableObject {
 
     /// 逐页比对。**任一页判为不可信就主张 OCR** —— 一本书里缺 ToUnicode 的往往不是某一页，
     /// 而是某个字体，通常成片出现；宁可多 OCR 一次，也不要拿乱码去翻。
-    private static func pageSamplesSayOCRNeeded(pages: [Int], doc: PDFDocument) async -> Bool {
-        await Task.detached(priority: .userInitiated) {
-            for index in pages {
-                guard let page = doc.page(at: index) else { continue }
-                let layer = page.string ?? ""
-                guard let image = PDFPageRenderer.render(page, scale: 2.0) else { continue }
-                guard let result = try? OCRService.recognize(in: image) else { continue }
-                let ocr = result.lines.map(\.text).joined(separator: "\n")
-                let verdict = TextLayerTrust.assess(textLayer: layer, ocr: ocr).verdict
-                if verdict.needsOCR { return true }
-            }
-            return false
-        }.value
+    private nonisolated static func pageSamplesSayOCRNeeded(pages: [Int], doc: PDFDocument) -> Bool {
+        // The caller already owns a private PDFDocument inside its detached task.
+        // A second detached task would send that non-Sendable document across a task boundary.
+        for index in pages {
+            guard let page = doc.page(at: index) else { continue }
+            let layer = page.string ?? ""
+            guard let image = PDFPageRenderer.render(page, scale: 2.0) else { continue }
+            guard let result = try? OCRService.recognize(in: image) else { continue }
+            let ocr = result.lines.map(\.text).joined(separator: "\n")
+            let verdict = TextLayerTrust.assess(textLayer: layer, ocr: ocr).verdict
+            if verdict.needsOCR { return true }
+        }
+        return false
     }
 
     /// 整本 OCR。进度回主线程更新 `phase`。

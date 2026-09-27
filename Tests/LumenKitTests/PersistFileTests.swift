@@ -155,6 +155,14 @@ struct PersistFileTests {
                 "备份失败时原文件还在——调用方据此知道「这次没能留档」")
         #expect(try String(contentsOf: file, encoding: .utf8) == original)
         #expect(try backups(ofFile: file).isEmpty)
+        #expect(!PersistFile.write(Data("{}".utf8), to: file, label: "recent.json"),
+                "恢复失败后即使调用方回落到默认值，也不能覆盖损坏原件")
+        #expect(try String(contentsOf: file, encoding: .utf8) == original)
+
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: dir.path)
+        #expect(PersistFile.backupCorrupt(file, reason: "retry") != nil)
+        #expect(PersistFile.write(Data("{}".utf8), to: file, label: "recent.json"),
+                "成功留档后可以恢复正常写入")
     }
 }
 

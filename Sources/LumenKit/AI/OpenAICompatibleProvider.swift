@@ -7,7 +7,9 @@ import Foundation
 /// 「OpenAI-compatible API base」为主干，再对个别服务商做特例。
 ///
 /// 刻意只依赖 URLSession：不引第三方 HTTP 库，构建离线可完成，也没有供应链风险。
-public final class OpenAICompatibleProvider: AIProvider {
+// The request configuration is immutable after init; URLSession coordinates
+// its own concurrent requests. Streams may outlive the caller's task.
+public final class OpenAICompatibleProvider: AIProvider, @unchecked Sendable {
 
     public let displayName: String
     public let modelName: String

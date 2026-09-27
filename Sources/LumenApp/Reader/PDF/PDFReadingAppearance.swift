@@ -100,4 +100,15 @@ enum PDFOriginalRendering {
         }
         return document.dataRepresentation()
     }
+
+    static func write(_ document: PDFDocument, to url: URL) -> Bool {
+        let dictionary = Thread.current.threadDictionary
+        let previous = dictionary[key]
+        dictionary[key] = true
+        defer {
+            if let previous { dictionary[key] = previous }
+            else { dictionary.removeObject(forKey: key) }
+        }
+        return document.write(to: url)
+    }
 }

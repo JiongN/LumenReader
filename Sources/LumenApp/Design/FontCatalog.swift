@@ -54,17 +54,20 @@ public enum FontCatalog {
 
     // MARK: - 缓存与装载
 
-    private static let lock = NSLock()
-    private static var cached: [Family]?
-    private static var loadTask: Task<[Family], Never>?
+    private final class State: @unchecked Sendable {
+        let lock = NSLock()
+        var cached: [Family]?
+        var loadTask: Task<[Family], Never>?
+    }
+    private static let state = State()
 
     /// 已装载的目录。没装载完时返回空数组——调用方应当先 `await load()`。
     public static func all() -> [Family] {
-        lock.withLock { cached ?? [] }
+        state.lock.withLock { state.cached ?? [] }
     }
 
     public static var isLoaded: Bool {
-        lock.withLock { cached != nil }
+        state.lock.withLock { state.cached != nil }
     }
 
     /// 装载目录。重复调用不会重复枚举，也不会提前返回未完成的结果。
@@ -76,18 +79,18 @@ public enum FontCatalog {
     /// 放在后台跑是因为完整枚举要上百毫秒，放在设置页 `body` 里会卡住弹层动画。
     /// 装载只用 CoreText 的读接口，不碰 `NSFontManager.shared`，因此可以安全离开主线程。
     public static func load() async {
-        let task: Task<[Family], Never> = lock.withLock {
-            if let existing = loadTask { return existing }
+        let task: Task<[Family], Never> = state.lock.withLock {
+            if let existing = state.loadTask { return existing }
             let created = Task.detached(priority: .utility) { build() }
-            loadTask = created
+            state.loadTask = created
             return created
         }
 
         let built = await task.value
 
-        lock.withLock {
-            if cached == nil { cached = built }
-            loadTask = nil
+        state.lock.withLock {
+            if state.cached == nil { state.cached = built }
+            state.loadTask = nil
         }
     }
 

@@ -24,7 +24,7 @@ struct DocumentTextReport {
 }
 
 /// 抽取进度。
-struct TextExtractionProgress {
+struct TextExtractionProgress: Sendable {
     var completed: Int
     var total: Int
     /// 正在做什么，例如「正在识别第 12 / 300 页」

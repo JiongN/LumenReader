@@ -161,6 +161,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         true
     }
 
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        if PDFPendingSaves.whenDrained({ sender.reply(toApplicationShouldTerminate: true) }) {
+            return .terminateLater
+        }
+        return .terminateNow
+    }
+
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         if !flag {
             WindowManager.shared.ensureWindow()

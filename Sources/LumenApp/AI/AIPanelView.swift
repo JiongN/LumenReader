@@ -56,6 +56,7 @@ struct AIPanelView: View {
         let _ = Jank.tick(.aiPanelBody)
         VStack(spacing: 0) {
             header
+            conversationScope
             divider
             transcript
             divider
@@ -105,6 +106,31 @@ struct AIPanelView: View {
         }
         .padding(.horizontal, Self.contentInset)
         .padding(.vertical, DS.Space.xs)
+    }
+
+    /// 全局会话可跨书继续提问；始终明示当前问题读取哪本书。
+    /// 会话来源只在不同于当前文档时显示，避免把“会话创建于 A”误读为“现在仍在读 A”。
+    private var conversationScope: some View {
+        let current = session.document.displayTitle
+        let conversation = state.services.conversationStore.activeConversation
+        let source = conversation?.sourceDocPath
+        let isOtherDocument = source != nil && source != session.document.id
+        let origin = conversation?.sourceDocTitle
+            ?? source.map { URL(fileURLWithPath: $0).deletingPathExtension().lastPathComponent }
+            ?? ""
+        let label = isOtherDocument
+            ? "当前文档：\(current) · 会话始于：\(origin)"
+            : "当前文档：\(current)"
+
+        return Text(label)
+            .font(.system(size: 11))
+            .foregroundStyle(DS.Palette.textSecondary)
+            .lineLimit(1)
+            .truncationMode(.middle)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, Self.contentInset)
+            .padding(.bottom, DS.Space.xs)
+            .help(label)
     }
 
     /// planner 条目 + 「这一项之前要不要画分隔线」。首项之前不画。

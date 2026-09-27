@@ -85,7 +85,6 @@ struct PDFReaderView: View {
         case 1, 2:
             ZStack {
                 PDFKitRepresentable(controller: controller)
-                    .opacity(bridge.isLoading ? 0 : 1)
                 if LaunchOptions.pdfSurfaceLevel < 2, !reader.pdfOriginalColors {
                     PDFToneOverlay(tone: PDFReadingTone(theme: theme))
                         .allowsHitTesting(false)
@@ -94,13 +93,11 @@ struct PDFReaderView: View {
         default:
             ZStack {
                 PDFKitRepresentable(controller: controller)
-                    .opacity(bridge.isLoading ? 0 : 1)
                 if !reader.pdfOriginalColors {
                     PDFToneOverlay(tone: PDFReadingTone(theme: theme))
                         .allowsHitTesting(false)
                 }
             }
-            .compositingGroup()
         }
     }
 
@@ -348,6 +345,9 @@ struct PDFReaderView: View {
             await AnnotationAudit.runDocumentAudit(sourceURL: document.url)
             await GroupedAnnotationAudit.run(sourceURL: document.url)
         }
+        if LaunchOptions.flag("--large-save-report") {
+            await PDFLargeSaveAudit.run(sourceURL: document.url)
+        }
         if LaunchOptions.searchReport {
             await AnnotationAudit.runSearchAudit(sourceURL: document.url)
         }
@@ -453,7 +453,7 @@ struct PDFReaderView: View {
             controller?.unload()
         }
 
-        controller.onPositionChange = { [weak controller, weak bridge, weak state] page, count in
+        controller.onPositionChange = { [weak bridge, weak state] page, count in
             guard let bridge, let state, count > 0 else { return }
             // 卡顿自检：记一次位置回调（滚动时若它每步都发，说明滚动在推 SwiftUI 状态）。
             Jank.tick(.positionCallback)
@@ -489,7 +489,11 @@ struct PDFReaderView: View {
                 bridge.selectionFromDrag = selection == nil
                     ? false
                     : (controller?.isSelectionFromDrag ?? false)
+                if bridge.selectionFromDrag { bridge.selectedAnnotationID = nil }
             }
+        }
+        controller.onInteractionAnchor = { [weak bridge] anchor in
+            bridge?.selectionAnchor = anchor
         }
 
         // 右键菜单里的「识别本页文字（OCR）」：菜单项动作只递增计数器，真正的识别
@@ -535,8 +539,16 @@ struct PDFReaderView: View {
         // 「已保存到原文件」更能说明改的是哪本书），两条 toast 叠着看只会打架。
         let thumbnailURL = document.url
         controller.onFileSaved = { [weak state, weak bridge] ok, message in
-            if !ok { state?.showToast(message, isError: true) }
+            if !ok {
+                if message.hasPrefix("保存失败") || message.hasPrefix("无法准备批注保存") {
+                    state?.presentAlert(title: "PDF 批注未保存",
+                        message: "\(message)\n\n请保留当前阅读窗口，检查文件权限或磁盘空间后重试。")
+                } else {
+                    state?.showToast(message, isError: true)
+                }
+            }
             else if let bridge {
+                if message == "大文件批注已保存" { state?.showToast(message) }
                 // A new independently opened document observes the saved annotation revision.
                 let renderer = PDFThumbnailRenderer(url: thumbnailURL)
                 bridge.thumbnailProvider = { index, size in renderer.render(index: index, size: size) }
@@ -552,13 +564,21 @@ struct PDFReaderView: View {
                 bridge.annotationRevision += 1
             }
         }
+        bridge.addHighlightWithColor = { [weak controller] note, hex in
+            guard let controller else { return }
+            if controller.addHighlight(fromCurrentSelection: note, colorHex: hex) {
+                bridge.annotationRevision += 1
+            } else {
+                state.showToast("高亮失败：选区已失效或该页没有文本层", isError: true)
+            }
+        }
         bridge.addPageNote = { [weak controller] pageIndex, anchorText, body in
             guard let controller else { return }
             if !controller.addNote(pageIndex: pageIndex, anchorText: anchorText, body: body) {
                 state.showToast("添加批注失败", isError: true)
             } else {
                 bridge.annotationRevision += 1
-                state.showToast("已写入原 PDF 文件")
+                state.showToast(controller.pendingSaveCount > 0 ? "批注已添加，正在保存 PDF…" : "已写入原 PDF 文件")
             }
         }
         bridge.annotationsProvider = { [weak controller] in
@@ -579,6 +599,11 @@ struct PDFReaderView: View {
             if ok { bridge.annotationRevision += 1 }
             return ok
         }
+        bridge.updateHighlightColor = { [weak controller] id, hex in
+            let ok = controller?.updateHighlightColor(id: id, hex: hex) ?? false
+            if ok { bridge.annotationRevision += 1 }
+            return ok
+        }
         // 批注面板「新建」→ 当前页一条空白便签，返回条目让面板直接进入编辑
         bridge.addNoteAtCurrentPosition = { [weak controller] in
             controller?.addPageNoteAtCurrentPosition()
@@ -592,9 +617,10 @@ struct PDFReaderView: View {
         }
         // 正文里点批注（PDFViewAnnotationHit）→ 侧栏聚焦对应行。
         // 若批注页签不在前台，顺势切过去——用户点的是批注，就该看到批注清单。
-        controller.onAnnotationTapped = { [weak bridge, weak state] id in
+        controller.onAnnotationTapped = { [weak bridge] id in
+            bridge?.selectedAnnotationID = id
+            bridge?.selectionFromDrag = false
             bridge?.focusAnnotation(id)
-            state?.revealSidebar(tab: .annotations)
         }
 
         bridge.currentContextProvider = { [weak controller] in

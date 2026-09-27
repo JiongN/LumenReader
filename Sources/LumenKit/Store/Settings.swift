@@ -653,9 +653,7 @@ public struct UISettings: Codable, Sendable, Equatable {
     /// 只是安静地切掉），太宽则阅读区被挤到不可用。手改 settings.json 塞个 5000
     /// 进来就能把界面搞成一片空白，所以解码时必须钳制。
     ///
-    /// **侧栏现在固定 248pt**（`sidebarDefault` / `DS.Size.sidebarIdeal`），
-    /// `sidebarRange` 只服务于「兼容字段的钳制」——界面上已经没有拖侧栏的入口了，
-    /// 所以它不再参与任何一次布局换算。
+    /// 侧栏可在 `sidebarRange` 内调整，显示宽度还会按当前窗口可用空间收窄。
     ///
     /// AI 面板下限本批从 280 提到 **300**：footer 行（引用编号 + 四个动作按钮）
     /// 在 300pt 时刚好放平，280pt 会把「添加到批注」压成两行。这是用户明确的诉求

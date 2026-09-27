@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+from smoke_log import diagnostic_failures
 
 ROOT = Path(__file__).resolve().parents[1]
 OUT = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else ROOT / "docs/verification/smoke"
@@ -35,10 +36,12 @@ cases = {
     "epub": ["--open", str(FIXTURES / "typography.epub"), "--epub-layout-report", "1", "--layout-report", "1", "--window-size", "1320x820"],
     "pdf-dark": ["--open", str(FIXTURES / "text.pdf"), "--reading-theme", "midnight", "--window-size", "1320x820", "--layout-report", "1"],
 }
-expected = {
-    "pdf-rules": ["[Lumen][entry]", "[Lumen][resize]", "[Lumen][keys]", "[Lumen][theme]"],
-    "pdf-behavior": ["[Lumen][conversation]", "[Lumen][paragraph]", "[Lumen][annotate]", "[Lumen][annotation-group]"],
-    "epub": ["[Lumen][epub-layout]"],
+required = {
+    "pdf-rules": ["layout", "resize", "entry", "keys", "ocr-menu", "theme"],
+    "pdf-minimum": ["layout"],
+    "pdf-behavior": ["annotate", "paragraph", "conversation", "lifecycle", "annotation-group"],
+    "epub": ["epub-layout", "layout"],
+    "pdf-dark": ["layout"],
 }
 results = []
 for name, args in cases.items():
@@ -46,13 +49,14 @@ for name, args in cases.items():
     env = dict(os.environ, LUMEN_TEST_DATA=str(OUT / f"data-{name}"))
     with (OUT / f"{name}.log").open("w") as log:
         try:
-            result = subprocess.run([str(APP), *args, "--capture", str(image), "--capture-delay", "9", "--capture-screen", "1"], env=env, stdout=log, stderr=log, timeout=60)
+            # First WebKit launch can take longer than the native PDF cases.
+            capture_delay = "25" if name == "epub" else "9"
+            result = subprocess.run([str(APP), *args, "--capture", str(image), "--capture-delay", capture_delay, "--capture-screen", "1"], env=env, stdout=log, stderr=log, timeout=60)
             code = result.returncode
         except subprocess.TimeoutExpired:
             code = 124
     text = (OUT / f"{name}.log").read_text()
-    failures = [line for line in text.splitlines() if "❌" in line or "Fatal error" in line]
-    failures.extend("missing diagnostic: " + marker for marker in expected.get(name, []) if marker not in text)
+    failures = diagnostic_failures(text, required[name])
     ok = code == 0 and image.exists() and image.stat().st_size > 0 and not failures
     results.append(dict(case=name, passed=ok, exit_code=code, failures=failures))
     print(f"{name}: {'PASS' if ok else 'FAIL'}", flush=True)

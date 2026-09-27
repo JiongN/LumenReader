@@ -36,6 +36,12 @@ import PDFKit
         let saved = PDFDocument(url: url)?.page(at: doc.index(for: page))?.annotations.filter { $0.contents == marker } ?? []
         check("single highlight survives save", saved.count == 1 && (saved.first?.quadrilateralPoints?.count ?? 0) >= 8)
         check("stable identity after save", saved.first.map { PDFController.entryID($0, pageIndex: doc.index(for: page)) } == item.id)
+        check("change highlight color", controller.updateHighlightColor(id: item.id, hex: "#64B5F6"))
+        let recolored = await controller.annotationsList().first { $0.id == item.id }
+        check("color reflected in list", recolored?.highlightHex?.uppercased() == "#64B5F6")
+        let savedColor = PDFDocument(url: url)?.page(at: doc.index(for: page))?.annotations
+            .first { $0.contents == marker }?.color
+        check("color survives reopening PDF", PDFController.hexString(from: savedColor)?.uppercased() == "#64B5F6")
         var hitID: String?
         controller.onAnnotationTapped = { hitID = $0 }
         controller.didTapAnnotation(annotation)

@@ -50,12 +50,12 @@ final class AppServices: ObservableObject {
         // ── 自检开关：以前写在 AppState.init 里，挪到共享服务这一层 ──
         // 主题不走这里（setter 会防抖落盘）；这里只处理会污染 settings.json 的项。
 
-        // --panel-width：与拖动分隔线同一个设置项（侧栏分量已废弃，仅解析不生效）。
+        // --panel-width：分别验证两侧面板的落库宽度。
         if let panel = LaunchOptions.panelWidth {
             settings.suppressSave = true
+            settings.commitSidebarWidth(panel.sidebar)
             settings.commitAIPanelWidth(panel.ai)
-            NSLog("%@", "[Lumen] 自检：--panel-width 只设 AI 面板 = \(Int(panel.ai))pt"
-                  + "（侧栏分量 \(Int(panel.sidebar))pt 已废弃，侧栏采用 \(Int(UISettings.PanelWidth.sidebarDefault))pt 基准宽度并随窗口缩放）")
+            NSLog("%@", "[Lumen] 自检：--panel-width 侧栏=\(Int(panel.sidebar))pt AI=\(Int(panel.ai))pt")
         }
 
         if LaunchOptions.perfReport {
@@ -331,8 +331,14 @@ final class LumenWindowController: NSWindowController, NSWindowDelegate {
     init(workspace: AppState) {
         self.workspace = workspace
 
+        // 新窗口默认铺满当前桌面的可用宽度；高度保留原来的 860pt 上限。
+        // 使用 visibleFrame 避开侧边 Dock，并让多显示器各按所在屏幕计算。
+        let desktop = (NSScreen.main ?? NSScreen.screens.first)?.visibleFrame
+            ?? NSRect(x: 0, y: 0, width: 1340, height: 860)
+        let defaultHeight = min(860, desktop.height)
+
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 1340, height: 860),
+            contentRect: NSRect(x: 0, y: 0, width: desktop.width, height: defaultHeight),
             styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
             backing: .buffered,
             defer: false
@@ -343,7 +349,7 @@ final class LumenWindowController: NSWindowController, NSWindowDelegate {
         // 改成标题栏透明 + 内容延伸到最顶，红黄绿交通灯悬浮在自定义标签栏同一行里（Obsidian 式）。
         window.titleVisibility = .hidden
         window.titlebarAppearsTransparent = true
-        window.minSize = CGSize(width: 940, height: 640)
+        window.minSize = CGSize(width: min(940, desktop.width), height: min(640, desktop.height))
         // 我们自己做标签，关掉系统的窗口标签化，否则窗口菜单里会出现
         // 「显示标签栏 / ⌘T」等与自定义标签冲突的项。
         window.tabbingMode = .disallowed
@@ -369,9 +375,17 @@ final class LumenWindowController: NSWindowController, NSWindowDelegate {
         window.contentViewController = hosting
 
         // 装上托管视图后，自动布局会按内容的最小宽高把窗口收窄到 minSize，
-        // 所以默认尺寸必须在这之后再显式设一次（对齐旧 WindowGroup 的 defaultSize）。
-        window.setContentSize(NSSize(width: 1340, height: 860))
-        window.center()
+        // 所以默认尺寸必须在这之后再显式设一次；按窗口外框计算，确保
+        // 实际左右边界与桌面可用区域一致，而非只让内容区达到桌面宽度。
+        window.setFrame(NSRect(x: desktop.minX,
+                               y: desktop.midY - defaultHeight / 2,
+                               width: desktop.width,
+                               height: defaultHeight), display: true)
+        if LaunchOptions.layoutReport {
+            NSLog("%@", "[Lumen][window-default] desktopWidth=\(Int(desktop.width)) "
+                  + "windowWidth=\(Int(window.frame.width)) "
+                  + "pass=\(abs(window.frame.width - desktop.width) < 1)")
+        }
 
         workspace.attach(window: window)
 

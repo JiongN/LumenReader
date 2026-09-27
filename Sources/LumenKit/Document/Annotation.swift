@@ -23,12 +23,11 @@ public struct AnnotationItem: Identifiable, Sendable, Equatable {
     public var createdAt: Date
     /// 标注颜色，形如 `#RRGGBB`。
     ///
-    /// 只对 **PDF 高亮类**批注有意义——颜色是画在正文上的那个色，列表里据此显示色块，
+    /// PDF 与 EPUB 高亮都使用它：颜色与正文标记一致，列表里据此显示色块，
     /// 让人一眼对上「清单里这条 = 页面上那块」。取不到颜色（PDF 未设色 / EPUB 批注）时为 nil，
     /// 调用方回退到主题强调色。
     ///
-    /// 刻意**不**加进 `StoredAnnotation`：那是 EPUB 的落盘模型，动它会改存档编码格式，
-    /// 而容错解码是项目硬约束，不值得为配色冒这个险。EPUB 侧恒为 nil。
+    /// EPUB 旧存档没有这个可选字段，解码后按默认黄色显示。
     public var highlightHex: String?
     /// 这条高亮的**存储矩形比整行窄**（历史遗留：修复「按整行截断」之前画下的批注，
     /// 存进 PDF 的矩形只覆盖划中的那几个字）。
@@ -69,7 +68,8 @@ struct AnnotationArchive: Codable {
     /// 旧数据容错升级入口
     static func load(from url: URL) -> AnnotationArchive {
         guard let data = try? Data(contentsOf: url), !data.isEmpty else { return AnnotationArchive() }
-        return (try? JSONDecoder().decode(AnnotationArchive.self, from: data)) ?? AnnotationArchive()
+        return PersistFile.decodeOrBackup(data: data, type: AnnotationArchive.self,
+            fileURL: url, reason: "EPUB annotations.json") ?? AnnotationArchive()
     }
 }
 
@@ -81,6 +81,7 @@ struct StoredAnnotation: Codable, Equatable {
     var note: String
     var hasHighlight: Bool
     var createdAt: Date
+    var highlightHex: String?
 }
 
 /// 一本书的 EPUB 批注集合。读写都在主线程（批注量小，JSON 体积 KB 级）。
@@ -102,7 +103,8 @@ public final class AnnotationStore {
                 quote: stored.quote,
                 note: stored.note,
                 hasHighlight: stored.hasHighlight,
-                createdAt: stored.createdAt
+                createdAt: stored.createdAt,
+                highlightHex: stored.highlightHex
             )
         }
     }
@@ -123,7 +125,8 @@ public final class AnnotationStore {
             quote: item.quote,
             note: item.note,
             hasHighlight: item.hasHighlight,
-            createdAt: item.createdAt
+            createdAt: item.createdAt,
+            highlightHex: item.highlightHex
         ))
         flush()
         return true
@@ -139,6 +142,19 @@ public final class AnnotationStore {
     }
 
     @discardableResult
+    public func updateHighlightColor(id: String, hex: String) -> Bool {
+        guard hex.range(of: "^#[0-9A-Fa-f]{6}$", options: .regularExpression) != nil,
+              let index = archive.items.firstIndex(where: { $0.id == id && $0.hasHighlight }) else { return false }
+        let previous = archive.items[index].highlightHex
+        archive.items[index].highlightHex = hex.uppercased()
+        guard flush() else {
+            archive.items[index].highlightHex = previous
+            return false
+        }
+        return true
+    }
+
+    @discardableResult
     public func remove(id: String) -> Bool {
         let before = archive.items.count
         archive.items.removeAll { $0.id == id }
@@ -147,8 +163,9 @@ public final class AnnotationStore {
         return true
     }
 
-    public func flush() {
-        guard let data = try? JSONEncoder().encode(archive) else { return }
-        PersistFile.write(data, to: fileURL, label: "annotations.json")
+    @discardableResult
+    public func flush() -> Bool {
+        guard let data = try? JSONEncoder().encode(archive) else { return false }
+        return PersistFile.write(data, to: fileURL, label: "annotations.json")
     }
 }

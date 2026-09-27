@@ -134,4 +134,17 @@ struct PDFScrollPublicationTests {
         try await Task.sleep(nanoseconds: 100_000_000)
         #expect(controller.view.autoScales)
     }
+
+    @Test func dividerDragKeepsAutomaticFitActive() async throws {
+        let (controller, _, url) = try fixture()
+        defer { controller.unload(); try? FileManager.default.removeItem(at: url) }
+        try #require(controller.panelAnchor() != nil)
+        controller.view.autoScales = true
+        controller.setPanelWidthDragging(true)
+        #expect(controller.view.autoScales)
+        controller.setPanelWidthDragging(false)
+        try await Task.sleep(nanoseconds: 100_000_000)
+        #expect(controller.view.autoScales)
+    }
+
 }
