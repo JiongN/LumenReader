@@ -31,7 +31,7 @@ codesign --verify --strict --deep ../../dist/Lumen.app
 
 此命令会创建并推送 tag，之后创建公开 GitHub Release 和上传资产。要求干净工作区、尚未使用的本地 tag，以及已登录的 gh 或 GH_TOKEN/GITHUB_TOKEN。仅暂存不算干净。推送失败立即停止；HTTP 失败非零退出，不再打印成功。
 
-**约定（2026-09-22）**：GitHub 上不写更新记录——Release 说明只保留脚本里那句指路文字，README 不设 changelog 章节。变更历史以 git log 为准（本地可见），不要在对外页面追加「本次更新内容」。
+**约定（2026-09-22，2026-09-30 修订）**：GitHub Release 正文不铺陈更新记录——只保留指路句并链到仓库内的 `CHANGELOG.md`，README 不设 changelog 章节。对使用者有影响的变更（行为变更、新功能、已知问题）写在仓库根目录的 `CHANGELOG.md`；完整提交历史仍以 git log 为准（本地可见）。不要在 GitHub Release 页面追加「本次更新内容」清单。
 
 若已推送 tag 而 Release 上传失败，保留产物和 tag，在 GitHub/gh 中检查并补传，勿直接删除公开标签。后续应给发布过程增加独立、可恢复的上传阶段。
 

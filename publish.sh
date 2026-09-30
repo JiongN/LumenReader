@@ -141,11 +141,11 @@ fi
 
 if command -v gh >/dev/null 2>&1; then
     echo "▶︎ 用 gh 创建 Release…"
-    # 约定（2026-09-22）：GitHub Release 不写更新记录/changelog，说明只保留这一句指路。
-    # 变更历史以 git log 为准（本地可见）。不要在这里加「本次更新内容」清单。
+    # 约定（2026-09-22，2026-09-30 修订）：GitHub Release 正文不铺陈更新记录，
+    # 只保留指路句并链到仓库内的 CHANGELOG.md。变更明细写在 CHANGELOG.md。
     gh release create "$TAG" "$ZIP" "${UPLOAD_EXTRA[@]}" \
         --title "Lumen $VERSION" \
-        --notes "Lumen $VERSION 发布。详见 https://github.com/JiongN/LumenReader 与仓库 README。"
+        --notes "Lumen $VERSION 发布。变更记录（新功能、行为变更、已知问题）见仓库 CHANGELOG.md：https://github.com/JiongN/LumenReader/blob/main/CHANGELOG.md"
     echo "✅ Release 已创建并上传：https://github.com/JiongN/LumenReader/releases/tag/$TAG"
 elif [[ -n "${GH_TOKEN:-}${GITHUB_TOKEN:-}" ]]; then
     TOKEN="${GH_TOKEN:-$GITHUB_TOKEN}"
@@ -155,7 +155,7 @@ elif [[ -n "${GH_TOKEN:-}${GITHUB_TOKEN:-}" ]]; then
         -H "Authorization: Bearer $TOKEN" \
         -H "Accept: application/vnd.github+json" \
         "https://api.github.com/repos/JiongN/LumenReader/releases" \
-        -d "{\"tag_name\":\"$TAG\",\"name\":\"Lumen $VERSION\",\"draft\":false,\"prerelease\":false}")"
+        -d "{\"tag_name\":\"$TAG\",\"name\":\"Lumen $VERSION\",\"draft\":false,\"prerelease\":false,\"body\":\"Lumen ${VERSION} 发布。变更记录见仓库 CHANGELOG.md：https://github.com/JiongN/LumenReader/blob/main/CHANGELOG.md\"}")"
     if ! echo "$RESP" | grep -q '"id"'; then
         echo "✗ 创建 Release 失败：$RESP" >&2
         exit 1
