@@ -24,6 +24,23 @@ import PDFKit
             check("text fixture", false); return
         }
         let marker = "group audit " + UUID().uuidString
+        let roomyRows = [
+            CGRect(x: 80, y: 400, width: 220, height: 28),
+            CGRect(x: 80, y: 372, width: 210, height: 28)
+        ]
+        let compactRows = PDFAnnotationGeometry.compactHighlightRows(roomyRows)
+        check("oversized highlight rows leave a visible gap",
+              compactRows.count == 2 && compactRows[0].minY > compactRows[1].maxY)
+        if let oversized = PDFAnnotationGeometry.makeHighlight(
+            rectangles: compactRows, note: "row spacing audit", color: NSColor(hex: 0xF3DFA6),
+            author: "Lumen") {
+            PDFAnnotationGeometry.setRectangles(roomyRows, on: oversized)
+            page.addAnnotation(oversized)
+            check("existing oversized highlight can be compacted", controller.compactAnnotationRows() >= 1)
+            let fixed = PDFAnnotationGeometry.rectangles(of: oversized)
+            check("existing highlight has a row gap", fixed.count == 2 && fixed[0].minY > fixed[1].maxY)
+            page.removeAnnotation(oversized)
+        }
         controller.view.setCurrentSelection(selection, animate: false)
         check("multi-line fixture", selection.selectionsByLine().count > 1)
         check("create grouped highlight", controller.addHighlight(fromCurrentSelection: marker))

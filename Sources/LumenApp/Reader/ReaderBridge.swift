@@ -192,6 +192,7 @@ final class ReaderBridge: ObservableObject {
     /// 只有 PDF 实现提供它；EPUB 侧为 nil（EPUB 的高亮存在数据目录里，
     /// 本来就是按段落范围记的，不存在「半行」这回事）。
     var normalizeAnnotationRows: (() -> Int)?
+    var compactAnnotationRows: (() -> Int)?
     /// 侧栏译文 → PDF 正文：定位到段落几何并短暂选中原文。
     var revealTranslationParagraph: ((PDFParagraph, Int) -> Void)?
 
@@ -255,6 +256,7 @@ final class ReaderBridge: ObservableObject {
         updateAnnotationNote = nil
         addNoteAtCurrentPosition = nil
         normalizeAnnotationRows = nil
+        compactAnnotationRows = nil
         revealTranslationParagraph = nil
         pdfTranslationController = nil
         epubTranslationController = nil
@@ -269,6 +271,7 @@ enum SidebarTab: String, CaseIterable, Identifiable {
     case annotations
     case thumbnails
     case translation
+    case literatureGraph
 
     var id: String { rawValue }
 
@@ -278,8 +281,8 @@ enum SidebarTab: String, CaseIterable, Identifiable {
     /// 都要它，各写一份的话新增页签时漏改一处，表现是「图标栏有五个、菜单里只有四个」。
     static func available(for kind: DocumentKind?) -> [SidebarTab] {
         kind == .pdf
-            ? [.outline, .smartOutline, .search, .annotations, .thumbnails, .translation]
-            : [.outline, .smartOutline, .search, .annotations, .translation]
+            ? [.outline, .smartOutline, .search, .annotations, .thumbnails, .translation, .literatureGraph]
+            : [.outline, .smartOutline, .search, .annotations, .translation, .literatureGraph]
     }
 
     var title: String {
@@ -292,6 +295,7 @@ enum SidebarTab: String, CaseIterable, Identifiable {
         case .annotations:  return "批注"
         case .thumbnails:   return "页面"
         case .translation:  return "翻译"
+        case .literatureGraph: return "图谱"
         }
     }
 
@@ -304,6 +308,7 @@ enum SidebarTab: String, CaseIterable, Identifiable {
         case .annotations:  return "批注与高亮"
         case .thumbnails:   return "页面缩略图"
         case .translation:  return "段落翻译"
+        case .literatureGraph: return "文献图谱"
         }
     }
 
@@ -315,6 +320,7 @@ enum SidebarTab: String, CaseIterable, Identifiable {
         case .annotations:  return "square.and.pencil"
         case .thumbnails:   return "square.grid.2x2"
         case .translation:  return "character.book.closed"
+        case .literatureGraph: return "point.3.connected.trianglepath.dotted"
         }
     }
 }

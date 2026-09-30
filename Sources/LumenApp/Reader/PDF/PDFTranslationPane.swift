@@ -20,7 +20,12 @@ struct PDFTranslationPane: View {
     /// 全篇段落按页分节。`controller.paragraphs` 已按「页号升序 → 页内阅读顺序」排好，
     /// 这里只负责分组、保持每页内部顺序不变。跨页续段按自己的起始页归入一节（只出现一次）。
     private var pageSections: [(page: Int, paragraphs: [PDFParagraph])] {
-        let grouped = Dictionary(grouping: controller.paragraphs) { $0.pageIndex }
+        // A service outage is one error, not hundreds of identical paragraph cards.
+        // Preserve translations that completed before the queue stopped.
+        let visible = controller.phase.isFailure
+            ? controller.paragraphs.filter { controller.state(of: $0.id).translation != nil }
+            : controller.paragraphs
+        let grouped = Dictionary(grouping: visible) { $0.pageIndex }
         return grouped.keys.sorted().map { (page: $0, paragraphs: grouped[$0] ?? []) }
     }
     private var targetName: String {
@@ -161,6 +166,10 @@ struct PDFTranslationPane: View {
         if controller.phase.isBusy {
             ProgressView().controlSize(.small)
             Button("停止") { controller.stop() }.buttonStyle(.plain)
+        } else if controller.unfinishedCount > 0 && controller.phase.isFailure {
+            Text("未完成 \(controller.unfinishedCount)")
+                .foregroundStyle(DS.Palette.warning)
+            Button("重试") { retryFailed() }.buttonStyle(.plain)
         } else if controller.failedCount > 0 {
             Text("失败 \(controller.failedCount)")
                 .foregroundStyle(DS.Palette.warning)
@@ -219,13 +228,18 @@ struct PDFTranslationPane: View {
         } else if case .recognizing(let progress) = controller.phase {
             sidebarState("正在 OCR · \(progress.completed)/\(progress.total)",
                          icon: "text.viewfinder", showsProgress: true)
-        } else if case .failed(let reason) = controller.phase {
+        } else if case .failed(let reason) = controller.phase, controller.doneCount == 0 {
             sidebarState(reason, icon: "exclamationmark.triangle", showsProgress: false)
         } else if controller.paragraphs.isEmpty {
             sidebarState("这篇文档抽不出可翻译段落", icon: "checkmark.circle", showsProgress: false)
         } else {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: DS.Space.m) {
+                    if case .failed(let reason) = controller.phase {
+                        Label(reason, systemImage: "exclamationmark.triangle")
+                            .font(DS.Typo.ui(size: 12))
+                            .foregroundStyle(DS.Palette.warning)
+                    }
                     HStack {
                         Text("全篇译文 · 上下滚动查看")
                             .font(DS.Typo.ui(size: 11.5, weight: .semibold))

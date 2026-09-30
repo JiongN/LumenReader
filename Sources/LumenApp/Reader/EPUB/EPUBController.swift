@@ -430,13 +430,13 @@ final class EPUBController: NSObject, ObservableObject {
     /* 批注高亮。半透明黄底 + 极淡的下划线：既要一眼看见，又不能把正文压得看不清。
        用 background 而不是 border，是因为高亮常跨行，border 会在行间断开。 */
     mark.lumen-hl {
-      background: rgba(var(--lm-highlight-rgb, 255, 214, 64), 0.42) !important;
+      background: rgba(var(--lm-highlight-rgb, 243, 223, 166), 0.72) !important;
       color: inherit !important;
       border-radius: 2px;
       padding: 0 1px;
     }
     html.lumen-dark mark.lumen-hl {
-      background: rgba(var(--lm-highlight-rgb, 255, 214, 64), 0.28) !important;
+      background: rgba(var(--lm-highlight-rgb, 243, 223, 166), 0.38) !important;
     }
     html.lumen-dark body, html.lumen-dark p, html.lumen-dark div, html.lumen-dark span,
     html.lumen-dark li, html.lumen-dark td, html.lumen-dark th, html.lumen-dark dd,

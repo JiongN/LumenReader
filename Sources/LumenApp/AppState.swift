@@ -173,6 +173,7 @@ final class AppState: ObservableObject {
     private weak var mainWindow: NSWindow?
 
     private var toastTask: Task<Void, Never>?
+    private var graphReturnJumpTask: Task<Void, Never>?
 
     private var cancellables = Set<AnyCancellable>()
 
@@ -366,6 +367,14 @@ final class AppState: ObservableObject {
             if target == nil { activeSession = nil }
             return
         }
+        if let previous = activeSession {
+            previous.literatureGraph.cancel()
+            if previous.showsLiteratureGraph {
+                previous.showsLiteratureGraph = false
+                previous.bridge.sidebarTab = previous.sidebarBeforeGraph
+                setAIPanelVisible(previous.aiPanelWasVisibleBeforeGraph, animated: false)
+            }
+        }
         activeSession = target
         if let target {
             retainReader(for: target.id)
@@ -446,8 +455,38 @@ final class AppState: ObservableObject {
             ? .epub(chapterIndex: clamped, anchor: "", charOffset: 0)
             : .pdf(page: clamped, charOffset: 0)
 
-        bridge.goTo?(locator)
+        if let session = activeSession, session.showsLiteratureGraph {
+            leaveLiteratureGraph()
+            graphReturnJumpTask?.cancel()
+            if session.document.kind == .pdf {
+                // PDFController queues this until panel anchor restoration finishes.
+                session.bridge.goTo?(locator)
+            } else {
+                let sessionID = session.id
+                graphReturnJumpTask = Task { @MainActor [weak self] in
+                    try? await Task.sleep(nanoseconds: 180_000_000)
+                    guard let self, !Task.isCancelled,
+                          self.activeSession?.id == sessionID,
+                          !session.showsLiteratureGraph else { return }
+                    session.bridge.goTo?(locator)
+                }
+            }
+        } else {
+            graphReturnJumpTask?.cancel()
+            bridge.goTo?(locator)
+        }
         return clamped
+    }
+
+    func leaveLiteratureGraph() {
+        guard let session = activeSession, session.showsLiteratureGraph else { return }
+        session.showsLiteratureGraph = false
+        session.literatureGraph.cancel()
+        setAIPanelVisible(session.aiPanelWasVisibleBeforeGraph, animated: false)
+        if session.bridge.sidebarTab == .literatureGraph {
+            revealSidebar(tab: session.sidebarBeforeGraph)
+            setSidebarVisible(session.sidebarWasVisibleBeforeGraph)
+        }
     }
 
     func reopen(_ entry: RecentEntry) {

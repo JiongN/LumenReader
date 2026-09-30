@@ -377,7 +377,7 @@ struct EPUBReaderView: View {
         controller.highlightsProvider = { chapter in
             store.items
                 .filter { $0.locator.chapterIndex == chapter && $0.hasHighlight && !$0.quote.isEmpty }
-                .map { (id: $0.id, quote: $0.quote, hex: $0.highlightHex ?? "#FFD640") }
+                .map { (id: $0.id, quote: $0.quote, hex: $0.highlightHex ?? "#F3DFA6") }
         }
 
         func addHighlight(_ note: String, hex: String) {
@@ -402,7 +402,7 @@ struct EPUBReaderView: View {
             bridge.annotationRevision += 1
             state.showToast(note.isEmpty ? "已高亮" : "已加入批注")
         }
-        bridge.addHighlight = { note in addHighlight(note, hex: "#FFD640") }
+        bridge.addHighlight = { note in addHighlight(note, hex: "#F3DFA6") }
         bridge.addHighlightWithColor = { note, hex in addHighlight(note, hex: hex) }
         bridge.updateHighlightColor = { id, hex in
             guard store.updateHighlightColor(id: id, hex: hex) else { return false }

@@ -27,6 +27,11 @@ final class ReaderSession: ObservableObject, Identifiable {
     /// 这里刻意不再持有 `chat`，避免「A 标签的请求落到 B 标签的气泡」这类串台，
     /// 也避免一份会话被多份会话各自持有、各自落盘。
     let smartOutline = SmartOutlineModel()
+    let literatureGraph: LiteratureGraphModel
+    @Published var showsLiteratureGraph = false
+    var sidebarBeforeGraph: SidebarTab = .outline
+    var sidebarWasVisibleBeforeGraph = true
+    var aiPanelWasVisibleBeforeGraph = false
 
     /// 阅读区上报的文档元数据镜像，导出摘要时需要作者 / 篇幅。
     @Published var documentMetadata = DocumentMetadata()
@@ -48,6 +53,7 @@ final class ReaderSession: ObservableObject, Identifiable {
     init(document: OpenDocument, id: UUID = UUID()) {
         self.id = id
         self.document = document
+        self.literatureGraph = LiteratureGraphModel(document: document)
         // 智能目录按文档路径存取，只在创建会话时绑定，重新挂载视图不清空草稿、不重读文件。
         smartOutline.bind(to: document, unitName: document.kind == .epub ? "章" : "页")
 
@@ -62,6 +68,7 @@ final class ReaderSession: ObservableObject, Identifiable {
     /// 关掉一个文档标签不该把正在进行的整篇回答中断掉。流式任务会随全局
     /// `AIChatModel` 的生命周期自然结束。
     func close() {
+        literatureGraph.cancel()
         busyCancel?()
         busyCancel = nil
         fullTextTask?.cancel()

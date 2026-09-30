@@ -40,6 +40,9 @@ final class PDFController: NSObject, ObservableObject {
     private enum PanelAdjustment { case visibility, widthDrag }
     private var panelAdjustments: Set<PanelAdjustment> = []
     private var panelRestoreGeneration = UUID()
+    /// A page request made while a panel is restoring must run after its old
+    /// viewport anchor has been reapplied, or the restore scrolls back over it.
+    private var pendingPageJump: Int?
 
     func connectViewport(_ state: PDFViewportState) {
         viewportState = state
@@ -229,13 +232,17 @@ final class PDFController: NSObject, ObservableObject {
             panelTrace.enters += 1
             panelTrace.autoScalesAtEnter.append(view.autoScales)
             if let anchor = panelAnchor() { panelTrace.anchorAtEnter.append(anchor) }
-            // 显隐动画仍钉住倍率；分隔线拖动要让适宽 PDF 随正文宽度实时缩放。
-            // 拖动事件已经由 LivePanelWidth 按显示帧合并，避免重复重排。
-            if kind == .visibility { view.autoScales = false }
+            // PDFKit 在每个宽度变化时重新算适宽并栅格化页面；大 PDF 拖动
+            // 分隔线时即使合并到 12Hz 仍会阻塞主线程。拖动期间保持当前倍率，
+            // 松手后只做一次适宽与锚点恢复。
+            view.autoScales = false
         } else {
             panelAdjustments.remove(kind)
             guard panelAdjustments.isEmpty else { return }
-            guard let (page, point, automatic) = resizeAnchor else { return }
+            guard let (page, point, automatic) = resizeAnchor else {
+                performPendingPageJump()
+                return
+            }
             let expectedGeneration = panelRestoreGeneration
             let expectedDocument = document
             panelTrace.exits += 1
@@ -250,13 +257,25 @@ final class PDFController: NSObject, ObservableObject {
                 if let scroll = self.view.documentView?.enclosingScrollView, let documentView = self.view.documentView {
                     let target = documentView.convert(self.view.convert(point, from: page), from: self.view)
                     let clip = scroll.contentView
-                    clip.scroll(to: CGPoint(x: target.x - clip.bounds.width / 2, y: target.y - clip.bounds.height / 2))
+                    // 自动适宽时横向以新页面居中；旧视口的 x 坐标属于旧宽度，
+                    // 直接恢复会把新页面左半边推到面板下面。
+                    let x = automatic ? max(0, (documentView.bounds.width - clip.bounds.width) / 2)
+                                      : target.x - clip.bounds.width / 2
+                    clip.scroll(to: CGPoint(x: x, y: target.y - clip.bounds.height / 2))
                     scroll.reflectScrolledClipView(clip)
                 }
                 if let anchor = self.panelAnchor() { self.panelTrace.anchorAtExit.append(anchor) }
                 self.scheduleViewport()
+                self.performPendingPageJump()
             }
         }
+    }
+
+    private func performPendingPageJump() {
+        guard panelAdjustments.isEmpty, resizeAnchor == nil,
+              let target = pendingPageJump else { return }
+        pendingPageJump = nil
+        go(to: target)
     }
 
     /// OCR 结果缓存。按页存，识别过一次就不再重复花钱——
@@ -406,12 +425,16 @@ final class PDFController: NSObject, ObservableObject {
 
     @discardableResult
     func load(url: URL) -> PDFDocument? {
-        guard let doc = PDFDocument(url: url) else { return nil }
+        guard let doc = PDFDocument(url: url), !doc.isLocked else {
+            unload()
+            return nil
+        }
         panelRestoreGeneration = UUID()
         saveGeneration = UUID()
         dirtyLumenPages.removeAll()
         panelAdjustments.removeAll()
         resizeAnchor = nil
+        pendingPageJump = nil
         viewportIdleWork?.cancel()
         viewportIdleWork = nil
         viewportThrottleWork?.cancel()
@@ -436,6 +459,8 @@ final class PDFController: NSObject, ObservableObject {
         saveGeneration = UUID()
         dirtyLumenPages.removeAll()
         panelAdjustments.removeAll()
+        resizeAnchor = nil
+        pendingPageJump = nil
         viewportIdleWork?.cancel()
         viewportIdleWork = nil
         viewportThrottleWork?.cancel()
@@ -572,6 +597,10 @@ final class PDFController: NSObject, ObservableObject {
     func go(to pageIndex: Int) {
         guard let doc = document, pageIndex >= 0, pageIndex < doc.pageCount,
               let page = doc.page(at: pageIndex) else { return }
+        if !panelAdjustments.isEmpty || resizeAnchor != nil {
+            pendingPageJump = pageIndex
+            return
+        }
         suppressCallbacks = true
         view.go(to: page)
         suppressCallbacks = false
@@ -846,23 +875,8 @@ final class PDFController: NSObject, ObservableObject {
     /// 不逐页扫（几百页的 'string' 加起来会卡住主线程），而是等距抽样几页：
     /// 一本真正的扫描书不会只有首页没文本层。抽到的页里多数为空即判定为扫描件。
     func detectScannedDocument(samples: Int = 8) -> Bool {
-        guard let doc = document, doc.pageCount > 0 else { return false }
-        let step = max(1, doc.pageCount / max(samples, 1))
-
-        var checked = 0
-        var empty = 0
-        var index = 0
-        while index < doc.pageCount && checked < samples {
-            checked += 1
-            let text = doc.page(at: index)?.string ?? ""
-            if text.trimmingCharacters(in: .whitespacesAndNewlines).count < 24 {
-                empty += 1
-            }
-            index += step
-        }
-
-        guard checked > 0 else { return false }
-        return Double(empty) / Double(checked) >= 0.6
+        guard let doc = document else { return false }
+        return PDFScanDetector.isScanned(doc, samples: samples)
     }
 
     /// 指定页有没有可用的文本层
@@ -1032,12 +1046,12 @@ final class PDFController: NSObject, ObservableObject {
     /// 每页使用一个标准 QuadPoints 高亮，跨行仍属于同一条批注。
     /// - Returns: 是否至少画上了一处（扫描件上没有文本层时选区是空的）。
     @discardableResult
-    func addHighlight(fromCurrentSelection note: String, colorHex: String = "#FFD54F") -> Bool {
+    func addHighlight(fromCurrentSelection note: String, colorHex: String = "#F3DFA6") -> Bool {
         guard let selection = view.currentSelection, document != nil else { return false }
 
-        let rgb = UInt32(colorHex.dropFirst(colorHex.hasPrefix("#") ? 1 : 0), radix: 16) ?? 0xFFD54F
+        let rgb = UInt32(colorHex.dropFirst(colorHex.hasPrefix("#") ? 1 : 0), radix: 16) ?? 0xF3DFA6
         guard addMarkup(selection: selection, note: note,
-                        color: NSColor(hex: rgb).withAlphaComponent(0.45)) else { return false }
+                        color: NSColor(hex: rgb).withAlphaComponent(0.72)) else { return false }
         // 选区已被「用掉」：高亮之后还留着蓝色选区会让人以为没生效
         view.setCurrentSelection(nil, animate: false)
         let pages = Set(selection.pages.compactMap { document?.index(for: $0) })
@@ -1072,7 +1086,7 @@ final class PDFController: NSObject, ObservableObject {
 
         // 锚文本定位：在**本页**范围内找，避免全书 findString 把别的页的同名句抢走
         if trimmedAnchor.count >= 6, let anchorSelection = selection(of: trimmedAnchor, on: pageIndex) {
-            if addMarkup(selection: anchorSelection, note: body, color: NSColor.systemTeal.withAlphaComponent(0.40)) {
+            if addMarkup(selection: anchorSelection, note: body, color: NSColor(hex: 0xB9DFC9).withAlphaComponent(0.72)) {
                 return saveToFile(changedLumenPages: [pageIndex])
             }
         }
@@ -1365,7 +1379,7 @@ final class PDFController: NSObject, ObservableObject {
         guard entry.members.allSatisfy({ $0.userName == Self.annotationAuthor }) || pendingSaveCount == 0
         else { onFileSaved?(false, "请等待当前 PDF 保存完成后再修改外部批注"); return false }
         guard let rgb = UInt32(hex.dropFirst(hex.hasPrefix("#") ? 1 : 0), radix: 16) else { return false }
-        let color = NSColor(hex: rgb).withAlphaComponent(0.45)
+        let color = NSColor(hex: rgb).withAlphaComponent(0.72)
         let previous = entry.members.map(\.color)
         entry.members.forEach { $0.color = color }
         guard saveToFile(changedLumenPages:
@@ -1434,6 +1448,29 @@ final class PDFController: NSObject, ObservableObject {
         }
         guard changed > 0 else { return 0 }
         return saveToFile(changedLumenPages: changedPages) ? changed : 0
+    }
+
+    /// 只修正本应用已有的多行高亮色块；单行和外部批注保持原样。
+    @discardableResult
+    func compactAnnotationRows() -> Int {
+        guard let doc = document else { return 0 }
+        var changed = 0
+        var pages = Set<Int>()
+        for index in 0..<doc.pageCount {
+            guard let page = doc.page(at: index) else { continue }
+            for annotation in page.annotations where annotation.lumenIsMarkup
+                && annotation.userName == Self.annotationAuthor
+                && (annotation.quadrilateralPoints?.count ?? 0) >= 8 {
+                let before = PDFAnnotationGeometry.rectangles(of: annotation)
+                let after = PDFAnnotationGeometry.compactHighlightRows(before)
+                guard zip(before, after).contains(where: { abs($0.height - $1.height) > 0.5 }) else { continue }
+                PDFAnnotationGeometry.setRectangles(after, on: annotation)
+                changed += 1
+                pages.insert(index)
+            }
+        }
+        guard changed > 0 else { return 0 }
+        return saveToFile(changedLumenPages: pages) ? changed : 0
     }
 
     /// 在当前页加一条空白便签并返回它的清单条目（批注面板「新建」走这里）。

@@ -340,6 +340,8 @@ final class PDFTranslationController: ObservableObject {
 
     var failedCount: Int { states.values.filter(\.isFailed).count }
 
+    var unfinishedCount: Int { paragraphs.count - doneCount - skippedCount }
+
     var skippedCount: Int {
         states.values.filter { if case .skipped = $0 { return true }; return false }.count
     }
@@ -537,7 +539,10 @@ final class PDFTranslationController: ObservableObject {
     func retryFailed(engineID: String, target: String,
                      customEngine: (any TranslationEngine)? = nil) {
         guard runTask == nil else { return }
-        let queue = paragraphs.filter { state(of: $0.id).isFailed }
+        let stoppedForServiceFailure = phase.isFailure
+        let queue = paragraphs.filter {
+            state(of: $0.id).isFailed || (stoppedForServiceFailure && !state(of: $0.id).isSettled)
+        }
         guard !queue.isEmpty else { return }
         if engineID == AppleSystemTranslation.engineID {
             appleSessionRequest &+= 1
@@ -588,12 +593,13 @@ final class PDFTranslationController: ObservableObject {
     private func run(queue: [PDFParagraph], token: Int,
                      engine: any TranslationEngine, target: String) async {
         phase = .running(done: settledCount, total: paragraphs.count)
+        var serviceFailure: String?
 
         await withTaskGroup(of: (String, TranslationOutcome).self) { group in
             var next = 0
 
             @MainActor func submit() {
-                guard next < queue.count else { return }
+                guard next < queue.count, serviceFailure == nil else { return }
                 let paragraph = queue[next]
                 next += 1
                 states[paragraph.id] = .translating
@@ -610,6 +616,10 @@ final class PDFTranslationController: ObservableObject {
                 // token 不匹配 = 这一轮已经被作废（用户切了文档或按了中止）。
                 // 照样把 group 抽干（不然 withTaskGroup 不会退出），但一个都不落。
                 guard token == generation, !Task.isCancelled else { continue }
+                if serviceFailure != nil {
+                    states[id] = .pending
+                    continue
+                }
 
                 switch outcome {
                 case .success(let text):
@@ -619,8 +629,12 @@ final class PDFTranslationController: ObservableObject {
                     if pendingSinceSave >= Self.saveEvery {
                         persistCache(force: true)
                     }
-                case .failure(let reason):
+                case .failure(let reason, let stopsQueue):
                     states[id] = .failed(reason)
+                    if stopsQueue {
+                        serviceFailure = reason
+                        group.cancelAll()
+                    }
                 }
 
                 phase = .running(done: settledCount, total: paragraphs.count)
@@ -629,13 +643,17 @@ final class PDFTranslationController: ObservableObject {
         }
 
         if token == generation, !Task.isCancelled {
+            if serviceFailure != nil {
+                let interrupted = states.compactMap { $0.value == .translating ? $0.key : nil }
+                for id in interrupted { states[id] = .pending }
+            }
             persistCache(force: true)
             // 一律置 finished（而非保持 running(done:total:)）：
             // `.running` 的 `isBusy` 为 true，若整体跑完还挂在 running 上，
             // 面板会停在「进度 + 停止」，而看不到「N 段失败 + 重试」。
             // 失败项本身留在 `states` 里 —— `failedCount` 归它们管，
             // finished 只负责把 busy 清掉，让失败/重试控件能浮出来。
-            phase = .finished
+            phase = serviceFailure.map(PDFTranslationPhase.failed) ?? .finished
         }
     }
 
@@ -728,7 +746,7 @@ final class PDFTranslationController: ObservableObject {
 
     private enum TranslationOutcome: Sendable {
         case success(String)
-        case failure(String)
+        case failure(String, stopsQueue: Bool)
     }
 
     /// 翻一段（含长段切分）。**非隔离静态方法** —— 网络请求不该占着主线程。
@@ -738,17 +756,17 @@ final class PDFTranslationController: ObservableObject {
 
         var pieces: [String] = []
         for chunk in chunks {
-            if Task.isCancelled { return .failure("已中止") }
+            if Task.isCancelled { return .failure("已中止", stopsQueue: false) }
             do {
                 let piece = try await engine.translate(chunk, to: target, from: "auto-detect")
                 let trimmed = piece.trimmingCharacters(in: .whitespacesAndNewlines)
                 // 空译文**当成失败**：静默接受空串，用户看到的是一块空白译文格，
                 // 分不清是「翻完了但没内容」还是「坏了」。这跟项目里那条
                 // 「绝不静默返回空字符串假装成功」是同一条规则。
-                guard !trimmed.isEmpty else { return .failure("引擎返回了空译文") }
+                guard !trimmed.isEmpty else { return .failure("引擎返回了空译文", stopsQueue: false) }
                 pieces.append(trimmed)
             } catch {
-                return .failure(Self.describe(error))
+                return .failure(Self.describe(error), stopsQueue: Self.isServiceWideFailure(error))
             }
         }
         return .success(TranslationTextSplitter.join(pieces, target: target))
@@ -757,6 +775,20 @@ final class PDFTranslationController: ObservableObject {
     /// 把错误翻成人话。用户要判断的是「等一下再试」还是「去改设置」，
     /// 所以原因必须具体到能据此行动。
     static func describe(_ error: Error) -> String {
+        let nsError = error as NSError
+        if nsError.domain == NSURLErrorDomain {
+            switch nsError.code {
+            case NSURLErrorSecureConnectionFailed, NSURLErrorServerCertificateUntrusted,
+                 NSURLErrorServerCertificateHasBadDate, NSURLErrorServerCertificateNotYetValid,
+                 NSURLErrorServerCertificateHasUnknownRoot:
+                return "微软翻译的安全连接失败；请检查网络或代理证书，稍后重试，或改用 Apple 系统翻译。"
+            case NSURLErrorNotConnectedToInternet, NSURLErrorCannotFindHost,
+                 NSURLErrorCannotConnectToHost, NSURLErrorNetworkConnectionLost,
+                 NSURLErrorTimedOut:
+                return "翻译服务暂时无法连接；请检查网络后重试。"
+            default: break
+            }
+        }
         if let translation = error as? MicrosoftTranslator.TranslationError {
             switch translation {
             case .credentialsUnavailable:
@@ -774,6 +806,25 @@ final class PDFTranslationController: ObservableObject {
             }
         }
         return error.localizedDescription
+    }
+
+    static func isServiceWideFailure(_ error: Error) -> Bool {
+        let nsError = error as NSError
+        if nsError.domain == NSURLErrorDomain {
+            return [NSURLErrorSecureConnectionFailed, NSURLErrorServerCertificateUntrusted,
+                    NSURLErrorServerCertificateHasBadDate, NSURLErrorServerCertificateNotYetValid,
+                    NSURLErrorServerCertificateHasUnknownRoot, NSURLErrorNotConnectedToInternet,
+                    NSURLErrorCannotFindHost, NSURLErrorCannotConnectToHost,
+                    NSURLErrorNetworkConnectionLost, NSURLErrorTimedOut].contains(nsError.code)
+        }
+        if let failure = error as? MicrosoftTranslator.TranslationError {
+            switch failure {
+            case .credentialsUnavailable: return true
+            case .serverStatus(let code, _): return [401, 403, 429, 500, 502, 503, 504].contains(code)
+            default: return false
+            }
+        }
+        return false
     }
 
     // MARK: 落盘

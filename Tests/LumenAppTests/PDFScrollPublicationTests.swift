@@ -7,6 +7,26 @@ import Testing
 @Suite("PDF 滚动状态发布", .serialized)
 @MainActor
 struct PDFScrollPublicationTests {
+    @Test func lockedPDFIsNotPresentedAsReadable() throws {
+        let document = PDFDocument()
+        document.insert(PDFPage(), at: 0)
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".pdf")
+        let readableURL = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".pdf")
+        defer {
+            try? FileManager.default.removeItem(at: url)
+            try? FileManager.default.removeItem(at: readableURL)
+        }
+        try #require(document.write(to: readableURL))
+        try #require(document.write(to: url, withOptions: [
+            PDFDocumentWriteOption.ownerPasswordOption: "owner-test",
+            PDFDocumentWriteOption.userPasswordOption: "reader-test"
+        ]))
+        let controller = PDFController()
+        try #require(controller.load(url: readableURL) != nil)
+        #expect(controller.load(url: url) == nil)
+        #expect(controller.document == nil)
+    }
+
     private func fixture() throws -> (PDFController, PDFViewportState, URL) {
         _ = NSApplication.shared
         let document = PDFDocument()
@@ -106,6 +126,31 @@ struct PDFScrollPublicationTests {
         #expect(controller.view.autoScales)
     }
 
+    @Test func pageJumpWaitsForPanelAnchorRestore() async throws {
+        let (controller, _, url) = try fixture()
+        defer { controller.unload(); try? FileManager.default.removeItem(at: url) }
+        try #require(controller.panelAnchor() != nil)
+        controller.setPanelResizing(true)
+        controller.go(to: 2)
+        #expect(controller.currentPageIndex == 0)
+        controller.setPanelResizing(false)
+        try await Task.sleep(nanoseconds: 100_000_000)
+        #expect(controller.currentPageIndex == 2)
+    }
+
+    @Test func pendingJumpCannotCrossDocumentReload() async throws {
+        let (controller, _, url) = try fixture()
+        defer { controller.unload(); try? FileManager.default.removeItem(at: url) }
+        try #require(controller.panelAnchor() != nil)
+        controller.setPanelResizing(true)
+        controller.go(to: 2)
+        controller.setPanelResizing(false)
+        controller.unload()
+        try #require(controller.load(url: url) != nil)
+        try await Task.sleep(nanoseconds: 100_000_000)
+        #expect(controller.currentPageIndex == 0)
+    }
+
     @Test func panelRestoreCannotModifyReplacementDocument() async throws {
         let (controller, _, url) = try fixture()
         defer { controller.unload(); try? FileManager.default.removeItem(at: url) }
@@ -135,13 +180,13 @@ struct PDFScrollPublicationTests {
         #expect(controller.view.autoScales)
     }
 
-    @Test func dividerDragKeepsAutomaticFitActive() async throws {
+    @Test func dividerDragSuspendsAutomaticFitUntilRelease() async throws {
         let (controller, _, url) = try fixture()
         defer { controller.unload(); try? FileManager.default.removeItem(at: url) }
         try #require(controller.panelAnchor() != nil)
         controller.view.autoScales = true
         controller.setPanelWidthDragging(true)
-        #expect(controller.view.autoScales)
+        #expect(!controller.view.autoScales)
         controller.setPanelWidthDragging(false)
         try await Task.sleep(nanoseconds: 100_000_000)
         #expect(controller.view.autoScales)

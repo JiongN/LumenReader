@@ -13,6 +13,8 @@ struct AISettingsPane: View {
     @EnvironmentObject private var memory: MemoryStore
 
     @State private var keyInput: String = ""
+    @State private var openAlexKeyInput = ""
+    @State private var hasOpenAlexKey = false
     @State private var newMemory: String = ""
     @State private var hasStoredKey = false
     @State private var isTesting = false
@@ -41,15 +43,44 @@ struct AISettingsPane: View {
                 }
             }
 
+            openAlexSection
             memorySection
         }
         .formStyle(.grouped)
         .scrollContentBackground(.hidden)
-        .onAppear(perform: refreshKeyState)
+        .onAppear {
+            refreshKeyState()
+            hasOpenAlexKey = AICredentialStore.hasKey(account: "openalex-api")
+        }
         .onChange(of: settings.settings.ai.activeProviderID) { _, _ in refreshKeyState() }
     }
 
     // MARK: - 服务商列表
+
+    private var openAlexSection: some View {
+        Section("文献图谱 · OpenAlex") {
+            HStack {
+                SecureField(hasOpenAlexKey ? "已保存（留空不变）" : "可选 API Key", text: $openAlexKeyInput)
+                    .textFieldStyle(.roundedBorder)
+                Button("保存") {
+                    let value = openAlexKeyInput.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if AICredentialStore.save(value, account: "openalex-api") {
+                        openAlexKeyInput = ""
+                        hasOpenAlexKey = true
+                    }
+                }.disabled(openAlexKeyInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                if hasOpenAlexKey {
+                    Button("移除") {
+                        AICredentialStore.delete(account: "openalex-api")
+                        hasOpenAlexKey = false
+                    }
+                }
+            }
+            Text("基础查询可免密钥使用；Key 单独保存在本机，仅发送到 OpenAlex。")
+                .font(DS.Typo.ui(size: 11))
+                .foregroundStyle(DS.Palette.textTertiary)
+        }
+    }
 
     private var providerSection: some View {
         Section("服务商") {

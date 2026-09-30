@@ -315,6 +315,7 @@ enum LaunchOptions {
         "--translation-engine", "--pdf-document-analysis",
         "--pdf-window-probe", "--pdf-probe-host",
         "--pdf-surface-level", "--pdf-bare-overlays",
+        "--graph-relation",
     ]
 
     /// 是否需要在启动后自动截图并退出
@@ -516,6 +517,7 @@ enum LaunchOptions {
 /// 「收起的面板必须是探针消失」的规则验的是**死数据**，恒真、从不报错。
 struct LayoutProbe: ViewModifier {
     let name: String
+    @State private var owner = UUID()
 
     func body(content: Content) -> some View {
         if LaunchOptions.layoutProbesEnabled {
@@ -523,11 +525,11 @@ struct LayoutProbe: ViewModifier {
                 GeometryReader { proxy in
                     let frame = proxy.frame(in: .global)
                     Color.clear
-                        .onAppear { LayoutAuditLog.shared.record(name, frame) }
-                        .onChange(of: frame) { _, new in LayoutAuditLog.shared.record(name, new) }
+                        .onAppear { LayoutAuditLog.shared.record(name, frame, owner: owner) }
+                        .onChange(of: frame) { _, new in LayoutAuditLog.shared.update(name, new, owner: owner) }
                         // 视图从版面上摘下（面板收起 / 切换格式）时注销，
                         // 否则 dump 里会留着它的最后一帧——那是「幽灵探针」。
-                        .onDisappear { LayoutAuditLog.shared.remove(name) }
+                        .onDisappear { LayoutAuditLog.shared.remove(name, owner: owner) }
                 }
             )
         } else {
@@ -549,6 +551,7 @@ final class LayoutAuditLog {
     static let shared = LayoutAuditLog()
 
     private var frames: [String: CGRect] = [:]
+    private var owners: [String: UUID] = [:]
     private var dumpScheduled = false
 
     /// 读回某个探针最近记录的 frame。`--resize-report` 用它断言「宽度写入后布局真的变了」。
@@ -558,9 +561,10 @@ final class LayoutAuditLog {
 
     /// 从第一次上报起算，2s 后统一打印。演示选区要等文档装好才注入，
     /// 所以划词条的首次上报会晚于状态条，用一个稍长的窗口把两者都收进来。
-    func record(_ name: String, _ frame: CGRect) {
+    func record(_ name: String, _ frame: CGRect, owner: UUID) {
         guard LaunchOptions.layoutProbesEnabled else { return }
         frames[name] = frame
+        owners[name] = owner
 
         guard !dumpScheduled else { return }
         dumpScheduled = true
@@ -572,10 +576,17 @@ final class LayoutAuditLog {
         }
     }
 
+    func update(_ name: String, _ frame: CGRect, owner: UUID) {
+        guard owners[name] == owner else { return }
+        frames[name] = frame
+    }
+
     /// 视图消失时注销探针。与 `record` 成对——少了这一步，dump 里就会出现
     /// 已经不在版面上的视图的最后一帧，断言随之退化成验死数据。
-    func remove(_ name: String) {
+    func remove(_ name: String, owner: UUID) {
+        guard owners[name] == owner else { return }
         frames.removeValue(forKey: name)
+        owners.removeValue(forKey: name)
     }
 
     private func dump() {

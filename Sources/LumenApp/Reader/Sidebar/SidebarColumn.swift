@@ -10,6 +10,7 @@ struct SidebarColumn: View {
 
     @EnvironmentObject private var bridge: ReaderBridge
     @EnvironmentObject private var state: AppState
+    @EnvironmentObject private var session: ReaderSession
 
     @State private var query: String = ""
 
@@ -17,12 +18,10 @@ struct SidebarColumn: View {
         // 卡顿自检：body 每次求值都记一次（不能做成 ViewModifier——见 JankAudit 注释）。
         let _ = Jank.tick(.sidebarBody)
         VStack(spacing: 0) {
-            // 页签之间交叉淡入。
+            // 页签之间交叉淡入；探针用 owner 隔离旧视图的延迟消失回调。
             //
             // 目录是稀疏的树、搜索是密集的结果列表、缩略图是满屏图片网格，
-            // 三者的「视觉密度」差得很远；硬切时侧栏整块会闪一下，像是重新加载了。
-            // 动画由发起切换的那一侧提供（`LeftRail` 的点击、`revealSidebar`）—
-            // 页签切换是轻量操作，用 quick 比用面板那套弹簧更跟手。
+            // 三者的「视觉密度」差得很远，用轻量淡入避免硬切。
             // 每个页签挂一个**静态名**探针：`--sidebar-tab-report` 用它证明「内容真的换了」。
             //
             // 只断言 `bridge.sidebarTab` 是不够的（项目里踩过「状态变了但界面没换」这类假绿），
@@ -65,6 +64,9 @@ struct SidebarColumn: View {
                         )
                         .layoutProbe("sidebarPane_translation")
                     }
+                case .literatureGraph:
+                    LiteratureGraphSidebarView(model: session.literatureGraph)
+                        .layoutProbe("sidebarPane_literatureGraph")
                 }
             }
             // 强制「切回同页签」时视图 identity 也变化，否则 SwiftUI 会把该页签内容当成
@@ -74,9 +76,6 @@ struct SidebarColumn: View {
             // 注意：这里动的是**视图内容**的 identity，探针名字仍是静态的——
             // 不落入「动态命名探针读数滞后一整步」那个坑。
             .id(bridge.sidebarTabRevision)
-            // 交叉淡入从每个内容 cell 移到 Group 外：`.id` 重建整个 Group 时，若 transition
-            // 还长在 cell 上，旧内容淡出与新内容淡入重叠，`onAppear` 仍可能被吞；移出来后
-            // 整块 Group 淡入淡出，视觉效果一致、探针更可靠。
             .transition(.opacity)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
@@ -303,6 +302,7 @@ struct AnnotationsPane: View {
     @State private var editingID: String?
     /// 「扩到整行」的确认框。它要改用户的 PDF 文件，必须先说清代价再动手。
     @State private var showingNormalizeConfirm = false
+    @State private var showingCompactConfirm = false
 
     var body: some View {
         Group {
@@ -333,6 +333,17 @@ struct AnnotationsPane: View {
                  + "不改动任何文字，也不碰 Preview / Acrobat 画的批注。"
                  + "会直接写回这个 PDF 文件；文件很大时可能需要一两秒。")
         }
+        .confirmationDialog(
+            "收紧多行高亮色块？",
+            isPresented: $showingCompactConfirm,
+            titleVisibility: .visible
+        ) {
+            Button("收紧并写回 PDF") { compactRows() }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text("仅调整本应用创建的多行高亮范围，不修改文字和外部批注。"
+                 + "会直接写回当前 PDF；重要原件请先保留备份。")
+        }
     }
 
     // MARK: 头部（计数 + 新建）
@@ -352,6 +363,12 @@ struct AnnotationsPane: View {
             .buttonStyle(.plain)
             .foregroundStyle(DS.Palette.accent)
             .help("在当前阅读位置加一条空白批注")
+            if bridge.compactAnnotationRows != nil {
+                Button("收紧高亮") { showingCompactConfirm = true }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(DS.Palette.accent)
+                    .help("修正部分 PDF 中高亮吃进整段行距的问题")
+            }
         }
         .padding(.horizontal, DS.Space.s)
         .padding(.vertical, DS.Space.s)
@@ -434,6 +451,12 @@ struct AnnotationsPane: View {
         }
         // 清单由 `annotationRevision` 触发重载（写盘成功时已自增），这里只报结果。
         state.showToast("已把 \(changed) 条高亮扩到整行并写回 PDF")
+    }
+
+    private func compactRows() {
+        guard let compact = bridge.compactAnnotationRows else { return }
+        let changed = compact()
+        state.showToast(changed > 0 ? "已收紧 \(changed) 条高亮" : "没有需要收紧的多行高亮")
     }
 
     private func reload() async {

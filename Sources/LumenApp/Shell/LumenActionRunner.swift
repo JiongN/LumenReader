@@ -74,7 +74,7 @@ extension LumenAction {
         case .copyFullText:
             return hasDocument && state.bridge.extractFullText != nil
         case .toggleSidebar, .toggleAIPanel, .toggleImmersive, .showOutline,
-             .showSmartOutline, .showSearch, .showAnnotations:
+             .showSmartOutline, .showSearch, .showAnnotations, .showLiteratureGraph:
             return hasDocument
         case .showThumbnails:
             return state.document?.kind == .pdf
@@ -114,6 +114,24 @@ extension LumenAction {
         case .showSearch:     state.revealSidebar(tab: .search)
         case .showAnnotations: state.revealSidebar(tab: .annotations)
         case .showThumbnails: state.revealSidebar(tab: .thumbnails)
+        case .showLiteratureGraph:
+            if let session = state.activeSession {
+                if !session.showsLiteratureGraph {
+                    session.sidebarBeforeGraph = session.bridge.sidebarTab
+                    session.sidebarWasVisibleBeforeGraph = state.isSidebarVisible
+                    session.aiPanelWasVisibleBeforeGraph = state.isAIPanelVisible
+                    session.showsLiteratureGraph = true
+                    state.setAIPanelVisible(false, animated: false)
+                    state.revealSidebar(tab: .literatureGraph)
+                    session.literatureGraph.prepare(metadata: session.bridge.metadata)
+                } else {
+                    session.showsLiteratureGraph = false
+                    session.literatureGraph.cancel()
+                    state.setAIPanelVisible(session.aiPanelWasVisibleBeforeGraph, animated: false)
+                    state.revealSidebar(tab: session.sidebarBeforeGraph)
+                    state.setSidebarVisible(session.sidebarWasVisibleBeforeGraph)
+                }
+            }
 
         case .fontIncrease:
             // 只有快捷键路径（这里）会在撞边界时弹提示；滑块路径不弹，避免拖动噪声。
@@ -149,6 +167,11 @@ extension AppState {
     /// 展开走 `setSidebarVisible(true)`（内部会通知阅读视图进入「面板正在调整」状态，
     /// 钉住 autoScales 以免大文件屏闪）；页签切换本身仍用 quick 动效。
     func revealSidebar(tab: SidebarTab) {
+        if tab != .literatureGraph, let session = activeSession, session.showsLiteratureGraph {
+            session.showsLiteratureGraph = false
+            session.literatureGraph.cancel()
+            setAIPanelVisible(session.aiPanelWasVisibleBeforeGraph, animated: false)
+        }
         setSidebarVisible(true)
         withAnimation(DS.Motion.quick) { bridge.sidebarTab = tab }
     }

@@ -297,6 +297,7 @@ struct PDFReaderView: View {
     // MARK: - 载入
 
     private func prepare() async {
+        let start = ProcessInfo.processInfo.systemUptime
         bridge.reset()
         applyAppearance()
         controller.apply(flowMode: reader.flowMode)
@@ -310,12 +311,13 @@ struct PDFReaderView: View {
             document.loadError = bridge.loadError
             return
         }
+        let loaded = ProcessInfo.processInfo.systemUptime
 
         document.title = Self.title(of: pdf, fallback: document.url)
         document.detail = "\(pdf.pageCount) 页"
         bridge.unitCount = pdf.pageCount
         bridge.metadata = Self.metadata(of: pdf)
-        bridge.isScannedDocument = controller.detectScannedDocument()
+        let identified = ProcessInfo.processInfo.systemUptime
         bridge.pdfTranslationController = translation
         bridge.revealTranslationParagraph = { [weak controller] paragraph, preferredPage in
             controller?.revealTranslationParagraph(paragraph, preferredPage: preferredPage)
@@ -330,6 +332,32 @@ struct PDFReaderView: View {
         bridge.currentUnitIndex = controller.currentPageIndex
         bridge.progress = Double(controller.currentPageIndex + 1) / Double(max(pdf.pageCount, 1))
         bridge.isLoading = false
+        if LaunchOptions.flag("--startup-report") {
+            let ready = ProcessInfo.processInfo.systemUptime
+            NSLog("%@", String(format:
+                "[Lumen][startup] pdf-load=%.1fms metadata=%.1fms restore-ready=%.1fms total=%.1fms pages=%d",
+                (loaded - start) * 1000, (identified - loaded) * 1000,
+                (ready - identified) * 1000, (ready - start) * 1000, pdf.pageCount))
+        }
+
+        // Reading must not wait for text extraction from eight distant pages. Large
+        // image PDFs can spend hundreds of milliseconds here. Use a separate PDF
+        // instance so PDFKit's visible document remains confined to the main actor.
+        let sourceURL = document.url
+        let scan = Task.detached(priority: .utility) { () -> Bool in
+            guard let pdf = PDFDocument(url: sourceURL) else { return false }
+            return PDFScanDetector.isScanned(pdf)
+        }
+        let isScanned = await withTaskCancellationHandler {
+            await scan.value
+        } onCancel: {
+            scan.cancel()
+        }
+        guard !Task.isCancelled else { return }
+        bridge.isScannedDocument = isScanned
+        if LaunchOptions.flag("--startup-report") {
+            NSLog("%@", "[Lumen][startup] background-scan=\(isScanned ? "scanned" : "text")")
+        }
 
         // 自检通道：无 UI 自动化权限的环境下验证扫描件识别链路
         if LaunchOptions.autoOCR {
@@ -612,6 +640,11 @@ struct PDFReaderView: View {
         // 面板负责弹确认框（这会改用户的 PDF 文件），这里只执行。
         bridge.normalizeAnnotationRows = { [weak controller] in
             let changed = controller?.normalizeAnnotationRows() ?? 0
+            if changed > 0 { bridge.annotationRevision += 1 }
+            return changed
+        }
+        bridge.compactAnnotationRows = { [weak controller] in
+            let changed = controller?.compactAnnotationRows() ?? 0
             if changed > 0 { bridge.annotationRevision += 1 }
             return changed
         }

@@ -21,7 +21,7 @@ enum PDFAnnotationGeometry {
     }
 
     static func makeHighlight(rectangles: [CGRect], note: String, color: NSColor, author: String) -> PDFAnnotation? {
-        let rects = rectangles.filter { $0.width > 0.5 && $0.height > 0.5 }
+        let rects = compactHighlightRows(rectangles)
         guard let first = rects.first else { return nil }
         let bounds = rects.dropFirst().reduce(first) { $0.union($1) }
         let annotation = PDFAnnotation(bounds: bounds, forType: .highlight, withProperties: nil)
@@ -36,6 +36,33 @@ enum PDFAnnotationGeometry {
         annotation.userName = author
         annotation.modificationDate = Date()
         return annotation
+    }
+
+    static func setRectangles(_ rectangles: [CGRect], on annotation: PDFAnnotation) {
+        guard let first = rectangles.first else { return }
+        let bounds = rectangles.dropFirst().reduce(first) { $0.union($1) }
+        annotation.bounds = bounds
+        annotation.quadrilateralPoints = rectangles.flatMap { rect in
+            [CGPoint(x: rect.minX, y: rect.maxY), CGPoint(x: rect.maxX, y: rect.maxY),
+             CGPoint(x: rect.minX, y: rect.minY), CGPoint(x: rect.maxX, y: rect.minY)]
+                .map { NSValue(point: CGPoint(x: $0.x - bounds.minX, y: $0.y - bounds.minY)) }
+        }
+    }
+
+    /// PDFKit 的逐行选区在部分 PDF 中包含整段行距，导致相邻高亮连成色块。
+    /// 仅收窄同列相邻行的高亮 QuadPoints；PDF 的字形和原始排版完全不动。
+    static func compactHighlightRows(_ rectangles: [CGRect]) -> [CGRect] {
+        let rows = rectangles.filter { $0.width > 0.5 && $0.height > 0.5 }
+        return rows.map { row in
+            let nearest = rows.filter { other in
+                guard other != row else { return false }
+                let overlap = min(row.maxX, other.maxX) - max(row.minX, other.minX)
+                return overlap > min(row.width, other.width) * 0.2
+            }.map { abs(row.midY - $0.midY) }.filter { $0 > 1 }.min()
+            guard let nearest, row.height > nearest * 0.84 else { return row }
+            let height = nearest * 0.84
+            return CGRect(x: row.minX, y: row.midY - height / 2, width: row.width, height: height)
+        }
     }
 
     /// Only join old Lumen fragments with the same gesture timestamp and adjacent lines.

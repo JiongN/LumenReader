@@ -264,6 +264,7 @@ public enum LumenAction: String, CaseIterable, Codable, Sendable, Identifiable {
     case showSearch
     case showAnnotations
     case showThumbnails
+    case showLiteratureGraph
 
     // 排版
     case fontIncrease
@@ -294,6 +295,7 @@ public enum LumenAction: String, CaseIterable, Codable, Sendable, Identifiable {
         case .showSearch:     return "侧栏：搜索"
         case .showAnnotations: return "侧栏：批注"
         case .showThumbnails: return "侧栏：页面缩略图"
+        case .showLiteratureGraph: return "文献图谱"
         case .fontIncrease:   return "放大字号"
         case .fontDecrease:   return "缩小字号"
         case .exportSummary:  return "导出 AI 摘要为 Markdown…"
@@ -308,7 +310,7 @@ public enum LumenAction: String, CaseIterable, Codable, Sendable, Identifiable {
         case .toggleSidebar, .toggleAIPanel, .toggleImmersive, .commandPalette:
             return .panel
         case .nextUnit, .previousUnit, .goToPage, .showOutline, .showSmartOutline, .showSearch,
-             .showAnnotations, .showThumbnails:
+             .showAnnotations, .showThumbnails, .showLiteratureGraph:
             return .reading
         case .fontIncrease, .fontDecrease:
             return .typography
@@ -350,6 +352,7 @@ public enum LumenAction: String, CaseIterable, Codable, Sendable, Identifiable {
         // 用户按一次就能建立映射；乱序编号要求他先记住哪一号对应哪一个。
         case .showAnnotations: return KeyCombo(key: "4", modifiers: [.command])
         case .showThumbnails: return KeyCombo(key: "5", modifiers: [.command])
+        case .showLiteratureGraph: return KeyCombo(key: "", modifiers: [])
 
         case .fontIncrease:   return KeyCombo(key: "+", modifiers: [.command])
         case .fontDecrease:   return KeyCombo(key: "-", modifiers: [.command])
@@ -385,6 +388,7 @@ public enum LumenAction: String, CaseIterable, Codable, Sendable, Identifiable {
         case .showSearch:     return "search find 搜索 查找"
         case .showAnnotations: return "annotation highlight note 批注 高亮 笔记"
         case .showThumbnails: return "thumbnail page grid 缩略图 页面"
+        case .showLiteratureGraph: return "literature graph citation network 文献 图谱 引用"
         case .fontIncrease:   return "font bigger 字号 放大"
         case .fontDecrease:   return "font smaller 字号 缩小"
         case .exportSummary:  return "export markdown 导出 摘要"

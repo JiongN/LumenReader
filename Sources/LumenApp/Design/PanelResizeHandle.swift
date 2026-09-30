@@ -247,6 +247,7 @@ struct PanelResizeHandle: View {
             // 命中区真实参与布局；视觉线仍只画在中间。
             .frame(width: PanelWidthPolicy.handleWidth)
             .frame(maxHeight: .infinity)
+            .background(DS.Palette.surfaceSunken)
             .overlay {
                 Rectangle()
                     .fill(lineColor)
@@ -314,14 +315,11 @@ struct PanelResizeHandle: View {
     }
 
     private func handleHover(_ inside: Bool) {
-        // 这个 guard 不能省：onHover 在鼠标横向微动时会重复回调同一个值，
-        // 而 NSCursor 的 push/pop 是配对的——多 push 一次就永久歪了光标。
         guard isHovering != inside else { return }
         isHovering = inside
-        if inside {
-            NSCursor.resizeLeftRight.push()
-        } else {
-            NSCursor.pop()
-        }
+        // Hover events can be lost when the divider is removed during a panel
+        // transition. push/pop would leave an unmatched cursor on the global
+        // stack, making the pointer switch unpredictably over the PDF.
+        (inside ? NSCursor.resizeLeftRight : NSCursor.arrow).set()
     }
 }

@@ -101,14 +101,21 @@ struct ReaderContainerView: View {
             //
             // 限宽对两种文档都成立：PDF 的 PDFView 会自动按新宽度缩放（这正是「舒适行宽」），
             // EPUB 的 WebView 则重新排版，行长更短、更易读。
-            HStack(spacing: 0) {
-
-
-                readerSurface
-                    .frame(
-                        maxWidth: .infinity,
-                        maxHeight: .infinity
-                    )
+            ZStack {
+                    readerSurface
+                        .opacity(session.showsLiteratureGraph ? 0 : 1)
+                        .allowsHitTesting(!session.showsLiteratureGraph)
+                    if session.showsLiteratureGraph {
+                        LiteratureGraphView(model: session.literatureGraph, onReturn: returnToReader)
+                    }
+            }
+                    // PDFKit's document view advertises its page width as an intrinsic
+                    // size. Give the reader the width left by the two panels explicitly,
+                    // otherwise HStack may keep the old page width and clip its left edge.
+                    .frame(width: panelLayout.reader > 0 ? panelLayout.reader : nil,
+                           height: nil)
+                    .frame(maxHeight: .infinity)
+                    .clipped()
                     .layoutProbe("readerSurface")
                     // 两条浮层都贴在**阅读区**上，不是贴在整个三栏容器上。
                     //
@@ -118,16 +125,14 @@ struct ReaderContainerView: View {
                     // 锚在阅读区才是它的语义位置。
                     // 划词条在沉浸模式下同样保留：沉浸只是收起面板，不是收起「选中文字后能做的事」。
                     .overlay {
-                        if !LaunchOptions.pdfBareOverlays { SelectionActionBarLayer() }
+                        if !LaunchOptions.pdfBareOverlays && !session.showsLiteratureGraph { SelectionActionBarLayer() }
                     }
                     // 沉浸时收起状态条：页码已经在底部 HUD 上显示，再留一条属于重复信息，
                     // 而沉浸模式要的恰恰是「屏幕上只有正文」。
                     .overlay(alignment: .bottomTrailing) {
-                        if !LaunchOptions.pdfBareOverlays { ReaderStatusLayer() }
+                        if !LaunchOptions.pdfBareOverlays && !session.showsLiteratureGraph { ReaderStatusLayer() }
                     }
 
-
-            }
 
             if state.isAIPanelVisible && !state.isImmersive {
                 PanelResizeHandle(
@@ -181,6 +186,9 @@ struct ReaderContainerView: View {
         .task(id: document.id) {
             session.documentMetadata = bridge.metadata
             await applyLaunchDiagnostics()
+        }
+        .onChange(of: state.activeSessionID) { _, activeID in
+            if activeID != session.id { session.literatureGraph.cancel() }
         }
     }
 
@@ -267,11 +275,35 @@ struct ReaderContainerView: View {
     /// 两个方向共用 `revealSidebar`（⌘1–⌘5 与菜单项也走它），
     /// 所以「切到某页签时若面板收起要一并展开」这条规则只有一份实现。
     private func selectSidebarTab(_ tab: SidebarTab) {
+        if tab == .literatureGraph {
+            if session.showsLiteratureGraph { returnToReader() }
+            else {
+                session.sidebarBeforeGraph = bridge.sidebarTab
+                session.sidebarWasVisibleBeforeGraph = state.isSidebarVisible
+                session.aiPanelWasVisibleBeforeGraph = state.isAIPanelVisible
+                session.showsLiteratureGraph = true
+                state.setAIPanelVisible(false, animated: false)
+                state.revealSidebar(tab: tab)
+                session.literatureGraph.prepare(metadata: bridge.metadata)
+            }
+            return
+        }
+        if session.showsLiteratureGraph {
+            session.showsLiteratureGraph = false
+            session.literatureGraph.cancel()
+            state.setAIPanelVisible(session.aiPanelWasVisibleBeforeGraph, animated: false)
+            state.revealSidebar(tab: tab)
+            return
+        }
         if state.isSidebarVisible && bridge.sidebarTab == tab {
             state.setSidebarVisible(false)
         } else {
             state.revealSidebar(tab: tab)
         }
+    }
+
+    private func returnToReader() {
+        state.leaveLiteratureGraph()
     }
 
     @ViewBuilder
@@ -303,6 +335,12 @@ struct ReaderContainerView: View {
         // 的滚动——恰好绕开了最可能存在的那条重活路径，读数会假绿。
         if let raw = LaunchOptions.sidebarTab, let tab = SidebarTab(rawValue: raw) {
             bridge.sidebarTab = tab
+            if tab == .literatureGraph {
+                session.aiPanelWasVisibleBeforeGraph = state.isAIPanelVisible
+                session.showsLiteratureGraph = true
+                state.setAIPanelVisible(false, animated: false)
+                session.literatureGraph.prepare(metadata: bridge.metadata)
+            }
         }
 
         // 页签切换是一次 SwiftUI 状态变更，要让侧栏（缩略图面板）真的挂载起来，
@@ -889,9 +927,9 @@ struct ControlChip: View {
 enum HighlightSwatches {
     struct Swatch { let name: String; let hex: String }
     static let all: [Swatch] = [
-        .init(name: "黄色", hex: "#FFD54F"), .init(name: "绿色", hex: "#81C784"),
-        .init(name: "蓝色", hex: "#64B5F6"), .init(name: "粉色", hex: "#F48FB1"),
-        .init(name: "橙色", hex: "#FFB74D")
+        .init(name: "奶油黄", hex: "#F3DFA6"), .init(name: "薄荷绿", hex: "#B9DFC9"),
+        .init(name: "雾霭蓝", hex: "#BDD8E7"), .init(name: "樱花粉", hex: "#EBC5CF"),
+        .init(name: "杏桃橙", hex: "#F1D1B6")
     ]
 }
 

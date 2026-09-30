@@ -362,7 +362,7 @@ struct AgentEditor: View {
             Toggle("提问前先联网检索文献，并把结果作为可引用的材料喂给模型", isOn: binding)
                 .font(DS.Typo.ui(size: 11.5))
 
-            Text("检索源是 Crossref / OpenAlex / arXiv（都免密钥）；知网、万方、Web of Science 没有可公开调用的接口，接不了，中文文献的覆盖以在 Crossref 注册过 DOI 的期刊为主。开启后每次提问会先多等几秒。")
+            Text("当前检索源是 Crossref / OpenAlex / arXiv（都免密钥）；万方等其他数据源需另行申请应用授权并接入。中文文献覆盖取决于现有来源的收录情况。开启后每次提问会先多等几秒。")
                 .font(DS.Typo.ui(size: 10.5))
                 .foregroundStyle(DS.Palette.textTertiary)
                 .fixedSize(horizontal: false, vertical: true)
