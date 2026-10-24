@@ -169,6 +169,8 @@ public struct ReaderSettings: Codable, Sendable, Equatable {
     /// 用户显式选过的微软翻译会在一次 LLM 往返后被悄悄丢掉。
     /// 不在目录里的值会在解码时退回默认（见容错解码），所以它安全。
     public var translationMachineEngineID: String = AppleSystemTranslation.engineID
+    public var translationProviderID: UUID?
+    public var translationModel: String = ""
     /// PDF 翻译术语表。机器翻译保留这些条目但不承诺采用；LLM 翻译会把它们写进提示词。
     public var translationGlossary: [TranslationGlossaryEntry] = []
     /// EPUB 滚动到章末时自动进入下一章
@@ -213,6 +215,8 @@ public struct ReaderSettings: Codable, Sendable, Equatable {
         self.translationMachineEngineID = TranslationEngineCatalog.descriptor(
             for: try? container.decode(String.self, forKey: .translationMachineEngineID)
         ).id
+        self.translationProviderID = try? container.decode(UUID.self, forKey: .translationProviderID)
+        self.translationModel = (try? container.decode(String.self, forKey: .translationModel)) ?? ""
         self.translationGlossary = (try? container.decode([TranslationGlossaryEntry].self,
                                                            forKey: .translationGlossary)) ?? []
     }
@@ -230,8 +234,27 @@ public struct AIProviderConfig: Codable, Sendable, Equatable, Identifiable {
     public var selectedModel: String
     public var temperature: Double
     public var maxTokens: Int
+    public var contextWindow: Int
     /// 是否启用「扩展思考」（模型支持时透传 reasoning 相关参数）
     public var extendedThinking: Bool
+
+    /// Only the official endpoint and models with this documented switch.
+    public var deepSeekThinking: [String: String]? {
+        guard URL(string: baseURL)?.host?.lowercased() == "api.deepseek.com",
+              ["deepseek-flash", "deepseek-v4-flash", "deepseek-v4-pro"].contains(selectedModel) else { return nil }
+        return ["type": extendedThinking ? "enabled" : "disabled"]
+    }
+
+    /// Official ECNU specification checked 2026-10-03; never infer a mirror's limit.
+    public var publishedContextWindow: Int? {
+        guard let url = URL(string: baseURL), url.host?.lowercased() == "chat.ecnu.edu.cn",
+              url.path.trimmingCharacters(in: CharacterSet(charactersIn: "/")) == "open/api/v1" else { return nil }
+        switch selectedModel {
+        case "ecnu-max": return 512 * 1024
+        case "ecnu-plus": return 256 * 1024
+        default: return nil
+        }
+    }
 
     public init(
         id: UUID = UUID(),
@@ -241,7 +264,8 @@ public struct AIProviderConfig: Codable, Sendable, Equatable, Identifiable {
         selectedModel: String,
         temperature: Double = 0.7,
         maxTokens: Int = 2048,
-        extendedThinking: Bool = false
+        extendedThinking: Bool = false,
+        contextWindow: Int = 32_768
     ) {
         self.id = id
         self.name = name
@@ -257,6 +281,7 @@ public struct AIProviderConfig: Codable, Sendable, Equatable, Identifiable {
         }
         self.temperature = temperature
         self.maxTokens = maxTokens
+        self.contextWindow = max(4096, contextWindow)
         self.extendedThinking = extendedThinking
     }
 
@@ -278,6 +303,7 @@ public struct AIProviderConfig: Codable, Sendable, Equatable, Identifiable {
         }
         self.temperature = (try? container.decode(Double.self, forKey: .temperature)) ?? 0.7
         self.maxTokens = (try? container.decode(Int.self, forKey: .maxTokens)) ?? 2048
+        self.contextWindow = max(4096, try container.decodeIfPresent(Int.self, forKey: .contextWindow) ?? 32_768)
         self.extendedThinking = (try? container.decode(Bool.self, forKey: .extendedThinking)) ?? false
     }
 
@@ -348,7 +374,7 @@ public struct PromptTemplate: Codable, Sendable, Equatable, Identifiable {
 
     public var id: UUID
     public var name: String
-    /// 替换默认系统提示。空串表示沿用 `PromptLibrary.systemPrompt`。
+    /// 旧模板的阅读指令；兼容请求时追加在固定约束之后。
     public var systemPrompt: String
     /// 追加在用户消息末尾的「要求」段。空串表示用该任务自带的默认要求。
     public var instruction: String
@@ -429,7 +455,14 @@ public struct PromptTemplate: Codable, Sendable, Equatable, Identifiable {
     }
 }
 
+private enum VisionModelMigrationKey: String, CodingKey { case visionModel }
+
 public struct AISettings: Codable, Sendable, Equatable {
+    public var modelSelectionRevision: Int = 1
+    public var documentAI = DocumentAIOptions()
+    public var readingModeRevision: Int = 3
+    public var readingModeArchive: ReadingModeArchive?
+    public var retiredReadingSkills: [AgentSkill] = []
     public var providers: [AIProviderConfig] = []
     public var activeProviderID: UUID?
     /// 持久记忆：跨会话提供给模型的稳定偏好。
@@ -480,6 +513,9 @@ public struct AISettings: Codable, Sendable, Equatable {
 
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.readingModeRevision = try container.decodeIfPresent(Int.self, forKey: .readingModeRevision) ?? 0
+        self.modelSelectionRevision = try container.decodeIfPresent(Int.self, forKey: .modelSelectionRevision) ?? 0
+        self.documentAI = try container.decodeIfPresent(DocumentAIOptions.self, forKey: .documentAI) ?? .init()
         // 逐字段容错解码是项目硬约束（见 docs/AUDIT-code-health-2026-09-17.md 的
         // 「明确不算问题」一节），所以这里保留 `?? []`。
         //
@@ -492,6 +528,14 @@ public struct AISettings: Codable, Sendable, Equatable {
         // SettingsStore.load：它比对「磁盘上 providers 有几条」与「解出来有几条」，
         // 发现「磁盘非空、解出为空」就把 settings.json 整份备份掉。这里不再重复实现。
         self.providers = (try? container.decode([AIProviderConfig].self, forKey: .providers)) ?? []
+        // Old vision settings stored only a provider. Pin its model once during migration.
+        if !container.contains(.documentAI) {
+            self.documentAI = .init()
+        } else if let raw = try? container.nestedContainer(keyedBy: VisionModelMigrationKey.self, forKey: .documentAI),
+                  !raw.contains(.visionModel), let id = documentAI.visionProviderID,
+                  let provider = providers.first(where: { $0.id == id }) {
+            self.documentAI.visionModel = provider.selectedModel
+        }
         // 没有激活的服务商是合法状态（用户可能全删了），所以这里允许解出 nil
         self.activeProviderID = try? container.decode(UUID.self, forKey: .activeProviderID)
         self.persistentMemory = (try? container.decode(String.self, forKey: .persistentMemory)) ?? ""
@@ -517,7 +561,8 @@ public struct AISettings: Codable, Sendable, Equatable {
         // 技能库与 agents 同一条规则：只有磁盘上**完全没有**这个键才灌内置技能。
         // 写成「缺哪条内置技能就补哪条」的话，用户删掉的技能下次启动会自己长回来。
         self.skillLibrary = (try? container.decode([AgentSkill].self, forKey: .skillLibrary))
-            ?? AgentSkill.catalog
+            ?? (readingModeRevision == 0 && container.contains(.agents) ? AgentSkill.legacyCatalog
+                : readingModeRevision < 3 && container.contains(.agents) ? AgentSkill.retiredPromptCatalog : AgentSkill.catalog)
         // 旧配置把技能全文存在 Agent 上（技能库里没有对应条目），这里并进技能库。
         // 不并的话用户自己写的技能会在升级那一刻**静默**消失——系统提示变短，界面看不出来。
         Self.migrateCarriedSkills(library: &self.skillLibrary, agents: &self.agents)
@@ -525,10 +570,14 @@ public struct AISettings: Codable, Sendable, Equatable {
         self.activeAgentID = try? container.decode(String.self, forKey: .activeAgentID)
         // 选中的那个 Agent 被删掉（或被下线清理掉）之后这个 id 会悬空：面板显示「Agent」
         // 却不带勾选，内部状态自相矛盾。退回「不用 Agent」，与编辑器里删除时的处理一致。
-        if let id = self.activeAgentID, !self.agents.contains(where: { $0.id == id }) {
+        if let id = self.activeAgentID, id != AgentConfig.mindMapMode.id,
+           !self.agents.contains(where: { $0.id == id }) {
             self.activeAgentID = nil
         }
         self.webSearchEnabled = (try? container.decode(Bool.self, forKey: .webSearchEnabled)) ?? false
+        self.readingModeArchive = try container.decodeIfPresent(ReadingModeArchive.self, forKey: .readingModeArchive)
+        self.retiredReadingSkills = try container.decodeIfPresent([AgentSkill].self, forKey: .retiredReadingSkills) ?? []
+        migrateReadingModes()
     }
 }
 
@@ -539,22 +588,21 @@ extension AISettings {
     /// 把 Agent 上捎出来的旧技能定义并进技能库。
     ///
     /// 两条规则都不是可选的：
-    /// ① **同名的认领到库里那条**。老配置里「论证链」「术语变化」是用户自建技能
-    ///    （各自带一个 UUID），而它们现在是内置技能；不认领的话技能库里会出现两张
-    ///    同名卡片，用户看到的是「怎么有两个论证链」。
-    /// ② 只有「库里既没有这个 id、也没有这个名字」才新增一项。只按 id 判定的话，
-    ///    用户自己写的技能会被静默丢掉——它在库里没有对应条目。
-    ///
-    /// 认领是全局的：两个 Agent 各自攒了一份同名的「论证链」也会归到同一条上，
-    /// 同名不同义的技能本来就该合并。
+    /// ① 相同名称与指令认领到已有条目；不同指令必须保留，不能凭名称覆盖用户内容。
+    /// ② 库里不存在的定义并入全局库，然后清理悬空及重复引用。
     static func migrateCarriedSkills(library: inout [AgentSkill], agents: inout [AgentConfig]) {
         var remap: [String: String] = [:]
 
         for index in agents.indices {
             for definition in agents[index].carriedSkills {
-                if library.contains(where: { $0.id == definition.id }) { continue }
+                if let existing = library.firstIndex(where: { $0.id == definition.id }) {
+                    if AgentSkill.legacyCatalog.contains(library[existing]) {
+                        library[existing] = definition
+                    }
+                    continue
+                }
                 if !definition.name.isEmpty,
-                   let match = library.first(where: { $0.name == definition.name }) {
+                   let match = library.first(where: { $0.name == definition.name && $0.instruction == definition.instruction }) {
                     remap[definition.id] = match.id
                     continue
                 }
@@ -619,20 +667,21 @@ public struct UISettings: Codable, Sendable, Equatable {
     /// 正文字体重在"长时间阅读不累"，同一个人对这两件事的偏好经常不一样。
     public var uiFontFamilyName: String?
 
-    /// 侧栏宽度（pt）。**兼容字段，只写不读。**
-    ///
-    /// 侧栏宽度自本批起固定为 `DS.Size.sidebarIdeal`（248pt）：侧栏装的是目录 /
-    /// 搜索结果 / 批注这类结构化列表，宽度由版式而非用户决定，界面上也不再给它
-    /// 拖拽入口（只留 AI 面板那条分隔线）。这个字段**保留只为三件事**：
-    ///
-    /// 1. **旧 `settings.json` 仍能解码**——直接删字段会让旧配置命中「整份解码失败
-    ///    就退回默认值」的兜底，把用户其它偏好一起清掉，那是硬约束第 2 条；
-    /// 2. 旧版本写下的值仍然读得出来（便于将来真要恢复时迁移）；
-    /// 3. `--panel-width` 的旧两段式写法仍被接受（第一个数解析但不生效）。
-    ///
-    /// 布局层（`PanelWidthPolicy`）**已经不再读它**。写入仍然经过钳制，
-    /// 这样用户手改 `settings.json` 塞个 5000 进来也不会在别处以意想不到的方式被读到。
-    /// didSet 里重赋值会再触发一次 didSet，第二次值已合法、不再写，不会成环。
+    public var aiTextSize: Double = TextSize.defaultValue {
+        didSet { aiTextSize = TextSize.clamp(aiTextSize) }
+    }
+    public var translationTextSize: Double = TextSize.defaultValue {
+        didSet { translationTextSize = TextSize.clamp(translationTextSize) }
+    }
+    public enum TextSize {
+        public static let defaultValue: Double = 15
+        public static let range: ClosedRange<Double> = 11...28
+        public static func clamp(_ value: Double) -> Double {
+            value.isFinite ? min(max(value, range.lowerBound), range.upperBound) : defaultValue
+        }
+    }
+
+    /// 用户拖动提交的侧栏宽度；小窗口只收窄显示，不覆盖此偏好。
     public var sidebarWidth: Double = PanelWidth.sidebarDefault {
         didSet {
             let clamped = PanelWidth.clampSidebar(sidebarWidth)
@@ -661,7 +710,7 @@ public struct UISettings: Codable, Sendable, Equatable {
     public enum PanelWidth {
         public static let sidebarDefault: Double = 248
         public static let aiDefault: Double = 380
-        public static let sidebarRange: ClosedRange<Double> = 200...420
+        public static let sidebarRange: ClosedRange<Double> = 200...1000
         public static let aiRange: ClosedRange<Double> = 300...640
 
         /// 阅读区至少要留这么宽（pt）。面板**上限**会按窗口宽度动态收窄到这个边界为止。
@@ -715,6 +764,8 @@ public struct UISettings: Codable, Sendable, Equatable {
         self.respectsSystemReduceMotion =
             (try? container.decode(Bool.self, forKey: .respectsSystemReduceMotion)) ?? true
         self.uiFontFamilyName = try? container.decode(String.self, forKey: .uiFontFamilyName)
+        self.aiTextSize = TextSize.clamp((try? container.decode(Double.self, forKey: .aiTextSize)) ?? TextSize.defaultValue)
+        self.translationTextSize = TextSize.clamp((try? container.decode(Double.self, forKey: .translationTextSize)) ?? TextSize.defaultValue)
         self.sidebarWidth = PanelWidth.clampSidebar(
             (try? container.decode(Double.self, forKey: .sidebarWidth)) ?? PanelWidth.sidebarDefault
         )
@@ -739,6 +790,18 @@ public struct AppSettings: Codable, Sendable, Equatable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         self.reader = (try? container.decode(ReaderSettings.self, forKey: .reader)) ?? ReaderSettings()
         self.ai = (try? container.decode(AISettings.self, forKey: .ai)) ?? AISettings()
+        // Freeze the legacy translation fallback before chat can change it.
+        if ai.modelSelectionRevision == 0 {
+            if reader.translationProviderID == nil,
+               let provider = ai.providers.first(where: { $0.id == ai.activeProviderID }) ?? ai.providers.first {
+                reader.translationProviderID = provider.id
+                if reader.translationModel.isEmpty { reader.translationModel = provider.selectedModel }
+            } else if reader.translationModel.isEmpty,
+                      let provider = ai.providers.first(where: { $0.id == reader.translationProviderID }) {
+                reader.translationModel = provider.selectedModel
+            }
+            ai.modelSelectionRevision = 1
+        }
         self.ui = (try? container.decode(UISettings.self, forKey: .ui)) ?? UISettings()
         self.hasCompletedOnboarding = (try? container.decode(Bool.self, forKey: .hasCompletedOnboarding)) ?? false
     }

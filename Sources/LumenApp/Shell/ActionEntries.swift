@@ -31,8 +31,6 @@ enum ActionEntries {
                     title: "复制文件", action: .copyFile),
 
         // ── 菜单栏「文件 > 导出」：去向为**磁盘文件**的动作，唯一入口 ──
-        ActionEntry(.exportSummary, group: .fileExport, category: .export,
-                    title: LumenAction.exportSummary.title, action: .exportSummary),
         ActionEntry(.exportTranscript, group: .fileExport, category: .export,
                     title: "导出对话记录为 Markdown…", action: .exportTranscript),
 
@@ -80,8 +78,6 @@ enum ActionEntries {
         ActionEntry(.paletteSummarizeAll, group: .commandPalette, category: .summarize, title: "总结全文"),
         ActionEntry(.paletteRememberSelection, group: .commandPalette, category: .memory, title: "记住选中内容"),
         ActionEntry(.paletteClearChat, group: .commandPalette, category: .chat, title: "清空当前对话"),
-        ActionEntry(.paletteExportSummary, group: .commandPalette, category: .export,
-                    title: LumenAction.exportSummary.title),
         ActionEntry(.paletteExportTranscript, group: .commandPalette, category: .export,
                     title: "导出对话记录为 Markdown…"),
     ]
@@ -157,7 +153,6 @@ enum ActionCategory: String, Sendable {
 enum ActionEntryID: String, CaseIterable, Sendable {
     case copyFullText
     case copyFile
-    case exportSummary
     case exportTranscript
     case summarizeUnit
     case summarizeAll
@@ -179,7 +174,6 @@ enum ActionEntryID: String, CaseIterable, Sendable {
     case paletteSummarizeAll
     case paletteRememberSelection
     case paletteClearChat
-    case paletteExportSummary
     case paletteExportTranscript
 }
 

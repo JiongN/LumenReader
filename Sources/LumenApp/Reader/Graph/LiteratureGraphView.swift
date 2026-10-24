@@ -13,6 +13,8 @@ struct LiteratureGraphView: View {
     @AppStorage("literatureGraph.sizeEncoding") private var sizeEncoding = "citations"
     @AppStorage("literatureGraph.colorEncoding") private var colorEncoding = "year"
     @State private var scale = 1.0
+    @State private var pinchStartScale: Double?
+    @State private var pinchStartPan = CGSize.zero
     @State private var pan = CGSize.zero
     @State private var dragStart = CGSize.zero
     @State private var dragTarget: DragTarget = .undecided
@@ -21,12 +23,6 @@ struct LiteratureGraphView: View {
     @State private var skipNextPositionFit = false
     @State private var canvasSize = CGSize.zero
     @State private var localSearch = ""
-    @State private var graphAppeared = false
-    @State private var hoveredID: String?
-    @State private var pulseID: String?
-    @State private var pulseScale: CGFloat = 0.9
-    @State private var pulseOpacity = 0.0
-    @State private var pulseTask: Task<Void, Never>?
     private var visible: [GraphPaper] { model.visiblePapers }
     private var focusedPaper: GraphPaper? { model.selectedPaper ?? model.rootPaper }
 
@@ -58,21 +54,21 @@ struct LiteratureGraphView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(DS.Palette.surfaceSunken)
         .foregroundStyle(DS.Palette.textPrimary)
+        .transaction { transaction in
+            transaction.animation = nil
+            transaction.disablesAnimations = true
+        }
         .onChange(of: model.snapshot.positions) { _, _ in
             if skipNextPositionFit { skipNextPositionFit = false }
             else { fitCanvas() }
         }
         .onChange(of: visible.map(\.id)) { _, _ in fitCanvas() }
-        .onChange(of: model.selectedID) { _, id in
-            if let paper = model.snapshot.papers.first(where: { $0.id == id }), paper.id.hasPrefix("local:reference:") {
-                localSearch = LocalReferenceParser.suggestedTitle(in: paper.title)
-            }
-            animateSelection(id)
-        }
+        .onAppear { updateLocalSearch() }
+        .onChange(of: model.selectedID) { _, _ in updateLocalSearch() }
         .onDisappear {
-            pulseTask?.cancel(); pulseTask = nil
             draggedPositions = [:]
             dragTarget = .undecided
+            pinchStartScale = nil
         }
     }
 
@@ -128,37 +124,29 @@ struct LiteratureGraphView: View {
             ZStack {
                 DS.Palette.surfaceRaised
                 graphCanvas(size: geo.size)
-                    .opacity(graphAppeared ? 1 : 0.4)
-                    .scaleEffect(graphAppeared ? 1 : 0.97)
                     .contentShape(Rectangle())
                     .gesture(DragGesture().onChanged { value in
                         updateDrag(value, size: geo.size)
                     }.onEnded { _ in endDrag() })
-                    .onTapGesture { location in select(at: location, size: geo.size) }
-                    .onContinuousHover { phase in
-                        switch phase {
-                        case .active(let location):
-                            let next = hitPaper(at: location, size: geo.size)?.id
-                            if next != hoveredID { hoveredID = next }
-                        case .ended:
-                            if hoveredID != nil { hoveredID = nil }
+                    .simultaneousGesture(MagnifyGesture().onChanged { value in
+                        if pinchStartScale == nil {
+                            endDrag()
+                            pinchStartScale = scale
+                            pinchStartPan = pan
                         }
-                    }
-                if let id = pulseID,
-                   let paper = visible.first(where: { $0.id == id }),
-                   let point = positions(size: geo.size)[id] {
-                    Circle()
-                        .strokeBorder(DS.Palette.accent.opacity(0.75), lineWidth: 2)
-                        .frame(width: (nodeRadius(paper) + 7) * 2,
-                               height: (nodeRadius(paper) + 7) * 2)
-                        .position(point)
-                        .scaleEffect(pulseScale)
-                        .opacity(pulseOpacity)
-                        .allowsHitTesting(false)
-                }
+                        let anchor = CGPoint(x: value.startAnchor.x * geo.size.width,
+                                             y: value.startAnchor.y * geo.size.height)
+                        let zoomed = GraphViewport.zoom(scale: pinchStartScale ?? scale,
+                            pan: pinchStartPan, factor: value.magnification, anchor: anchor, size: geo.size)
+                        scale = zoomed.scale
+                        pan = zoomed.pan
+                    }.onEnded { _ in
+                        dragStart = pan
+                        pinchStartScale = nil
+                    })
+                    .onTapGesture { location in select(at: location, size: geo.size) }
                 if model.snapshot.papers.isEmpty {
-                    ContentUnavailableView("尚无图谱", systemImage: "point.3.connected.trianglepath.dotted",
-                        description: Text("在左侧核对论文信息并选择 OpenAlex 匹配结果。"))
+                    ContentUnavailableView("尚无图谱", systemImage: "point.3.connected.trianglepath.dotted")
                 }
             }
             .overlay(alignment: .bottomLeading) { canvasControls.padding(DS.Space.l) }
@@ -166,8 +154,6 @@ struct LiteratureGraphView: View {
             .onAppear {
                 canvasSize = geo.size
                 fitCanvas()
-                if MotionGate.isMuted { graphAppeared = true }
-                else { withAnimation(DS.Motion.reveal) { graphAppeared = true } }
             }
             .onChange(of: geo.size) { _, size in canvasSize = size; fitCanvas() }
         }
@@ -244,7 +230,7 @@ struct LiteratureGraphView: View {
                 let isRoot = paper.id == model.snapshot.paperID
                 let selected = paper.id == model.selectedID
                 let radius = nodeRadius(paper)
-                if isRoot || selected || paper.id == hoveredID {
+                if isRoot || selected {
                     let inset: CGFloat = selected ? 7 : 5
                     context.fill(Path(ellipseIn: CGRect(x: point.x - radius - inset, y: point.y - radius - inset,
                                                         width: (radius + inset) * 2, height: (radius + inset) * 2)),
@@ -282,6 +268,7 @@ struct LiteratureGraphView: View {
     }
 
     private func updateDrag(_ value: DragGesture.Value, size: CGSize) {
+        guard pinchStartScale == nil else { return }
         if case .undecided = dragTarget {
             if let paper = hitPaper(at: value.startLocation, size: size),
                let origin = rawPositions()[paper.id] {
@@ -377,7 +364,7 @@ struct LiteratureGraphView: View {
 
     private func select(at location: CGPoint, size: CGSize) {
         if let match = hitPaper(at: location, size: size) {
-            withAnimation(DS.Motion.quick) { model.selectedID = match.id }
+            model.selectedID = match.id
         }
     }
 
@@ -388,19 +375,9 @@ struct LiteratureGraphView: View {
         return nil
     }
 
-    private func animateSelection(_ id: String?) {
-        pulseTask?.cancel()
-        pulseID = id
-        pulseScale = 0.9
-        pulseOpacity = MotionGate.isMuted || id == nil ? 0 : 0.7
-        guard id != nil, !MotionGate.isMuted else { return }
-        pulseTask = Task { @MainActor in
-            await Task.yield()
-            guard !Task.isCancelled else { return }
-            withAnimation(DS.Motion.reveal) {
-                pulseScale = 1.7
-                pulseOpacity = 0
-            }
+    private func updateLocalSearch() {
+        if let paper = model.selectedPaper, paper.id.hasPrefix("local:reference:") {
+            localSearch = LocalReferenceParser.suggestedTitle(in: paper.title)
         }
     }
 
@@ -437,11 +414,11 @@ struct LiteratureGraphView: View {
                         if !paper.venue.isEmpty { Text("·"); Text(paper.venue) }
                     }
                     .font(DS.Typo.body).foregroundStyle(DS.Palette.textSecondary)
-                    if !paper.id.hasPrefix("local:") {
+                    if !paper.id.hasPrefix("local:"), !paper.id.hasPrefix("cnki:") || paper.citedByCount > 0 {
                         HStack(alignment: .firstTextBaseline, spacing: 5) {
                             Text("\(paper.citedByCount)")
                                 .font(DS.Typo.ui(size: 22, weight: .semibold))
-                            Text("次被引 · OpenAlex")
+                            Text(paper.id.hasPrefix("cnki:") ? "次被引 · 知网" : "次被引 · OpenAlex")
                                 .font(DS.Typo.body).foregroundStyle(DS.Palette.textSecondary)
                         }
                     }
@@ -452,7 +429,9 @@ struct LiteratureGraphView: View {
                             .help("https://doi.org/\(doi)")
                     }
                     if let url = paper.openAccessURL {
-                        Link("打开开放访问全文", destination: url).font(DS.Typo.body)
+                        Link(paper.id.hasPrefix("cnki:") ? "打开知网题录原页" : "打开开放访问全文", destination: url).font(DS.Typo.body)
+                    } else if let url = model.cnkiURL(for: paper) {
+                        Link("打开知网题录原页", destination: url).font(DS.Typo.body)
                     }
                     if !paper.abstract.isEmpty {
                         Divider()
@@ -460,17 +439,22 @@ struct LiteratureGraphView: View {
                         Text(paper.abstract).font(DS.Typo.body)
                             .textSelection(.enabled)
                     }
+                    if let original = paper.sourceCitation {
+                        Divider()
+                        Text("原始题录").font(DS.Typo.headline)
+                        Text(original).font(DS.Typo.body)
+                            .textSelection(.enabled)
+                    }
                     Divider()
-                    if paper.id.hasPrefix("local:") {
-                        Text("来自本文参考文献表，尚未核对题录。")
+                    if paper.id.hasPrefix("local:reference:") {
+                        TextField("用于匹配的标题", text: $localSearch)
+                            .help("本文参考文献 · 题录待核对")
+                        Button("查找 OpenAlex 题录") { model.findLocalMatch(paper, query: localSearch) }
+                            .disabled(model.busy || (localSearch.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && paper.doi == nil))
+                    } else if paper.id.hasPrefix("local:"), !model.usesCNKIRelations(for: paper) {
+                        Text("未关联题录")
                             .font(DS.Typo.body).foregroundStyle(DS.Palette.textSecondary)
-                        if paper.id.hasPrefix("local:reference:") {
-                            TextField("用于匹配的标题", text: $localSearch)
-                            Button("查找 OpenAlex 题录") { model.findLocalMatch(paper, query: localSearch) }
-                                .disabled(model.busy || (localSearch.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && paper.doi == nil))
-                        }
                     } else {
-                        Text("继续探索").font(DS.Typo.headline)
                         ForEach(GraphRelation.allCases, id: \.self) { relation in
                             Button(relation.title, systemImage: "arrow.up.right") {
                                 model.expand(paper, relation)

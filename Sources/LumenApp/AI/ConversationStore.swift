@@ -1,6 +1,7 @@
 import SwiftUI
 import Combine
 import LumenKit
+import Synchronization
 
 /// 一条全局共享的会话。
 ///
@@ -11,7 +12,7 @@ import LumenKit
 /// 代价是「这条回答是针对哪本书的」会变模糊，所以：
 /// - 逐条 `Bubble` 记下了自己的 `sourceDocPath`（它这次提问来自哪本书）；
 /// - 引用跳转由 `ConversationCitationPolicy` 按气泡来源降级，跨书的引用不可点。
-struct Conversation: Codable, Identifiable {
+struct Conversation: Codable, Identifiable, Sendable {
     var id: UUID = UUID()
     /// 默认标题：**发起文档的标题**；同一文档的第 2 个及以后会话前面加序号（`2. 书名`）。
     /// 没有文档上下文时回退到时间戳（见 `displayTitle`）。
@@ -25,6 +26,8 @@ struct Conversation: Codable, Identifiable {
     var sourceDocTitle: String?
     /// 这一份会话的气泡（已落盘）。注意：`.notice` 类气泡在写入时被过滤掉，不进磁盘。
     var bubbles: [AIChatModel.Bubble] = []
+    var digest: ConversationDigest?
+    var documentVersions: [String: String] = [:]
 
     /// 展示用标题：customTitle > 自动 title > 「对话 MM-dd HH:mm」。
     var displayTitle: String {
@@ -52,6 +55,9 @@ struct Conversation: Codable, Identifiable {
 // 就直接报「missing argument for parameter 'from' in call」——而迁移、自检、
 // store 内部到处都在用无参构造。放进 extension 则保留逐成员构造器。
 extension Conversation {
+    private enum CodingKeys: String, CodingKey {
+        case id, title, customTitle, createdAt, sourceDocPath, sourceDocTitle, bubbles, evidenceCatalog, digest, documentVersions
+    }
     /// 容错解码（README 硬约束第 2 条）：任一键缺失都**不能**让整条会话解码失败——
     /// 那样用户整份对话就没了。每个字段都写成 `(try? decode) ?? 默认值`。
     init(from decoder: Decoder) throws {
@@ -63,11 +69,48 @@ extension Conversation {
         sourceDocPath = try? c.decodeIfPresent(String.self, forKey: .sourceDocPath)
         sourceDocTitle = try? c.decodeIfPresent(String.self, forKey: .sourceDocTitle)
         bubbles = try c.decodeIfPresent([AIChatModel.Bubble].self, forKey: .bubbles) ?? []
+        digest = try c.decodeIfPresent(ConversationDigest.self, forKey: .digest)
+        documentVersions = try c.decodeIfPresent([String: String].self, forKey: .documentVersions) ?? [:]
+        let catalog = try c.decodeIfPresent([String: [DocumentCitation]].self, forKey: .evidenceCatalog) ?? [:]
+        for index in bubbles.indices {
+            if let key = bubbles[index].evidenceArchiveKey {
+                guard let evidence = catalog[key] else {
+                    throw DecodingError.dataCorruptedError(forKey: .evidenceCatalog, in: c, debugDescription: "Missing evidence catalog")
+                }
+                bubbles[index].evidence = evidence
+                bubbles[index].evidenceArchiveKey = nil
+            }
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(id, forKey: .id)
+        try c.encode(title, forKey: .title)
+        try c.encodeIfPresent(customTitle, forKey: .customTitle)
+        try c.encode(createdAt, forKey: .createdAt)
+        try c.encodeIfPresent(sourceDocPath, forKey: .sourceDocPath)
+        try c.encodeIfPresent(sourceDocTitle, forKey: .sourceDocTitle)
+        var catalog: [String: [DocumentCitation]] = [:]
+        var compact = bubbles
+        for index in compact.indices where !compact[index].evidence.isEmpty {
+            let evidence = compact[index].evidence
+            let identity = evidence.map { "\($0.path):\($0.version):\($0.id):\($0.label):\($0.locator.storageKey)" }.joined(separator: "\n")
+            var key = AppPaths.stableHash(identity)
+            while let previous = catalog[key], previous != evidence { key += "x" }
+            catalog[key] = evidence
+            compact[index].evidence = []
+            compact[index].evidenceArchiveKey = key
+        }
+        try c.encode(compact, forKey: .bubbles)
+        try c.encode(catalog, forKey: .evidenceCatalog)
+        try c.encodeIfPresent(digest, forKey: .digest)
+        try c.encode(documentVersions, forKey: .documentVersions)
     }
 }
 
 /// 落盘包裹结构：顶层加一层，方便将来加字段而不破坏旧文件。
-private struct ConversationFile: Codable {
+private struct ConversationFile: Codable, Sendable {
     var version: Int = 1
     var conversations: [Conversation] = []
     var activeID: UUID? = nil
@@ -102,9 +145,6 @@ final class ConversationStore: ObservableObject {
     @Published private(set) var conversations: [Conversation] = []
     @Published private(set) var activeID: UUID?
 
-    /// history 只留内存：键是会话 id。不落盘。
-    private var histories: [UUID: [AIMessage]] = [:]
-
     // MARK: - 初始化 + 一次性迁移
 
     init() {
@@ -137,6 +177,7 @@ final class ConversationStore: ObservableObject {
 
     /// 从 `conversations.json` 解码（损坏就备份而不是静默重置）。
     private static func loadFile() -> ConversationFile? {
+        ConversationFileWriter.shared.flush()
         let url = AppPaths.conversationHistoryFile
         guard let data = try? Data(contentsOf: url) else { return nil }
         return PersistFile.decodeOrBackup(
@@ -272,6 +313,13 @@ final class ConversationStore: ObservableObject {
         return conversations.first { $0.id == id }
     }
 
+    func updateContext(id: UUID, digest: ConversationDigest? = nil, documents: [DocumentContext] = []) {
+        guard let index = conversations.firstIndex(where: { $0.id == id }) else { return }
+        if let digest { conversations[index].digest = digest }
+        for document in documents { conversations[index].documentVersions[document.path] = document.version }
+        persist()
+    }
+
     func conversation(id: UUID) -> Conversation? {
         conversations.first { $0.id == id }
     }
@@ -326,8 +374,8 @@ final class ConversationStore: ObservableObject {
 
     /// 用活动模型的内存副本替换某会话的内容并落盘。
     ///
-    /// `history` **只留内存**（写进 `histories`，不进 `conversations.json`）——
-    /// 载入时统一由 `AIChatModel.rebuildHistory(from:)` 从气泡重建，单一真相源。
+    /// `history` 仅由活动 AIChatModel 持有；仓库不再保存一份无人读取的副本。
+    /// 载入时由气泡重建，单一真相源。
     /// `.notice` 气泡不入盘（它们是临时的 UI 提示，不该被当成正经对话存档）。
     func replaceContent(id: UUID, bubbles: [AIChatModel.Bubble], history: [AIMessage]) {
         guard let index = conversations.firstIndex(where: { $0.id == id }) else { return }
@@ -336,7 +384,6 @@ final class ConversationStore: ObservableObject {
         // 标题**不在这里**从首条提问生成：默认标题是「文档标题 + 序号」，在会话创建
         // （或出身文档第一次确定）时就定好了。写回答时再改标题，会让用户看着列表里
         // 一条会话的名字在提问之后突然变掉。首条提问只作为**迁移旧数据**的回退（见 performLegacyMigration）。
-        histories[id] = history
         persist()
     }
 
@@ -344,7 +391,6 @@ final class ConversationStore: ObservableObject {
     func clearContent(id: UUID) {
         guard let index = conversations.firstIndex(where: { $0.id == id }) else { return }
         conversations[index].bubbles = []
-        histories[id] = []
         persist()
     }
 
@@ -352,7 +398,6 @@ final class ConversationStore: ObservableObject {
     func delete(id: UUID) {
         guard let index = conversations.firstIndex(where: { $0.id == id }) else { return }
         conversations.remove(at: index)
-        histories[id] = nil
 
         if conversations.isEmpty {
             // 永远保留至少一个会话，避免 activeID 变 nil 让界面失去挂载点。
@@ -410,14 +455,64 @@ final class ConversationStore: ObservableObject {
 
     // MARK: - 落盘
 
-    /// 原子写 `conversations.json`。
-    func persist() {
+    /// Snapshot on the main actor; encode and atomically write on a serial worker.
+    func persist(wait: Bool = false) {
         let file = ConversationFile(
             version: 1,
             conversations: conversations,
             activeID: activeID
         )
-        guard let data = try? JSONEncoder().encode(file) else { return }
-        PersistFile.write(data, to: AppPaths.conversationHistoryFile, label: "conversations.json")
+        ConversationFileWriter.shared.enqueue(file, url: AppPaths.conversationHistoryFile)
+        if wait { ConversationFileWriter.shared.flush() }
+    }
+
+    static func whenPersistenceDrained(_ completion: @escaping @MainActor @Sendable () -> Void) -> Bool {
+        ConversationFileWriter.shared.whenDrained(completion)
+    }
+}
+
+private final class ConversationFileWriter: Sendable {
+    static let shared = ConversationFileWriter()
+    private struct State: Sendable {
+        var pending: (ConversationFile, URL)?
+        var running = false
+    }
+    private let state = Mutex(State())
+    private let queue = DispatchQueue(label: "com.jn.lumen.conversation-save", qos: .utility)
+
+    func enqueue(_ file: ConversationFile, url: URL) {
+        let start = state.withLock { state in
+            state.pending = (file, url)
+            guard !state.running else { return false }
+            state.running = true
+            return true
+        }
+        guard start else { return }
+        queue.async { [self] in
+            while let next = state.withLock({ state -> (ConversationFile, URL)? in
+                guard let next = state.pending else {
+                    state.running = false
+                    return nil
+                }
+                state.pending = nil
+                return next
+            }) {
+                do {
+                    let data = try JSONEncoder().encode(next.0)
+                    PersistFile.write(data, to: next.1, label: "conversations.json")
+                } catch {
+                    NSLog("%@", "[Lumen] Conversation encoding failed: \(error)")
+                }
+            }
+        }
+    }
+
+    // Used only at synchronous read barriers, never during reading or streaming.
+    func flush() { queue.sync {} }
+
+    func whenDrained(_ completion: @escaping @MainActor @Sendable () -> Void) -> Bool {
+        guard state.withLock({ $0.running }) else { return false }
+        queue.async { Task { @MainActor in completion() } }
+        return true
     }
 }

@@ -52,6 +52,24 @@ enum PanelTransitionAudit {
                 }
             }
         }
+        // Frame-only layout checks miss a page rendered at the old manual zoom.
+        // Exercise the same Fit Width / Zoom / panel sequence as the real UI.
+        for zoomed in [false, true] {
+            state.setSidebarVisible(false, animated: false)
+            state.setAIPanelVisible(false, animated: false)
+            try? await Task.sleep(nanoseconds: 650_000_000)
+            bridge.zoomToFit?()
+            if zoomed { bridge.zoomIn?() }
+            for (name, set, _) in legs {
+                set(true)
+                try? await Task.sleep(nanoseconds: 650_000_000)
+                if let measured = probe(), let rect = measured.pageRect {
+                    check("\(name) page edges visible after \(zoomed ? "zoom" : "fit width")",
+                        rect.minX >= measured.viewport.minX - 2 &&
+                        rect.maxX <= measured.viewport.maxX + 2)
+                } else { check("\(name) page edges measured", false) }
+            }
+        }
         state.setSidebarVisible(originalSidebar, animated: false)
         state.setAIPanelVisible(originalAI, animated: false)
         NSLog("%@", "[Lumen][panel] Result: \(passed) passed, \(failures) failed. Visual blanking and latency require separate checks.")

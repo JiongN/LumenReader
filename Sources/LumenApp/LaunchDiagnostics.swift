@@ -1,4 +1,5 @@
 import SwiftUI
+import LumenKit
 import AppKit
 
 /// 命令行开关。
@@ -291,32 +292,13 @@ enum LaunchOptions {
     /// 记录顶下去——跑几次自检之后欢迎页就只剩测试书了。真实用户数据被
     /// 诊断流程改掉，是最难被察觉的一类副作用。
     ///
-    /// **凡「只在自检里生效的启动覆盖」都应列进来**（见 `auditOnlyOverrides`）。
+    /// **凡「只在自检里生效的启动覆盖」都应列进来**（见 `AppPaths.isDiagnosticInvocation`）。
     /// 否则它们单独使用时是**哑的**——看起来像个能单独用的开关，实际既不生效、
     /// 也不防落盘，正是「以为设置了、其实没设置」的陷阱。反过来，列进来意味着
     /// 这次启动**不落盘、也不写「最近打开」**：被归入自检的启动绝不污染用户数据。
     static var isAuditRun: Bool {
-        CommandLine.arguments.contains { argument in
-            argument.hasSuffix("-report")
-                || argument == "--capture"
-                || argument == "--mock-ai"
-                || auditOnlyOverrides.contains(argument)
-        }
+        AppPaths.isDiagnosticInvocation(CommandLine.arguments)
     }
-
-    /// 只应在自检里使用的启动覆盖。
-    ///
-    /// 这些开关的语义是「临时把阅读状态钉死到某个值，供自检取证」；用户正常阅读
-    /// 时用不到（用户走设置页）。它们必须计入 `isAuditRun`：否则单独传
-    /// `--reading-theme warm` 时，`WindowManager` 里那扇 `if LaunchOptions.isAuditRun`
-    /// 的门不会开，覆盖**根本不生效**（同时也就不置 `suppressSave`）。
-    static let auditOnlyOverrides: Set<String> = [
-        "--reading-theme", "--epub-columns", "--pdf-original", "--pdf-translate",
-        "--translation-engine", "--pdf-document-analysis",
-        "--pdf-window-probe", "--pdf-probe-host",
-        "--pdf-surface-level", "--pdf-bare-overlays",
-        "--graph-relation",
-    ]
 
     /// 是否需要在启动后自动截图并退出
     static var shouldCapture: Bool { capturePath != nil }
@@ -872,14 +854,16 @@ enum ClipboardAudit {
 
                 if elapsed >= minimumDelay, hasCapturableWindow() {
                     captureMainWindow(to: path)
-                    NSApp.terminate(nil)
+                    // AppKit's terminateLater runs a nested loop. Leave the Swift
+                    // executor first so pending save continuations can drain.
+                    DispatchQueue.main.async { NSApp.terminate(nil) }
                     return
                 }
 
                 if elapsed >= giveUpAfter {
                     logWindowInventory()
                     NSLog("%@", "[Lumen] 截图超时：\(Int(giveUpAfter))s 内没有等到可用窗口")
-                    NSApp.terminate(nil)
+                    DispatchQueue.main.async { NSApp.terminate(nil) }
                     return
                 }
 

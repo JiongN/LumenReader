@@ -14,9 +14,6 @@ struct TabBar: View {
     @EnvironmentObject private var state: AppState
 
     static let height: CGFloat = 40
-    @State private var availableWidth: CGFloat = 1320
-    private var layoutScale: CGFloat { DS.Size.windowScale(for: availableWidth) }
-    private var adaptiveHeight: CGFloat { Self.height * layoutScale }
 
     /// 左侧给红黄绿交通灯留的横向空位（标题栏透明、交通灯悬浮在标签同一行）。
     static let trafficLightInset: CGFloat = 70
@@ -25,8 +22,8 @@ struct TabBar: View {
         HStack(spacing: 0) {
             // 标题栏透明后，红黄绿交通灯悬浮在窗口最左上。标签栏从它右边开始，
             // 左侧留出格位，避免标签被交通灯盖住（Obsidian 式单行顶栏）。
-            Color.clear
-                .frame(width: Self.trafficLightInset * layoutScale)
+            TitlebarDragArea()
+                .frame(width: Self.trafficLightInset)
 
             // 「收起 / 展开侧栏」放最左、紧跟交通灯，之后才是标签页（Chrome/Obsidian 习惯）。
             Button {
@@ -42,7 +39,8 @@ struct TabBar: View {
             .disabled(state.document == nil)
             .padding(.leading, DS.Space.xs)
 
-            ScrollView(.horizontal, showsIndicators: false) {
+            GeometryReader { proxy in
+              ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: DS.Space.xs) {
                     ForEach(state.sessions) { session in
                         TabItem(
@@ -61,9 +59,13 @@ struct TabBar: View {
                     }
 
                     addButton
+                    TitlebarDragArea()
+                        .frame(minWidth: 24, maxWidth: .infinity, maxHeight: .infinity)
                 }
                 .padding(.horizontal, DS.Space.s)
-                .frame(height: adaptiveHeight)
+                .frame(minWidth: proxy.size.width, alignment: .leading)
+                .frame(height: Self.height)
+              }
             }
 
             Divider()
@@ -73,15 +75,8 @@ struct TabBar: View {
         // 关键：把标签栏钉成固定高度。裸 `Divider()` 在 HStack 里是竖直柔性的
         // （会撑满父级提案的高度），不钉死的话 TabBar 会被顶层 VStack 当成一个
         // 可与阅读区平分的柔性子项——结果阅读区只剩约半窗、底部对齐。
-        .frame(height: adaptiveHeight)
+        .frame(height: Self.height)
         .background(DS.Palette.surfaceSunken)
-        .background {
-            GeometryReader { proxy in
-                Color.clear
-                    .onAppear { availableWidth = proxy.size.width }
-                    .onChange(of: proxy.size.width) { _, width in availableWidth = width }
-            }
-        }
         .overlay(alignment: .bottom) {
             Rectangle()
                 .fill(DS.Palette.separator)

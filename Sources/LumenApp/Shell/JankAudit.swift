@@ -747,6 +747,7 @@ final class JankWatch {
 
     private var lastCounts: [JankCounter: Int] = [:]
     private var lastCPUSeconds: Double = 0
+    private var lastSummaryTick: DispatchTime = .now()
 
     private var surface: (() -> NSView?)?
     private var handle: FileHandle?
@@ -758,6 +759,7 @@ final class JankWatch {
         startTick = .now()
         lastTick = .now()
         lastCPUSeconds = JankAudit.processCPUSeconds()
+        lastSummaryTick = .now()
         lastCounts = JankTally.shared.snapshot()
         windowTickTarget = max(1, Int((windowSeconds * 1000 / MainStallMeter.frameMs).rounded()))
 
@@ -823,9 +825,10 @@ final class JankWatch {
         lastCounts = counts
 
         let elapsed = Double(DispatchTime.now().uptimeNanoseconds - startTick.uptimeNanoseconds) / 1_000_000_000
-        // 化成「几个核」：窗口时长按实际采样数算（≈2s）。真机那次尖峰就是 5953ms/2s ≈ 3 个核，
-        // 这个数一眼能看出「是不是真的饱和了」，比裸毫秒直观得多。
-        let windowSeconds = Double(samples.count) * MainStallMeter.frameMs / 1000
+        // Delayed main-thread ticks do not represent two seconds of wall time.
+        let summaryTick = DispatchTime.now()
+        let windowSeconds = Double(summaryTick.uptimeNanoseconds - lastSummaryTick.uptimeNanoseconds) / 1_000_000_000
+        lastSummaryTick = summaryTick
         let cores = windowSeconds > 0 ? cpuDeltaMs / (windowSeconds * 1000) : 0
         let line = String(
             format: "+%.1fs 停顿 p50=%.2f p95=%.2f max=%.2f >16.7ms=%d/%d(%.0f%%) | CPU +%.0fms (%.1f 核) | 页=%@ 偏移=%@ | %@",

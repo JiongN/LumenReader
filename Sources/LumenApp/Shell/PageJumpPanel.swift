@@ -54,9 +54,11 @@ struct PageJumpPanel: View {
                     .disabled(parsedIndex == nil)
             }
 
-            Text(hint)
-                .font(DS.Typo.caption)
-                .foregroundStyle(DS.Palette.textTertiary)
+            if !hint.isEmpty {
+                Text(hint)
+                    .font(DS.Typo.caption)
+                    .foregroundStyle(DS.Palette.textTertiary)
+            }
         }
         .padding(DS.Space.l)
         .background(
@@ -97,13 +99,13 @@ struct PageJumpPanel: View {
     /// 输入过程中的提示语。空输入时不占地方。
     private var hint: String {
         let trimmed = input.trimmingCharacters(in: .whitespaces)
-        guard !trimmed.isEmpty else { return "输入序号后回车即可跳转" }
+        guard !trimmed.isEmpty else { return "" }
         guard let number = Int(trimmed) else { return "「\(trimmed)」不是数字" }
         guard let index = parsedIndex else { return "当前文档还没有可跳转的\(unitName)" }
         if number != index + 1 {
             return "超出范围，将跳到第 \(index + 1) \(unitName)"
         }
-        return "跳到第 \(number) \(unitName)"
+        return ""
     }
 
     private func commit() {

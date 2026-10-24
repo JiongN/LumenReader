@@ -20,6 +20,7 @@
 """
 import json
 import os
+import re
 import sys
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -60,6 +61,53 @@ OUTLINE_REPLY = """好的，以下是这份文档的目录：
 def pick_reply(payload: dict) -> str:
     """按最后一条用户消息里的指令分流。"""
     messages = payload.get("messages") or []
+    system = next((message.get("content") or "" for message in messages if message.get("role") == "system"), "")
+    if "整理历史对话供继续讨论" in system:
+        return "用户正在进行连续长回答测试，要求生成期间仍可查看旧回答，保留历史内容与滚动位置。既有回答是本地模拟材料，不是文献结论。"
+    if os.environ.get("LUMEN_MOCK_LONG_STREAM") == "1":
+        # Cross the 6,000-character streaming preview boundary, then change
+        # layout at completion with lists, tables and a code block.
+        paragraphs = [f"{i}. 滚动测试第{i}项：" + "这是本地模拟回答，用于检查长回复的布局与底部跟随，不代表真实模型结论。" * 4
+                      for i in range(1, 66)]
+        latest = next((message.get("content") or "" for message in reversed(messages) if message.get("role") == "user"), "")
+        marker = next((value for value in ("ROUND_3", "ROUND_2", "ROUND_1") if value in latest), "STREAM")
+        return (f"## {marker}\n\n" + "\n\n".join(paragraphs) + "\n\n| 状态 | 结果 |\n| --- | --- |\n| 完成 | 底部可见 |\n\n"
+                "```swift\nlet completed = true\n```\n\n长回答结束标记：TAIL-VISIBLE")
+    if os.environ.get("LUMEN_MOCK_EVIDENCE") == "1":
+        system = next((message.get("content") or "" for message in messages if message.get("role") == "system"), "")
+        digest = re.search(r'\{"partID":"([^"]+)"', system)
+        if digest:
+            return json.dumps({"partID": digest[1], "summary": "该片段的原文提出科学 AI 愿景及理解错觉风险。"}, ensure_ascii=False)
+        if "英文检索关键词" in system:
+            return "artificial intelligence illusions understanding"
+        for message in messages:
+            if message.get("role") != "user":
+                continue
+            content = message.get("content") or ""
+            matches = list(re.finditer(r"【([^】]+) · (?:原文ID=)?([0-9a-f]+:[^】]+)】\n([^【]+)", content))
+            if os.environ.get("LUMEN_MOCK_RENDER") == "1":
+                preferred = next((match for match in matches if re.search(r"第\s*3\s*页", match[1])), None)
+                if preferred is not None:
+                    matches = [preferred]
+            for match in matches:
+                quote = match[3].strip()[:80]
+                if len(quote) < 8:
+                    continue
+                report = {"citations": [{"number": 1, "id": match[2], "quote": quote}]}
+                if os.environ.get("LUMEN_MOCK_RENDER") == "1":
+                    return ("## 本地渲染校验\n\n"
+                            "1. **第一项**：这条来源经过原文引文核验 [原文1]。\n\n"
+                            "   - 子项甲：缩进保留，链接跳到同一处 [原文1]。\n"
+                            "   - 子项乙：没有核验的标记隐藏[原文9]。\n\n"
+                            "1. 第二项：空行之后继续编号。\n\n"
+                            "   这是第二项的补充段落，不另起编号。\n\n"
+                            "1. 第三项：保留 `encoded in` 和行内样式。\n\n"
+                            "| 检查 | 依据 |\n| --- | --- |\n| 表格链接 | [原文1] |\n\n"
+                            "这是模拟回答，仅核对显示与跳转，不代表真实模型质量。\n\n"
+                            "<!-- lumen-evidence: " + json.dumps(report, ensure_ascii=False) + " -->")
+                return ("这是本地模拟服务的引用联动验证，不是真实模型回答。\n\n"
+                        + "以下内容来自原文 [原文1]：\n\n> " + quote
+                        + "\n\n<!-- lumen-evidence: " + json.dumps(report, ensure_ascii=False) + " -->")
     for message in reversed(messages):
         if message.get("role") != "user":
             continue
@@ -117,11 +165,12 @@ class Handler(BaseHTTPRequestHandler):
             time.sleep(0.06)
 
         # 再按字符吐正文，模拟逐字流式
-        step = 4
+        long_stream = os.environ.get("LUMEN_MOCK_LONG_STREAM") == "1"
+        step = 32 if long_stream else 4
         for i in range(0, len(reply), step):
             payload_chunk = {"choices": [{"delta": {"content": reply[i:i + step]}, "finish_reason": None}]}
             self._chunk(f"data: {json.dumps(payload_chunk, ensure_ascii=False)}\n\n".encode())
-            time.sleep(0.02)
+            time.sleep(0.08 if long_stream else 0.02)
 
         self._chunk(b"data: [DONE]\n\n")
         self.wfile.write(b"0\r\n\r\n")

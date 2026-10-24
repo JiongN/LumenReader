@@ -16,7 +16,7 @@ struct AIConfigurationTests {
             context: marker,
             memory: ""
         )
-        #expect(messages.last?.content.contains(marker) == true)
+        #expect(messages.contains { $0.content.contains(marker) })
     }
 
     @Test("超长文档分段覆盖每一页且不超过请求上限")
@@ -48,14 +48,14 @@ struct AIConfigurationTests {
 
     @Test("技能按 id 持久化，并要求用技能库解析")
     func agentSkillsRoundTrip() throws {
-        let agent = AgentConfig(name: "方法审查", skills: ["socratic"])
+        let agent = AgentConfig(name: "方法审查", skills: ["concepts"])
         let data = try JSONEncoder().encode(agent)
         let decoded = try JSONDecoder().decode(AgentConfig.self, from: data)
-        #expect(decoded.skills == ["socratic"])
+        #expect(decoded.skills == ["concepts"])
         // Agent 上只有 id：不给技能库就拼不出要求（这正是「改一处、处处生效」的代价，
         // 所以 `PromptLibrary.systemPrompt` 必须把库一起传进来）。
         #expect(decoded.promptSection(in: []).isEmpty)
-        #expect(decoded.promptSection(in: AgentSkill.catalog).contains("不要直接给出结论"))
+        #expect(decoded.promptSection(in: AgentSkill.retiredPromptCatalog).contains("依据原文界定关键概念"))
         #expect(!(String(data: data, encoding: .utf8) ?? "").contains("carriedSkills"))
     }
 
@@ -89,15 +89,16 @@ struct AIConfigurationTests {
         """
         let settings = try JSONDecoder().decode(AISettings.self, from: Data(json.utf8))
         let agent = try #require(settings.agents.first)
-        #expect(agent.skills == ["socratic", "critique", "C1"])
-        #expect(settings.skillLibrary.contains { $0.id == "C1" })
-        #expect(agent.promptSection(in: settings.skillLibrary)
+        #expect(agent.skills.isEmpty)
+        #expect(agent.persona.contains("递进问题"))
+        #expect(settings.retiredReadingSkills.contains { $0.id == "C1" })
+        #expect(agent.persona
             .contains("【因果检查】区分相关关系与因果关系。"))
     }
 
     /// 老配置里「论证链」「术语变化」是用户自建技能（各自带一个 UUID），
     /// 而它们现在是内置技能。不按名字认领的话，技能库里会出现两张同名卡。
-    @Test("同名旧技能认领到内置那条，不新增重复卡")
+    @Test("同名但不同指令的旧技能保留用户原文")
     func sameNameSkillIsClaimed() throws {
         let json = """
         {"providers":[],"streaming":true,"templates":[],
@@ -106,8 +107,9 @@ struct AIConfigurationTests {
                     "usesWebSearch":false,"isBuiltIn":false}]}
         """
         let settings = try JSONDecoder().decode(AISettings.self, from: Data(json.utf8))
-        #expect(settings.skillLibrary.filter { $0.name == "论证链" }.count == 1)
-        #expect(settings.agents.first?.skills == ["argumentChain"])
+        #expect(settings.retiredReadingSkills.filter { $0.id == "X1" }.count == 1)
+        #expect(settings.agents.first?.skills.isEmpty == true)
+        #expect(settings.agents.first?.persona.contains("把核心论证写成链条。") == true)
     }
 
     @Test("技能库里没有的 id 读盘时被清掉")
@@ -123,7 +125,7 @@ struct AIConfigurationTests {
 
     /// 与「删掉的 Agent 不补回来」同一条规则：技能库缺键才灌内置技能，
     /// 已被用户清空就保持为空，否则删掉的技能下次启动会自己长回来。
-    @Test("技能库缺键才灌内置技能，空数组保持为空")
+    @Test("技能迁移补入应用能力，但不自动勾选")
     func skillLibrarySeeding() throws {
         let fresh = try JSONDecoder().decode(
             AISettings.self,
@@ -135,7 +137,8 @@ struct AIConfigurationTests {
             AISettings.self,
             from: Data(#"{"providers":[],"streaming":true,"templates":[],"skillLibrary":[]}"#.utf8)
         )
-        #expect(emptied.skillLibrary.isEmpty)
+        #expect(emptied.skillLibrary == AgentSkill.catalog)
+        #expect(emptied.agents.allSatisfy { !$0.skills.contains(AgentSkill.evidenceID) && !$0.skills.contains(AgentSkill.chartID) })
     }
 
     /// 旧 Agent 配置里还留着一批已经取消的字段（`customInstruction`、`customSkills`、枚举

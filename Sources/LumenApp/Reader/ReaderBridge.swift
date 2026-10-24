@@ -24,6 +24,12 @@ final class ReaderBridge: ObservableObject {
     ///
     /// 默认 false：任何没显式标注来源的选区（含程序注入的）都当作单击处理，宁可少弹。
     @Published var selectionFromDrag: Bool = false
+    @Published var selectionTranslationMode = false
+    let selectedTextTranslationController = PDFTranslationController()
+    func beginSelectionTranslation() {
+        epubTranslationController?.stop()
+        selectionTranslationMode = true
+    }
     /// 位置标签，例如「第 12 / 340 页」
     @Published var positionLabel: String = ""
     /// 0…1 进度
@@ -69,9 +75,12 @@ final class ReaderBridge: ObservableObject {
     /// 批注存在两种后端里（PDF 写文件、EPUB 存数据目录），没有统一的「已变更」事件，
     /// 用一个自增计数把两条路径汇合成同一种刷新信号。
     @Published var annotationRevision: Int = 0
+    @Published var thumbnailRevision: Int = 0
 
     /// 当前被「聚焦」的批注（正文里点中的、或刚新建的）。
     /// 侧栏批注页签据此滚动到对应行并高亮——双向联动的侧栏一侧。
+    @Published var searchFocusRevision = 0
+    @Published var annotationEditRequestID: String?
     @Published var focusedAnnotationID: String?
     @Published private(set) var annotationFocusRevision = 0
     func focusAnnotation(_ id: String) {
@@ -129,6 +138,8 @@ final class ReaderBridge: ObservableObject {
     var retrieveProvider: ((String) -> [(label: String, locator: DocumentLocator, text: String)])?
     /// 全文切片，用于整本书总结的 map 阶段
     var slicesProvider: (() -> [(label: String, text: String)])?
+    var documentContextProvider: (() async throws -> DocumentContext)?
+    var documentContextProgressProvider: ((@escaping @Sendable (DocumentExtractionProgress) -> Void) async throws -> DocumentContext)?
     /// 跳转到指定位置
     var goTo: ((DocumentLocator) -> Void)?
     /// 上一 / 下一单元（页或章）
@@ -161,7 +172,7 @@ final class ReaderBridge: ObservableObject {
     ///
     /// 做成异步而不是同步返回字符串：扫描件要靠逐页 OCR 补齐，那是分钟级的事；
     /// 同步接口会逼调用方在主线程上干等。`progress` 每页回调一次，驱动进度卡片。
-    var extractFullText: ((_ allowOCR: Bool, _ progress: @MainActor (TextExtractionProgress) -> Void) async -> DocumentTextReport)?
+    var extractFullText: ((_ allowOCR: Bool, _ progress: @escaping @MainActor (TextExtractionProgress) -> Void) async -> DocumentTextReport)?
 
     // MARK: 批注（外壳 → 视图）
 
@@ -195,6 +206,7 @@ final class ReaderBridge: ObservableObject {
     var compactAnnotationRows: (() -> Int)?
     /// 侧栏译文 → PDF 正文：定位到段落几何并短暂选中原文。
     var revealTranslationParagraph: ((PDFParagraph, Int) -> Void)?
+    var revealEvidence: ((DocumentCitation) -> Void)?
 
     // MARK: 便利
 
@@ -202,6 +214,9 @@ final class ReaderBridge: ObservableObject {
     func reset() {
         selection = nil
         selectionFromDrag = false
+        selectionTranslationMode = false
+        selectedTextTranslationController.stop()
+        selectedTextTranslationController.clearSelection()
         positionLabel = ""
         progress = 0
         outline = []
@@ -220,6 +235,7 @@ final class ReaderBridge: ObservableObject {
         pdfTranslationController = nil
         closeReader = nil
         thumbnailProvider = nil
+        thumbnailRevision &+= 1
         setPanelResizing = nil
         setPanelWidthDragging = nil
         panelTransitionProbe = nil
@@ -228,6 +244,8 @@ final class ReaderBridge: ObservableObject {
         viewport.pageAspects = []
         jankScrollSurface = nil
         retrieveProvider = nil
+        documentContextProvider = nil
+        documentContextProgressProvider = nil
         slicesProvider = nil
         goTo = nil
         goToNextUnit = nil
@@ -258,8 +276,10 @@ final class ReaderBridge: ObservableObject {
         normalizeAnnotationRows = nil
         compactAnnotationRows = nil
         revealTranslationParagraph = nil
+        revealEvidence = nil
         pdfTranslationController = nil
         epubTranslationController = nil
+        annotationEditRequestID = nil
         focusedAnnotationID = nil
     }
 }

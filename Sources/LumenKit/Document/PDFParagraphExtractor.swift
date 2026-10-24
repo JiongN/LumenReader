@@ -7,9 +7,8 @@ import Foundation
 /// 所以这里全部判据都来自几何，不依赖语言：中文段首缩进、英文断词规则各不相同，
 /// 但「同段行距均匀、段间行距更大、段末行不满」是两类语言共有的排版事实。
 ///
-/// 已知边界（不要假装解决了）：**多栏版面**。本项目在单栏文档上验证过；
-/// 多栏需要先按栏切分再聚类，而本机拿不到可验证的双栏样本，
-/// 所以这里不发明一个验不了的栏检测器。详见 `docs/VERIFY.md`。
+/// 按局部竖直区域识别栏间空白，先读完整一栏再进入下一栏。
+/// 跨栏标题与插入文本块保留；任意杂志式排版仍需逐个样本验证。
 public enum PDFParagraphExtractor {
 
     public struct Options: Sendable, Equatable {
@@ -102,12 +101,92 @@ public enum PDFParagraphExtractor {
                 .sorted(by: readingOrder)
             let kept = dropFurniture(ordered, pageSize: pageSizes[page], options: options,
                                      repeatedFingerprints: repeatedFurniture)
-            result.append(contentsOf: cluster(kept, options: options))
+            let table = wholePageTable(kept, options: options)
+            if let table { result.append(table.paragraph) }
+            let remaining = table?.remaining ?? kept
+            // Sideways marginal text must not interrupt a horizontal paragraph.
+            // Non-repeated notes are retained as separate blocks after the body.
+            let sideways = remaining.filter(isSidewaysLine)
+            for region in columnRegions(remaining.filter { !isSidewaysLine($0) }) {
+                result.append(contentsOf: cluster(region, options: options))
+            }
+            for line in sideways.sorted(by: readingOrder) {
+                result.append(makeParagraph([line], startOrdinal: result.count, options: options))
+            }
         }
         return mergeContinuations(result, pageSizes: pageSizes, options: options)
     }
 
     // MARK: - 阅读顺序
+
+    /// Spanning lines divide a page into bands; columns are read top to bottom
+    /// within each band. Never interleave lines from neighbouring columns.
+    public static func columnRegions(_ lines: [PDFTextLine]) -> [[PDFTextLine]] {
+        guard lines.count >= 6 else { return [lines.sorted(by: readingOrder)] }
+        let verticallyOrdered = lines.sorted(by: readingOrder)
+        let medianHeight = percentile(lines.map { $0.bounds.height }, 0.5)
+        var bands: [[PDFTextLine]] = [], band: [PDFTextLine] = []
+        var bottom = CGFloat.infinity
+        for line in verticallyOrdered {
+            if !band.isEmpty, bottom - line.bounds.maxY > medianHeight * 1.25 {
+                bands.append(band); band = []; bottom = .infinity
+            }
+            band.append(line)
+            bottom = min(bottom, line.bounds.minY)
+        }
+        if !band.isEmpty { bands.append(band) }
+        if bands.count > 1 { return bands.flatMap { columnRegions($0) } }
+        let left = lines.map { $0.bounds.minX }.min() ?? 0
+        let right = lines.map { $0.bounds.maxX }.max() ?? 0
+        let width = right - left
+        guard width > 1 else { return [lines.sorted(by: readingOrder)] }
+        // A narrow keyword sidebar can start beyond 70% of the text width.
+        // Use actual whitespace boundaries, not a fixed central-column grid.
+        let edges = Array(Set(lines.flatMap { [$0.bounds.minX, $0.bounds.maxX] })).sorted()
+        let candidates = zip(edges, edges.dropFirst()).compactMap { a, b -> CGFloat? in
+            let split = (a + b) / 2
+            guard b - a >= max(4, medianHeight * 0.6),
+                  split > left + width * 0.15, split < right - width * 0.1 else { return nil }
+            return split
+        }
+        var best: (split: CGFloat, score: Int, spans: Int)?
+        for split in candidates {
+            let lhs = lines.filter { $0.bounds.maxX <= split + 2 }
+            let rhs = lines.filter { $0.bounds.minX >= split - 2 }
+            let score = min(lhs.count, rhs.count)
+            let spans = lines.count - lhs.count - rhs.count
+            if score >= 3, score > (best?.score ?? 0) || (score == best?.score && spans < (best?.spans ?? .max)) {
+                best = (split, score, spans)
+            }
+        }
+        guard let split = best?.split else { return [lines.sorted(by: readingOrder)] }
+        let spans = lines.filter { $0.bounds.minX < split - 2 && $0.bounds.maxX > split + 2 }
+            .sorted(by: readingOrder)
+        let columns = lines.filter { !spans.contains($0) }
+        var result: [[PDFTextLine]] = []
+        var top = CGFloat.infinity
+        func appendBand(bottom: CGFloat) {
+            let band = columns.filter { $0.bounds.midY <= top && $0.bounds.midY > bottom }
+            let lhs = band.filter { $0.bounds.midX < split }.sorted(by: readingOrder)
+            let rhs = band.filter { $0.bounds.midX >= split }.sorted(by: readingOrder)
+            if !lhs.isEmpty { result.append(lhs) }
+            if !rhs.isEmpty { result.append(rhs) }
+        }
+        var spanningGroup: [PDFTextLine] = []
+        for span in spans {
+            let hasBand = columns.contains { $0.bounds.midY <= top && $0.bounds.midY > span.bounds.midY }
+            if hasBand, !spanningGroup.isEmpty {
+                result.append(spanningGroup)
+                spanningGroup = []
+            }
+            appendBand(bottom: span.bounds.midY)
+            spanningGroup.append(span)
+            top = span.bounds.midY
+        }
+        if !spanningGroup.isEmpty { result.append(spanningGroup) }
+        appendBand(bottom: -.infinity)
+        return result
+    }
 
     /// 页面内的阅读顺序：自上而下；同一水平带内自左向右。
     ///
@@ -135,28 +214,28 @@ public enum PDFParagraphExtractor {
         guard let size = pageSize, size.height > 1, size.width > 1 else { return lines }
         let margin = size.height * options.furnitureMarginFactor
 
-        // 先识别「元数据区块」：首行带期刊墙标的行（引用信息、DOI、ARTICLE HISTORY、
-        // KEYWORDS、CONTACT、版权声明、导航链接等）。返回要剔除的行集合。
-        // 与页眉页脚不同，这些区块常位于页面中部、行可能很宽，不能只靠贴边+短行判。
-        let metadataIndices = detectMetadataBlockIndices(lines, pageSize: size)
-
-        return lines.enumerated().compactMap { index, line -> PDFTextLine? in
-            let box = line.bounds
+        // Section labels and numeric table cells are content, not furniture.
+        return lines.compactMap { line -> PDFTextLine? in
+            let box = line.sourceBounds ?? line.bounds
             let nearTop = box.maxY >= size.height - margin
             let nearBottom = box.minY <= margin
             let atPageEdge = nearTop || nearBottom
 
             let fingerprint = furnitureFingerprint(line.text)
-            if repeatedFingerprints.contains(fingerprint) { return nil }
-            if metadataIndices.contains(index) { return nil }
-            if line.text.trimmingCharacters(in: .whitespacesAndNewlines)
-                .allSatisfy({ $0.isNumber || $0.isWhitespace }) { return nil }
+            let nearFurnitureEdge = isFurnitureEdge(line, size: size)
+            if nearFurnitureEdge, repeatedFingerprints.contains(fingerprint) { return nil }
+            if box.height > box.width * 3, box.height > 40, !isSidewaysLine(line) { return line }
+            if atPageEdge || box.midY >= size.height * 0.90, line.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                .allSatisfy({ $0.isNumber || $0.isWhitespace || $0.isPunctuation }) { return nil }
+            if box.height > box.width * 3, box.minX < size.width * 0.04,
+               line.text.contains("1234567890") { return nil }
+            let label = line.text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            if label.hasPrefix("box ") || label.hasPrefix("fig.") || label.hasPrefix("table ") { return line }
 
             // 贴边 + 够短，才当页眉页脚。第二个条件不能省：
             // 正文里紧贴页顶的满行宽首行也是「贴边」，只按位置删会连正文一起删。
-            if atPageEdge {
-                return box.width >= size.width * options.furnitureWidthRatio ? line : nil
-            }
+            // A short edge line may be the final body line of a column. Only
+            // repeated furniture or numeric ornaments are safe to remove.
             return line
         }
     }
@@ -347,17 +426,73 @@ public enum PDFParagraphExtractor {
         pageSizes: [Int: CGSize]
     ) -> Set<String> {
         let pageCount = Set(lines.map(\.pageIndex)).count
-        guard pageCount >= 3 else { return [] }
+        guard pageCount >= 2 else { return [] }
         var pagesByFingerprint: [String: Set<Int>] = [:]
         for line in lines {
+            if pageCount < 3, !isSidewaysLine(line) { continue }
             guard let size = pageSizes[line.pageIndex], size.height > 1 else { continue }
-            let nearEdge = line.bounds.maxY >= size.height * 0.88 || line.bounds.minY <= size.height * 0.12
+            let label = line.text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            if label.hasPrefix("box ") || label.hasPrefix("fig.") || label.hasPrefix("table ") { continue }
+            let nearEdge = isFurnitureEdge(line, size: size)
             guard nearEdge else { continue }
             let fingerprint = furnitureFingerprint(line.text)
             guard fingerprint.count >= 3 else { continue }
             pagesByFingerprint[fingerprint, default: []].insert(line.pageIndex)
         }
         return Set(pagesByFingerprint.compactMap { key, pages in pages.count >= 2 ? key : nil })
+    }
+
+    private static func isSidewaysLine(_ line: PDFTextLine) -> Bool {
+        guard line.bounds.height > line.bounds.width * 3, line.bounds.height > 40 else { return false }
+        let letters = line.text.unicodeScalars.filter { CharacterSet.letters.contains($0) }
+        let latin = letters.filter { $0.isASCII }.count
+        // A vertical CJK column is ordinary content, not rotated Latin furniture.
+        return letters.count >= 8 && Double(latin) / Double(letters.count) > 0.7
+    }
+
+    private static func isFurnitureEdge(_ line: PDFTextLine, size: CGSize) -> Bool {
+        let bounds = line.sourceBounds ?? line.bounds
+        if bounds.height > bounds.width * 3, bounds.height > 40 {
+            return line.sourceBounds == nil && isSidewaysLine(line) && (bounds.maxX >= size.width * 0.90 || bounds.minX <= size.width * 0.10)
+        }
+        return bounds.maxY >= size.height * 0.88 || bounds.minY <= size.height * 0.12
+    }
+
+    private static func wholePageTable(_ lines: [PDFTextLine], options: Options) -> (paragraph: PDFParagraph, remaining: [PDFTextLine])? {
+        guard lines.count >= 12,
+              let caption = lines.first(where: { $0.text.range(of: "^(Table|表)\\s*[0-9０-９]+", options: .regularExpression) != nil })
+        else { return nil }
+        var content = lines.filter { $0.bounds.midY <= caption.bounds.maxY + 2 }.sorted(by: readingOrder)
+        let rotated = content.filter { $0.sourceBounds != nil }.count > content.count / 2
+        var rows: [[PDFTextLine]] = []
+        for line in content {
+            if let last = rows.last, let first = last.first,
+               abs(first.bounds.midY - line.bounds.midY) < min(first.height, line.height) * 0.6 {
+                rows[rows.count - 1].append(line)
+            } else { rows.append([line]) }
+        }
+        let multipleCells = rows.filter { $0.count >= 3 }.count
+        // Restrict this to table-dominated pages; ordinary two-column prose has
+        // at most two cells per baseline and must keep its column order.
+        guard rotated || multipleCells >= 4 && content.count > lines.count * 9 / 10 else { return nil }
+        if !rotated, let dense = rows.firstIndex(where: { $0.count >= 3 }) {
+            let headings = Set(["Results", "Discussion", "Methods", "Conclusion", "结果", "讨论", "方法"])
+            if let boundary = rows.indices.first(where: { index in
+                guard index > dense else { return false }
+                let row = rows[index]
+                return row.contains { headings.contains($0.text.trimmingCharacters(in: .whitespacesAndNewlines)) }
+                    || row.filter { $0.text.count > 60 }.count >= 2
+            }) {
+                rows = Array(rows[..<boundary])
+                content = rows.flatMap { $0 }
+            }
+        }
+        var paragraph = makeParagraph(content, startOrdinal: 0, options: options)
+        paragraph.text = rows.map { row in
+            row.sorted { $0.bounds.minX < $1.bounds.minX }.map(\.text).joined(separator: "\t")
+        }.joined(separator: "\n")
+        paragraph.kind = .table
+        return (paragraph, lines.filter { !content.contains($0) })
     }
 
     private static func furnitureFingerprint(_ text: String) -> String {
@@ -376,24 +511,31 @@ public enum PDFParagraphExtractor {
         // 用最大值会被一条异常长行（比如超宽的表头）拉出去，导致所有正常行都被判成短行。
         let rightEdge = percentile(lines.map { $0.bounds.maxX }, 0.9)
         let bodyWidth = rightEdge - (lines.map { $0.bounds.minX }.min() ?? 0)
+        let ordinaryGaps = zip(lines, lines.dropFirst()).compactMap { previous, next -> CGFloat? in
+            let gap = previous.bounds.minY - next.bounds.maxY
+            return gap >= 0 && gap < max(previous.height, next.height) * 2 ? gap : nil
+        }
+        let typicalGap = ordinaryGaps.isEmpty ? 0 : percentile(ordinaryGaps, 0.5)
 
         var paragraphs: [PDFParagraph] = []
         var current: [PDFTextLine] = []
         var currentStartOrdinal = 0
         /// 本段（`current`）已见的最右端。每开新段要跟着重置。
         var blockRightEdge: CGFloat = 0
+        var blockLeftEdge: CGFloat = 0
 
         func flush() {
             guard !current.isEmpty else { return }
             paragraphs.append(makeParagraph(current, startOrdinal: currentStartOrdinal, options: options))
             current.removeAll()
             blockRightEdge = 0
+            blockLeftEdge = 0
         }
 
         /// 当前块是否为窄栏：块右端显著小于页面正文右端。
         func isNarrowBlock() -> Bool {
             guard bodyWidth > 1, blockRightEdge > 1 else { return false }
-            return blockRightEdge < rightEdge * options.narrowColumnWidthRatio
+            return blockRightEdge - blockLeftEdge < bodyWidth * options.narrowColumnWidthRatio
         }
 
         /// 当前适用的行距因子：窄栏用宽松因子，否则用正常因子。
@@ -406,6 +548,7 @@ public enum PDFParagraphExtractor {
                 current = [line]
                 currentStartOrdinal = ordinal
                 blockRightEdge = line.bounds.maxX
+                blockLeftEdge = line.bounds.minX
                 continue
             }
 
@@ -415,7 +558,7 @@ public enum PDFParagraphExtractor {
                         - max(previous.bounds.minX, line.bounds.minX)
             let narrower = min(previous.bounds.width, line.bounds.width)
 
-            let gapTooLarge = gap > referenceHeight * currentGapFactor()
+            let gapTooLarge = gap > max(referenceHeight * currentGapFactor(), typicalGap * 1.6)
             let noOverlap = overlap < narrower * options.minimumHorizontalOverlapFactor
             // 短行判据要**两个参考宽度同时满足**才成立：
             //
@@ -433,19 +576,24 @@ public enum PDFParagraphExtractor {
             let endsShortOfPage = bodyWidth > 1
                 && (rightEdge - previous.bounds.maxX) > bodyWidth * (1 - options.shortLineFactor)
             let endsShortOfBlock = blockRightEdge > 1
-                && (blockRightEdge - previous.bounds.maxX) > blockRightEdge * (1 - options.shortLineFactor)
-            let relativeWidth = bodyWidth > 1 ? previous.bounds.width / bodyWidth : 1
+                && (blockRightEdge - previous.bounds.maxX) > (blockRightEdge - blockLeftEdge) * (1 - options.shortLineFactor)
             let previousWasShort = endsShortOfPage && endsShortOfBlock
-                && (endsSentence(previous.text) || relativeWidth < 0.55)
+                && endsSentence(previous.text)
 
-            if gapTooLarge || noOverlap || previousWasShort {
+            let sizeChanges = max(previous.height, line.height) > min(previous.height, line.height) * 1.35
+                && (current.count == 1 || endsSentence(previous.text))
+            let indentedStart = line.bounds.minX - previous.bounds.minX > referenceHeight * 0.4
+                && endsSentence(previous.text)
+            if gapTooLarge || noOverlap || previousWasShort || sizeChanges || indentedStart {
                 flush()
                 current = [line]
                 currentStartOrdinal = ordinal
                 blockRightEdge = line.bounds.maxX
+                blockLeftEdge = line.bounds.minX
             } else {
                 current.append(line)
                 blockRightEdge = max(blockRightEdge, line.bounds.maxX)
+                blockLeftEdge = min(blockLeftEdge, line.bounds.minX)
             }
         }
         flush()
@@ -463,7 +611,12 @@ public enum PDFParagraphExtractor {
     ) -> [PDFParagraph] {
         guard var current = input.first else { return [] }
         var result: [PDFParagraph] = []
+        var deferredCaptions: [PDFParagraph] = []
         for next in input.dropFirst() {
+            if current.kind == nil, !endsSentence(current.text), next.kind == .caption {
+                deferredCaptions.append(next)
+                continue
+            }
             if shouldMerge(current, next, pageSizes: pageSizes, options: options) {
                 current.text = join(current.text, next.text)
                 current.lineCount += next.lineCount
@@ -471,10 +624,13 @@ public enum PDFParagraphExtractor {
                 current.fragments.append(contentsOf: next.fragments)
             } else {
                 result.append(current)
+                result.append(contentsOf: deferredCaptions)
+                deferredCaptions.removeAll()
                 current = next
             }
         }
         result.append(current)
+        result.append(contentsOf: deferredCaptions)
         return result
     }
 
@@ -484,12 +640,25 @@ public enum PDFParagraphExtractor {
         pageSizes: [Int: CGSize],
         options: Options
     ) -> Bool {
+        guard previous.kind == nil, next.kind == nil else { return false }
+        for paragraph in [previous, next] where paragraph.lineCount == 1 {
+            if isSidewaysLine(PDFTextLine(pageIndex: paragraph.pageIndex, text: paragraph.text, bounds: paragraph.bounds)) {
+                return false
+            }
+        }
         let previousPage = previous.fragments.last?.pageIndex ?? previous.pageIndex
         let adjacentPage = next.pageIndex == previousPage || next.pageIndex == previousPage + 1
         guard adjacentPage, !endsSentence(previous.text), let first = next.text.first else { return false }
 
         let beginsAsContinuation = first.isLowercase
             || ",.;:)]}，。；：、）】》".contains(first)
+        if next.pageIndex == previousPage, beginsAsContinuation,
+           previous.lineCount > 1, next.lineCount > 1,
+           let left = previous.fragments.last, let right = next.fragments.first,
+           right.bounds.minX > left.bounds.maxX,
+           right.bounds.maxY > left.bounds.minY + right.bounds.height / CGFloat(next.lineCount) * 2 {
+            return true
+        }
         if next.pageIndex != previousPage {
             guard let previousSize = pageSizes[previousPage],
                   let nextSize = pageSizes[next.pageIndex],
@@ -503,11 +672,11 @@ public enum PDFParagraphExtractor {
             // 20% / 80% 留出常见页边距，但排除页面中部两个互不相干的文本块。
             let reachesBottom = previousFragment.bounds.minY <= previousSize.height * 0.20
             let startsAtTop = nextFragment.bounds.maxY >= nextSize.height * 0.80
-            return reachesBottom && startsAtTop
-                && (beginsAsContinuation || (!previous.isShort && next.lineCount > 1))
+            return reachesBottom && startsAtTop && beginsAsContinuation
         }
         let trailing = previous.text.trimmingCharacters(in: .whitespacesAndNewlines).last
-        let signalsContinuation = trailing.map { ",;:，；：—–-".contains($0) } ?? false
+        let signalsContinuation = (trailing.map { ",;:，；：—–-".contains($0) } ?? false)
+            || ".,，。".contains(first)
         guard beginsAsContinuation, signalsContinuation,
               let previousFragment = previous.fragments.last,
               let nextFragment = next.fragments.first
@@ -540,7 +709,9 @@ public enum PDFParagraphExtractor {
     }
 
     private static func endsSentence(_ text: String) -> Bool {
-        guard let last = text.trimmingCharacters(in: .whitespacesAndNewlines).last else { return true }
+        var ending = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        while let last = ending.last, "\"'”’»」』）》】]}）".contains(last) { ending.removeLast() }
+        guard let last = ending.last else { return true }
         // 分号与冒号通常仍在展开同一句、同一条列举，不能把它们当作翻译单元的
         // 结束；截图里的 “education; interoperability; / strong …” 正是因此被碎切。
         return ".!?。！？".contains(last)
@@ -552,14 +723,15 @@ public enum PDFParagraphExtractor {
         options: Options
     ) -> PDFParagraph {
         let text = joinLines(lines.map(\.text))
-        let bounds = lines.dropFirst().reduce(lines[0].bounds) { $0.union($1.bounds) }
+        let bounds = lines.dropFirst().reduce(lines[0].sourceBounds ?? lines[0].bounds) { $0.union($1.sourceBounds ?? $1.bounds) }
         return PDFParagraph(
             pageIndex: lines[0].pageIndex,
             text: text,
             bounds: bounds,
             lineCount: lines.count,
             firstLineOrdinal: startOrdinal,
-            isShort: text.count < options.minimumBodyLength
+            isShort: text.count < options.minimumBodyLength,
+            kind: text.range(of: "^(Fig\\.?|Figure|Table|图|表)\\s*[0-9０-９]+", options: .regularExpression) != nil ? .caption : nil
         )
     }
 

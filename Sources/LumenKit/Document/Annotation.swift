@@ -29,12 +29,7 @@ public struct AnnotationItem: Identifiable, Sendable, Equatable {
     ///
     /// EPUB 旧存档没有这个可选字段，解码后按默认黄色显示。
     public var highlightHex: String?
-    /// 这条高亮的**存储矩形比整行窄**（历史遗留：修复「按整行截断」之前画下的批注，
-    /// 存进 PDF 的矩形只覆盖划中的那几个字）。
-    ///
-    /// 读取侧已经会补算整行，所以列表显示不受影响；这个标记只用来**如实告诉用户
-    /// 文件里存的还是半行**，并给「修正」入口一个准确条数——没有它就只能挂一个
-    /// 永远不知道有没有用的按钮。EPUB 恒为 false。
+    /// 旧修复诊断的兼容字段。局部高亮合法，不再按整行宽度标为截断。
     public var truncated: Bool
 
     public init(id: String, locator: DocumentLocator, quote: String, note: String,

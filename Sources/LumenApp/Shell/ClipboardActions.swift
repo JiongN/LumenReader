@@ -8,7 +8,7 @@ import LumenKit
 ///
 /// 为什么要记来源：扫描件复制出来的文本必然带 OCR 错字，提示里应当说清
 /// 「这段文字是识别来的」，而不是让用户以为原文就是错的。
-struct DocumentTextReport {
+struct DocumentTextReport: Sendable {
     var text: String = ""
     /// 文档总页数（EPUB 为章数），用来算「有几页没拿到」
     var totalUnits: Int = 0
@@ -17,7 +17,7 @@ struct DocumentTextReport {
     /// 靠 OCR 拿到的页数
     var ocrUnits: Int = 0
 
-    var isEmpty: Bool { text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+    var isEmpty: Bool { text.allSatisfy(\.isWhitespace) }
     var usedOCR: Bool { ocrUnits > 0 }
     /// 既没有文本层、也没有识别结果的页数
     var missingUnits: Int { max(0, totalUnits - textLayerUnits - ocrUnits) }
@@ -39,7 +39,7 @@ extension AppState {
     ///
     /// 扫描件会先问一句再用 OCR 补齐：一本 300 页的扫描书逐页识别要几分钟，
     /// 这个决定必须由用户来做，而不是点一下「复制」就静默跑上几分钟。
-    func copyFullText() {
+    func copyFullText(to pasteboard: NSPasteboard = .general) {
         guard let document else {
             showToast("还没有打开文档", isError: true)
             return
@@ -56,16 +56,16 @@ extension AppState {
                 message: """
                 它没有文本层，复制全文需要先逐页做文字识别。
                 识别在本机完成，不联网；按当前速度大约需要 \(Self.spellOut(seconds: estimatedOCRSeconds))。\
-                识别结果会缓存，之后再复制就很快。
+                识别文字将自动写入原 PDF，之后可直接搜索和复制。
                 """,
                 confirmTitle: "识别并复制"
             ) { [weak self] in
-                self?.runFullTextExtraction(allowOCR: true)
+                self?.runFullTextExtraction(allowOCR: true, pasteboard: pasteboard)
             }
             return
         }
 
-        runFullTextExtraction(allowOCR: false)
+        runFullTextExtraction(allowOCR: false, pasteboard: pasteboard)
     }
 
     /// 把当前文档的原文件放进剪贴板，可在访达里直接粘贴。
@@ -94,47 +94,66 @@ extension AppState {
         }
     }
 
-    private func runFullTextExtraction(allowOCR: Bool) {
-        guard let extract = bridge.extractFullText, let document else { return }
+    private func runFullTextExtraction(allowOCR: Bool, pasteboard: NSPasteboard) {
+        guard let session = activeSession, let extract = session.bridge.extractFullText else { return }
+        let document = session.document
 
         let title = allowOCR ? "识别并复制全文" : "提取全文"
-        busy = BusyState(title: title, detail: "准备中…", progress: 0)
+        let request = UUID()
+        session.fullTextRequestID = request
 
         let task = Task { @MainActor [weak self] in
             guard let self else { return }
+            var latest = BusyState(title: title, detail: "准备中…", progress: 0)
+            var lastUpdate: ContinuousClock.Instant?
+            // Fast copies stay silent; only presentation waits, never extraction.
+            let presentation = Task { @MainActor in
+                do { try await Task.sleep(for: .milliseconds(350)) }
+                catch { return }
+                guard session.fullTextRequestID == request, session.fullTextTask != nil else { return }
+                lastUpdate = .now
+                session.busy = latest
+            }
+            defer { presentation.cancel() }
 
             let report = await extract(allowOCR) { progress in
-                self.busy = BusyState(
+                guard session.fullTextRequestID == request, session.fullTextTask != nil else { return }
+                latest = BusyState(
                     title: title,
                     detail: progress.phase,
                     progress: progress.total > 0
                         ? Double(progress.completed) / Double(progress.total)
                         : nil
                 )
+                if let last = lastUpdate, last.duration(to: .now) >= .milliseconds(100) {
+                    lastUpdate = .now
+                    session.busy = latest
+                }
             }
 
             // 先收掉进度卡片，再决定是报成功还是报错——否则 alert 会和卡片叠在一起
-            self.fullTextTask = nil
-            self.busy = nil
-            self.busyCancel = nil
+            guard session.fullTextRequestID == request else { return }
+            session.fullTextTask = nil
+            session.busy = nil
+            session.busyCancel = nil
 
             guard !Task.isCancelled else { return }
-            self.deliver(report: report, documentTitle: document.displayTitle)
+            self.deliver(report: report, documentTitle: document.displayTitle, pasteboard: pasteboard)
         }
 
-        fullTextTask = task
-        busyCancel = { [weak self] in
+        session.fullTextTask = task
+        session.busyCancel = { [weak self, weak session] in
             task.cancel()
-            Task { @MainActor in
-                self?.fullTextTask = nil
-                self?.busy = nil
-                self?.busyCancel = nil
-                self?.showToast("已取消全文提取")
-            }
+            guard let session, session.fullTextRequestID == request else { return }
+            session.fullTextRequestID = UUID()
+            session.fullTextTask = nil
+            session.busy = nil
+            session.busyCancel = nil
+            self?.showToast("已取消全文提取")
         }
     }
 
-    private func deliver(report: DocumentTextReport, documentTitle: String) {
+    private func deliver(report: DocumentTextReport, documentTitle: String, pasteboard: NSPasteboard) {
         guard !report.isEmpty else {
             presentAlert(
                 title: "没有可复制的正文",
@@ -148,11 +167,15 @@ extension AppState {
             return
         }
 
-        let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
-        pasteboard.setString(report.text, forType: .string)
+        guard pasteboard.setString(report.text, forType: .string) else {
+            showToast("复制全文失败", isError: true)
+            return
+        }
 
-        showToast(ToastText.fullText(report))
+        if report.missingUnits > 0 {
+            showToast(ToastText.fullText(report), requiresAttention: true)
+        }
     }
 
     /// 扫描件的耗时预估。按每页 1.6 秒算（实测 2 倍图 + `.accurate` 的典型值）。

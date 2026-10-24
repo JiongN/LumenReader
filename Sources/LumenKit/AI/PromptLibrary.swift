@@ -37,14 +37,8 @@ public enum PromptLibrary {
 
     /// 单一系统提示，保证不同任务下模型的行为基线一致。
     ///
-    /// `template` 提供 `systemPrompt` 时**整段替换**，而不是拼接：
-    /// 模板的意义就是换一种读法（「批判性审读」的立场与「严谨学术解读」并不相同），
-    /// 把两段立场不同的指令拼在一起，模型只会两头都不满足。
-    /// 读者背景仍然保留——那是「关于谁在读」，与「怎么读」不冲突。
-    /// - Parameter agent: 选中的 Agent。它的角色与技能**追加**在系统提示之后，
-    ///   而不是替换默认提示——这一点与 `template` 的整段替换语义刻意不同：
-    ///   默认提示里的防幻觉、要引用、禁客套话这几条是阅读场景的地基，
-    ///   换一个角色不该把它们拆掉。角色改变的是「谁在读」，不是「能不能编」。
+    /// 旧模板参数仅供兼容读取；其要求追加在固定证据约束之后。
+    /// - Parameter agent: 所选阅读方式，统一携带阅读指令与可选技能。
     /// - Parameter skills: 技能库。Agent 上只存技能 id，光给 `agent` 拼不出技能要求，
     ///   必须把库一起传进来（见下面的兜底日志）。
     public static func systemPrompt(
@@ -57,12 +51,8 @@ public enum PromptLibrary {
 
         if let custom = template?.systemPrompt.trimmingCharacters(in: .whitespacesAndNewlines),
            !custom.isEmpty {
-            base = [custom]
-            if !readerPersona.isEmpty {
-                base.append("")
-                base.append("关于这位读者的持久背景（来自其本人在设置中填写的内容，可直接使用，不必再问）：")
-                base.append(readerPersona)
-            }
+            base = defaultSystemLines(readerPersona: readerPersona)
+            base.append("阅读要求：\n" + custom)
         } else {
             base = defaultSystemLines(readerPersona: readerPersona)
         }
@@ -89,13 +79,14 @@ public enum PromptLibrary {
             "",
             "工作原则：",
             "1. 只依据用户提供的原文与上下文回答。原文没有的信息，直接说「原文没有提到」，不要凭常识补全。",
-            "2. 直接给结论，再给依据。不要写「这是一个很好的问题」这类开场白。",
+            "2. 遵循读者的当前任务与所选阅读方式；通常先结论再依据，启发式阅读则先提问。不要写客套开场白。",
             "3. 不要复述原文。用户已经读过那一段了，他要的是解释、关联或判断。",
             "4. 术语第一次出现时给一次简短说明，之后直接用术语。",
             "5. 如果原文表述本身模糊或可能有歧义，指出歧义在哪，而不是替他选一个解释。",
             "6. 用中文回答。代码、公式、专有名词保留原文形式。",
             "7. 不要输出 Markdown 标题层级（#），正文里需要分点时用「- 」。",
-            "8. 篇幅与问题难度匹配：一句话能答完的不要写三段。"
+            "8. 篇幅与问题难度匹配：一句话能答完的不要写三段。",
+            "9. 当前接口只提供文字，不执行程序、工具或生成图片文件。思维导图可返回专用模式要求的 JSON 结构；其他画图请求说明能力边界，可提供文字方案，不声称正在调用绘图工具。"
         ]
         if !readerPersona.isEmpty {
             lines.append("")
@@ -142,15 +133,16 @@ public enum PromptLibrary {
         template: PromptTemplate? = nil,
         agent: AgentConfig? = nil,
         skills: [AgentSkill] = [],
-        webContext: String = ""
+        webContext: String = "",
+        evidenceInstruction: String = ""
     ) -> [AIMessage] {
 
         var messages: [AIMessage] = [
-            .system(systemPrompt(readerPersona: memory, template: template, agent: agent, skills: skills))
+            .system(systemPrompt(readerPersona: memory, template: template, agent: agent, skills: skills)
+                + (evidenceInstruction.isEmpty ? "" : "\n\n" + evidenceInstruction))
         ]
 
         // 带上最近几轮，让「追问」能接上前文
-        messages.append(contentsOf: history.suffix(6))
 
         // 拼装顺序是刻意的，三块分开攒再按序合并：
         //   ① 材料：文档抬头 → 原文（选区 / 当前位置） → 联网检索结果
@@ -164,24 +156,31 @@ public enum PromptLibrary {
         // 而这个差异在终值上完全看不出来（都是同一条 user 消息、都含这些字），
         // 是 `--agent-report` 里那条「检索结果排在任务要求之前」的断言把它抓出来的。
         var material = documentBlock(metadata: metadata, locatorLabel: locatorLabel)
+        material += "\n内部章节编号（如 D1S13）、摘要节点编号仅供程序核对，不得出现在回答正文或充当引用。使用可读的章节名称描述内容。"
+        if !evidenceInstruction.isEmpty {
+            material += "\n引用规范：仅按本轮证据协议引用明确提供的原文；段落标识不是页码，不能按其中数字换算页码。出处不够精确时说明范围，不编造定位。"
+        } else {
+            material += "\n本轮未启用原文依据技能，不要添加原文编号、证据编号或跳转标记。"
+        }
         var instruction = ""
 
         switch task {
         case .explain:
             if let selection {
-                material += "\n\n" + selection.contextBlock()
-                instruction = "请解释【选中内容】：它说的是什么，以及它在这段论述里起什么作用。"
+                // The current target must follow history, not refer to an earlier selection.
+                instruction = selection.contextBlock()
+                    + "\n\n请解释本次【选中内容】：它说的是什么，以及它在这段论述里起什么作用。不要重新回答之前的选区。"
             } else {
-                material += "\n\n【用于回答的文档内容】\n" + truncate(context, limit: 6000)
+                material += "\n\n【用于回答的文档内容】\n" + context
                 instruction = "请解释这段内容的核心意思。"
             }
 
         case .translate:
             if let selection {
-                material += "\n\n【待翻译内容】\n" + selection.text
-                instruction = "请把【待翻译内容】译成\(translateTarget)。只输出译文，不要加解释、不要加原译文对照。保持原文的分段与语气。"
+                instruction = "【本次待翻译内容】\n" + selection.text
+                    + "\n\n请把本次待翻译内容译成\(translateTarget)。只输出译文，不要加解释、不要加原译文对照。保持原文的分段与语气。"
             } else {
-                material += "\n\n【待翻译内容】\n" + truncate(context, limit: 6000)
+                material += "\n\n【待翻译内容】\n" + context
                 instruction = "请把【待翻译内容】译成\(translateTarget)。只输出译文，保持原文的分段。"
             }
 
@@ -189,17 +188,17 @@ public enum PromptLibrary {
             if let selection {
                 material += "\n\n" + selection.contextBlock()
             } else {
-                material += "\n\n【用于回答的文档内容】\n" + truncate(context, limit: 6000)
+                material += "\n\n【用于回答的文档内容】\n" + context
             }
             instruction = "读者的问题：\(question)"
 
         case .summarize(.currentUnit):
-            material += "\n\n【待总结内容】\n" + truncate(context, limit: 7000)
+            material += "\n\n【待总结内容】\n" + context
             instruction = "请总结上述内容。要求：先一句话概括主旨，再用 3–5 条列出要点，最后指出作者在此处的立场或论证方式。"
 
         case .summarize(.wholeDocument):
-            material += "\n\n【待总结内容】\n" + truncate(context, limit: 12000)
-            instruction = "以上是一份文档各章的摘要。请基于它们写出整份文档的概览：先用两三句话讲清它整体在讨论什么，再列出主要论点，最后指出它可能的局限或未展开之处。"
+            material += "\n\n【待总结内容】\n" + context
+            instruction = "请依据提供的原文或分层摘要写出整份文档的概览：先讲清整体在讨论什么，再列出主要论点，最后指出局限或未展开之处。引用页/章标签，区分原文与推论。"
 
         case .custom(let prompt):
             if let selection {
@@ -208,12 +207,14 @@ public enum PromptLibrary {
                 // 自定义问题同样必须携带阅读范围。双文档对照和命令行
                 // `--ask` 都走 .custom；旧实现只在有选区时附原文，导致界面虽然
                 // 选了「双文档」，实际请求却只剩一句问题。
-                material += "\n\n【用于回答的文档内容】\n" + truncate(context, limit: 12_000)
+                material += "\n\n【用于回答的文档内容】\n" + context
             }
             instruction = prompt
         }
 
-        var user = material
+        messages.append(.user(material))
+        messages.append(contentsOf: history)
+        var user = ""
 
         let web = webContext.trimmingCharacters(in: .whitespacesAndNewlines)
         if !web.isEmpty {
@@ -232,26 +233,12 @@ public enum PromptLibrary {
             user += "\n\n" + extra
         }
 
+        if !evidenceInstruction.isEmpty {
+            user += "\n\nRequired: append lumen-evidence using this request's originals, not history."
+        }
+
         messages.append(.user(user))
         return messages
-    }
-
-    /// 章节级摘要（map 阶段），供整本书总结做 reduce。
-    public static func chapterSummaryMessages(
-        text: String,
-        chapterLabel: String,
-        metadata: DocumentMetadata
-    ) -> [AIMessage] {
-        let prompt = """
-        \(documentBlock(metadata: metadata, locatorLabel: chapterLabel))
-
-        【\(chapterLabel) 正文】
-        \(truncate(text, limit: 9000))
-
-        请用 3–6 句话概括这一章：它讲了什么、得出什么结论、与前后文的关系是什么。
-        只输出概括本身，不要任何前言。
-        """
-        return [.system(systemPrompt()), .user(prompt)]
     }
 
     // MARK: - 智能目录

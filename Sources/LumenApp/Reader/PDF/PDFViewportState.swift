@@ -41,11 +41,23 @@ final class PDFViewportState: ObservableObject {
 
 /// The PDFDocument belongs exclusively to the thumbnail serial queue.
 final class PDFThumbnailRenderer: @unchecked Sendable {
+    private final class Storage: @unchecked Sendable {
+        var document: PDFDocument?
+    }
+    private static let queue = DispatchQueue(label: "com.jn.lumen.thumbnail-document", qos: .utility)
     private let url: URL
-    private var document: PDFDocument?
+    private let storage = Storage()
     init(url: URL) { self.url = url }
+    deinit {
+        let storage = storage
+        Self.queue.async { storage.document = nil }
+    }
     func render(index: Int, size: CGSize) -> NSImage? {
-        if document == nil { document = PDFDocument(url: url) }
-        return autoreleasepool { document?.page(at: index)?.thumbnail(of: size, for: .cropBox) }
+        Self.queue.sync {
+            autoreleasepool {
+                if storage.document == nil { storage.document = PDFDocument(url: url) }
+                return storage.document?.page(at: index)?.thumbnail(of: size, for: .cropBox)
+            }
+        }
     }
 }

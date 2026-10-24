@@ -24,15 +24,41 @@ public enum AppPaths {
             ?? URL(fileURLWithPath: NSTemporaryDirectory())
     }
 
+    /// Shared by application launch and storage redirection: diagnostics must
+    /// never disagree about whether they are using real user data.
+    public static func isDiagnosticInvocation(_ arguments: [String]) -> Bool {
+        if isTestInvocation(arguments) { return true }
+        return arguments.contains { argument in
+            (argument.hasPrefix("--") && argument.hasSuffix("-report")) ||
+                diagnosticOverrides.contains(argument)
+        }
+    }
+
+    public static func isTestInvocation(_ arguments: [String]) -> Bool {
+        let executable = arguments.first.map { URL(fileURLWithPath: $0).lastPathComponent } ?? ""
+        return arguments.first?.contains(".xctest") == true || executable.contains("PackageTests") || arguments.contains("--testing-library")
+    }
+
+    private static let isolatedTestRoot = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+        .appendingPathComponent("lumen-tests-\(ProcessInfo.processInfo.processIdentifier)-\(UUID().uuidString)", isDirectory: true)
+
+    private static let diagnosticOverrides: Set<String> = [
+        "--capture", "--mock-ai", "--jank-watch", "--jump-to", "--mindmap-window",
+        "--window-size", "--panel-width", "--sidebar", "--ai",
+        "--reading-theme", "--epub-columns", "--pdf-original", "--pdf-translate",
+        "--translation-engine", "--pdf-document-analysis", "--pdf-window-probe",
+        "--pdf-probe-host", "--pdf-surface-level", "--pdf-bare-overlays", "--graph-relation"
+    ]
+
     /// ~/Library/Application Support/com.jn.lumen
     ///
-    /// 自检（带 `-report`）且给了 `LUMEN_TEST_DATA` 时**重定向到临时目录**，
-    /// 这样自检怎么折腾都碰不到用户真实数据。
+    /// Explicit test data always wins; test executables also get isolation without
+    /// an environment variable, so Swift Testing cannot write to real user state.
     public static var supportRoot: URL {
-        if let directory = ProcessInfo.processInfo.environment["LUMEN_TEST_DATA"],
-           CommandLine.arguments.contains(where: { $0.hasSuffix("-report") || $0 == "--capture" }) {
+        if let directory = ProcessInfo.processInfo.environment["LUMEN_TEST_DATA"] {
             return ensureDirectory(URL(fileURLWithPath: directory, isDirectory: true))
         }
+        if isTestInvocation(CommandLine.arguments) { return ensureDirectory(isolatedTestRoot) }
         return realSupportRoot
     }
 
@@ -46,8 +72,7 @@ public enum AppPaths {
 
     /// ~/Library/Caches/com.jn.lumen（可随时安全删除）
     public static var cacheRoot: URL {
-        if ProcessInfo.processInfo.environment["LUMEN_TEST_DATA"] != nil,
-           CommandLine.arguments.contains(where: { $0.hasSuffix("-report") || $0 == "--capture" }) {
+        if ProcessInfo.processInfo.environment["LUMEN_TEST_DATA"] != nil || isTestInvocation(CommandLine.arguments) {
             return ensureDirectory(supportRoot.appendingPathComponent("cache", isDirectory: true))
         }
         return ensureDirectory(cachesBase.appendingPathComponent(bundleIdentifier, isDirectory: true))

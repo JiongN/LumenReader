@@ -177,7 +177,7 @@ enum ConversationAudit {
               ConversationStore.isFallbackTitle(titleOf(legacy)), "得到「\(titleOf(legacy))」")
 
         // 落盘往返：重新解码 conversations.json，断言标题真的写进去了（不是只在内存里对）。
-        store.persist()
+        store.persist(wait: true)
         if let data = try? Data(contentsOf: AppPaths.conversationHistoryFile),
            let file = try? JSONDecoder().decode(ConversationFileProbe.self, from: data) {
             let titles = Set(file.conversations.map(\.title))
@@ -241,7 +241,7 @@ enum ConversationAudit {
         }
 
         // ── 6. 流式不变量：流式期间不写盘，结束才落盘 ────────────────────────
-        store.persist() // 确保基准文件存在，mtime 才有可比的起点。
+        store.persist(wait: true) // Flush before inspecting on-disk timestamps.
         let fileURL = AppPaths.conversationHistoryFile
         let m1 = mtimeOf(fileURL) ?? .distantPast
         chat.beginFakeStream()
@@ -249,6 +249,7 @@ enum ConversationAudit {
         let m2 = mtimeOf(fileURL) ?? .distantPast
         check("流式期间不写盘（conversations.json mtime 不变）", m1 == m2)
         chat.endFakeStream()
+        store.persist(wait: true)
         let m3 = mtimeOf(fileURL) ?? .distantPast
         check("流式结束后才落盘（mtime 推进）", m3 > m1)
 

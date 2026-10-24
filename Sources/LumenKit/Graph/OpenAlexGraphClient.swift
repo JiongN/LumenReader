@@ -20,15 +20,24 @@ public struct GraphHTTPResponse: Sendable {
 }
 
 public struct OpenAlexGraphClient: Sendable {
+    private static let networkSession: URLSession = {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.timeoutIntervalForRequest = 12
+        configuration.timeoutIntervalForResource = 30
+        configuration.waitsForConnectivity = false
+        return URLSession(configuration: configuration)
+    }()
     public var fetch: @Sendable (URLRequest) async throws -> GraphHTTPResponse
     public var apiKey: String?
 
-    public init(apiKey: String? = nil, fetch: @escaping @Sendable (URLRequest) async throws -> GraphHTTPResponse = { request in
-        let (data, response) = try await URLSession.shared.data(for: request)
-        return GraphHTTPResponse(status: (response as? HTTPURLResponse)?.statusCode ?? 0, data: data)
-    }) {
+    public init(apiKey: String? = nil, fetch: (@Sendable (URLRequest) async throws -> GraphHTTPResponse)? = nil) {
         self.apiKey = apiKey
-        self.fetch = fetch
+        self.fetch = fetch ?? { request in
+            let (bytes, response) = try await Self.networkSession.bytes(for: request, delegate: SameOriginRedirectPolicy())
+            defer { bytes.task.cancel() }
+            let data = try await BoundedResponseData.read(bytes, response: response, maximum: BoundedResponseData.literatureLimit)
+            return GraphHTTPResponse(status: (response as? HTTPURLResponse)?.statusCode ?? 0, data: data)
+        }
     }
 
     public func work(id: String) async throws -> GraphPaper? {
@@ -89,6 +98,7 @@ public struct OpenAlexGraphClient: Sendable {
         for attempt in 0..<3 {
             try Task.checkCancellation()
             let response = try await fetch(request)
+            guard response.data.count <= BoundedResponseData.literatureLimit else { throw AIError.responseTooLarge }
             if (200..<300).contains(response.status) { return response.data }
             if response.status != 429 && response.status < 500 { throw GraphServiceError.http(response.status) }
             if attempt == 2 { throw GraphServiceError.http(response.status) }
@@ -108,8 +118,8 @@ public struct OpenAlexGraphClient: Sendable {
         let venue = ((value["primary_location"] as? [String: Any])?["source"] as? [String: Any])?["display_name"] as? String ?? ""
         let oa = (value["open_access"] as? [String: Any])?["oa_url"] as? String
         let inverted = value["abstract_inverted_index"] as? [String: [Int]] ?? [:]
-        let words = inverted.flatMap { word, positions in positions.map { ($0, word) } }.sorted { $0.0 < $1.0 }.map(\.1)
-        return GraphPaper(id: id, doi: value["doi"] as? String, title: title, authors: authors, year: value["publication_year"] as? Int, venue: venue, abstract: words.joined(separator: " "), openAccessURL: oa.flatMap(URL.init(string:)), referencedIDs: Array((value["referenced_works"] as? [String] ?? []).prefix(20)), relatedIDs: Array((value["related_works"] as? [String] ?? []).prefix(20)), citedByCount: value["cited_by_count"] as? Int ?? 0)
+        let abstract = WebLiteratureSearch.abstractFromInvertedIndex(inverted)
+        return GraphPaper(id: id, doi: value["doi"] as? String, title: title, authors: authors, year: value["publication_year"] as? Int, venue: venue, abstract: abstract, openAccessURL: oa.flatMap(URL.init(string:)), referencedIDs: Array((value["referenced_works"] as? [String] ?? []).prefix(20)), relatedIDs: Array((value["related_works"] as? [String] ?? []).prefix(20)), citedByCount: value["cited_by_count"] as? Int ?? 0)
     }
 
     private static func score(_ paper: GraphPaper, _ identity: GraphIdentity) -> Int {

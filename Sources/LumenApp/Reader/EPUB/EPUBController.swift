@@ -25,6 +25,7 @@ final class EPUBController: NSObject, ObservableObject {
     private var isLoadingChapter = false
     /// 待跳转的锚点。导航是异步的，所以要在发起加载时记下来，等 didFinish 再执行。
     private var pendingAnchor: String = ""
+    private var pendingEvidence: (chapter: Int, quote: String)?
 
     var onLoadError: ((String) -> Void)?
     var onSelection: ((ReaderSelection?) -> Void)?
@@ -40,6 +41,7 @@ final class EPUBController: NSObject, ObservableObject {
     /// 点中正文里的批注高亮（<mark class="lumen-hl">）时回调，参数是批注条目 id。
     /// 与 PDF 侧的 onAnnotationTapped 对应：两侧 → 侧栏聚焦。
     var onHighlightTapped: ((String) -> Void)?
+    var onAnnotationInteractionCleared: (() -> Void)?
     /// 实际生效的栏数（1 或 2）与请求栏数。窄窗口下请求的双栏会被压回单栏，
     /// 界面文案要以「生效值」为准，否则会写出「已是单栏却提示切换为单栏」这种反话。
     var onEffectiveColumns: ((_ effective: Int, _ requested: Int) -> Void)?
@@ -58,8 +60,11 @@ final class EPUBController: NSObject, ObservableObject {
 
     private var theme: ReadingTheme
     private var reader: ReaderSettings
+    private var translationTextSize = UISettings.TextSize.defaultValue
     private var pendingTranslationUpdates: [(index: Int, text: String, state: EPUBTranslationState)] = []
     private var translationFlushWork: DispatchWorkItem?
+    private var resourcePolicyReady = false
+    private var resourcePolicyError: String?
 
     init(theme: ReadingTheme, reader: ReaderSettings) {
         self.theme = theme
@@ -70,6 +75,7 @@ final class EPUBController: NSObject, ObservableObject {
         // EPUB 是不受信任的内容。禁止书内 script / 内联事件；Lumen 的 WKUserScript
         // 仍在应用管理的内容世界中运行，负责排版、选区和逐段翻译。
         configuration.defaultWebpagePreferences.allowsContentJavaScript = false
+        configuration.websiteDataStore = .nonPersistent()
 
         let controller = WKUserContentController()
         configuration.userContentController = controller
@@ -82,6 +88,20 @@ final class EPUBController: NSObject, ObservableObject {
         configureWebView()
         installBaseScript()
         webView.configuration.userContentController.addUserScript(WKUserScript(source: EPUBLayoutScript.javascript, injectionTime: .atDocumentEnd, forMainFrameOnly: true))
+        WKContentRuleListStore.default().compileContentRuleList(
+            forIdentifier: "lumen-epub-offline-v1", encodedContentRuleList: Self.resourceRules
+        ) { [weak self] rules, error in
+            guard let self else { return }
+            guard let rules else {
+                self.resourcePolicyError = error?.localizedDescription ?? "无法启用 EPUB 网络保护"
+                self.isLoadingChapter = false
+                self.onLoadError?(self.resourcePolicyError!)
+                return
+            }
+            self.webView.configuration.userContentController.add(rules)
+            self.resourcePolicyReady = true
+            if self.isLoadingChapter { self.loadCurrentChapter(anchor: self.pendingAnchor) }
+        }
     }
 
     private static let messageHandlerName = "lumen"
@@ -244,6 +264,35 @@ final class EPUBController: NSObject, ObservableObject {
               if (mark) { mark.scrollIntoView({ block: 'center' }); return true; }
               return false;
             },
+            revealQuote: function (quote) {
+              var target = (quote || '').replace(/\\s+/g, ' ').trim();
+              if (!target) { return false; }
+              var walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, {
+                acceptNode: function (node) {
+                  var parent = node.parentElement;
+                  return parent && !parent.closest('script, style, .lm-tr')
+                    ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT;
+                }
+              });
+              var text = '', positions = [], node;
+              while ((node = walker.nextNode())) {
+                var raw = node.nodeValue || '';
+                for (var i = 0; i < raw.length; i++) {
+                  var c = /\\s/.test(raw[i]) ? ' ' : raw[i];
+                  if (c === ' ' && (!text || text.endsWith(' '))) { continue; }
+                  text += c; positions.push({ node: node, offset: i });
+                }
+              }
+              var start = text.indexOf(target);
+              if (start < 0) { return false; }
+              var a = positions[start], b = positions[start + target.length - 1];
+              var range = document.createRange();
+              range.setStart(a.node, a.offset); range.setEnd(b.node, b.offset + 1);
+              var selection = window.getSelection();
+              selection.removeAllRanges(); selection.addRange(range);
+              a.node.parentElement.scrollIntoView({ block: 'center' });
+              return true;
+            },
             // ── 逐段翻译 ──
             //
             // 段落的身份用 `data-lm-p`（下标）标记，而不是每次按选择器重算：
@@ -386,6 +435,9 @@ final class EPUBController: NSObject, ObservableObject {
           document.addEventListener('keyup', function () { setTimeout(function () { reportSelection(true); }, 40); });
           document.addEventListener('touchend', function () { setTimeout(function () { reportSelection(true); }, 0); });
           // 点批注高亮 → 上报条目 id（正文 → 侧栏的联动方向）
+          document.addEventListener('mousedown', function () {
+            window.webkit.messageHandlers.\(Self.messageHandlerName).postMessage({type: 'annotationClear'});
+          });
           document.addEventListener('click', function (e) {
             var node = e.target;
             if (!node || !node.closest) { return; }
@@ -430,9 +482,11 @@ final class EPUBController: NSObject, ObservableObject {
     /* 批注高亮。半透明黄底 + 极淡的下划线：既要一眼看见，又不能把正文压得看不清。
        用 background 而不是 border，是因为高亮常跨行，border 会在行间断开。 */
     mark.lumen-hl {
-      background: rgba(var(--lm-highlight-rgb, 243, 223, 166), 0.72) !important;
+      background: rgba(var(--lm-highlight-rgb, 255, 208, 0), 0.96) !important;
       color: inherit !important;
-      border-radius: 2px;
+      border-radius: 3px;
+      box-decoration-break: clone;
+      -webkit-box-decoration-break: clone;
       padding: 0 1px;
     }
     html.lumen-dark mark.lumen-hl {
@@ -454,30 +508,52 @@ final class EPUBController: NSObject, ObservableObject {
       max-width: 100% !important;
       width: auto !important;
     }
-    /* 逐段翻译的译文容器。紧跟在对应原文之后，阅读顺序固定为
-       「原文 → 译文」。上方留出较小间距、下方留出更大间距，让译文在视觉上
-       归属于前一段，而不会被误认为下一段的引言。 */
+    \(translationStylesheet)
+    img { border-radius: 3px; }
+    """
+
+    /// 只约束应用插入的译文，不改变出版社正文或用户的原文排版设置。
+    static let translationStylesheet = """
+    [data-lm-p]:has(+ div.lm-tr) {
+      margin-bottom: 0.45em !important;
+    }
     div.lm-tr {
-      margin: 0.2em 0 0.75em;
-      padding: 0.3em 0.6em;
-      border-left: 2px solid var(--lm-accent-soft);
-      border-radius: 0 4px 4px 0;
-      background: var(--lm-accent-soft);
-      font-size: 0.92em;
-      line-height: 1.55;
-      white-space: normal;
+      display: block !important;
+      box-sizing: border-box !important;
+      width: auto !important;
+      min-width: 0 !important;
+      max-width: 100% !important;
+      height: auto !important;
+      max-height: none !important;
+      margin: 0.6em 0 1.5em !important;
+      padding: 0.25em 0.85em 0.35em !important;
+      border: 0 !important;
+      border-inline-start: 2px solid var(--lm-accent-soft) !important;
+      border-radius: 0 !important;
+      background: transparent !important;
+      color: var(--lm-text) !important;
+      font-family: var(--lm-font-family) !important;
+      font-size: var(--lm-translation-size, 15px) !important;
+      font-weight: 400 !important;
+      font-style: normal !important;
+      line-height: 1.85 !important;
+      text-align: start !important;
+      text-indent: 0 !important;
+      letter-spacing: 0 !important;
+      word-spacing: normal !important;
+      white-space: pre-line !important;
+      overflow-wrap: anywhere !important;
+      word-break: normal !important;
+      /* 长译文允许跨栏，不把整段挤到下一页留下空白。 */
+      break-inside: auto !important;
     }
     div.lm-tr-loading {
-      font-style: italic;
       opacity: 0.5;
     }
     div.lm-tr-failed {
       opacity: 0.6;
-      border-left-color: transparent;
-      background: transparent;
-      padding-left: 0.62em;
+      border-inline-start-color: transparent !important;
     }
-    img { border-radius: 3px; }
     """
 }
 
@@ -496,11 +572,26 @@ extension EPUBController {
     var chapterTitles: [String] { source?.chapters.map(\.displayTitle) ?? [] }
 
     func go(to locator: DocumentLocator) {
+        pendingEvidence = nil
         guard let source else { return }
         let target = min(max(locator.chapterIndex, 0), source.chapters.count - 1)
         var anchor = ""
         if case .epub(_, let value, _) = locator { anchor = value }
         loadCurrentChapter(index: target, anchor: anchor)
+    }
+
+    func revealEvidence(_ citation: DocumentCitation) {
+        guard let quote = citation.quote else { go(to: citation.locator); return }
+        let chapter = citation.locator.chapterIndex
+        if chapter == currentChapterIndex && !isLoadingChapter { revealQuote(quote) }
+        else {
+            go(to: citation.locator)
+            pendingEvidence = (chapter, quote)
+        }
+    }
+
+    private func revealQuote(_ quote: String) {
+        webView.evaluateJavaScript("window.__lumen && window.__lumen.revealQuote(\(Self.jsString(quote)));")
     }
 
     func goToNextChapter() {
@@ -521,6 +612,13 @@ extension EPUBController {
         guard let source, index >= 0, index < source.chapters.count else { return }
         currentChapterIndex = index
         isLoadingChapter = true
+        pendingAnchor = anchor
+        if let error = resourcePolicyError {
+            isLoadingChapter = false
+            onLoadError?(error)
+            return
+        }
+        guard resourcePolicyReady else { return }
 
         let chapter = source.chapters[index]
         // 允许访问整个解包目录，这样 ../images/ 这类相对资源才能被加载
@@ -544,6 +642,11 @@ extension EPUBController {
 
         let dark = theme.isDark ? "true" : "false"
         webView.evaluateJavaScript("window.__lumen && window.__lumen.setVars(\(json), \(dark));")
+    }
+
+    func applyTranslationTextSize(_ size: Double) {
+        translationTextSize = UISettings.TextSize.clamp(size)
+        webView.evaluateJavaScript("document.documentElement.style.setProperty('--lm-translation-size', '\(translationTextSize)px');")
     }
 
     /// 把 `cssVariables` 里的 `--name: value;` 解析成字典。
@@ -712,6 +815,7 @@ extension EPUBController: WKNavigationDelegate {
         if LaunchOptions.flag("--epub-layout-report") { NSLog("[Lumen][epub-load] didFinish") }
         isLoadingChapter = false
         applyTheme(theme, reader: reader)
+        applyTranslationTextSize(translationTextSize)
         if !pendingAnchor.isEmpty {
             let anchor = pendingAnchor
             pendingAnchor = ""
@@ -721,6 +825,10 @@ extension EPUBController: WKNavigationDelegate {
         }
         // 章节是新 DOM，批注高亮必须重画一遍（上一次包裹的 <mark> 已随旧文档消失）
         applyHighlights()
+        if let pending = pendingEvidence {
+            pendingEvidence = nil
+            if pending.chapter == currentChapterIndex { revealQuote(pending.quote) }
+        }
         if LaunchOptions.flag("--epub-layout-report") {
             Task { @MainActor [weak self] in
                 try? await Task.sleep(nanoseconds: 800_000_000)
@@ -803,12 +911,14 @@ extension EPUBController: WKNavigationDelegate {
         decisionHandler(.cancel)
     }
 
-    private static func jsString(_ value: String) -> String {
-        let escaped = value
-            .replacingOccurrences(of: "\\", with: "\\\\")
-            .replacingOccurrences(of: "'", with: "\\'")
-            .replacingOccurrences(of: "\n", with: " ")
-        return "'\(escaped)'"
+    static let resourceRules = #"[{"trigger":{"url-filter":"^https?://"},"action":{"type":"block"}},{"trigger":{"url-filter":"^wss?://"},"action":{"type":"block"}},{"trigger":{"url-filter":"^ftp://"},"action":{"type":"block"}}]"#
+
+    static func jsString(_ value: String) -> String {
+        // JSON string literals preserve quotes and control characters without executing book text.
+        guard let data = try? JSONEncoder().encode(value),
+              let json = String(data: data, encoding: .utf8) else { return "\"\"" }
+        return json.replacingOccurrences(of: "\u{2028}", with: "\\u2028")
+            .replacingOccurrences(of: "\u{2029}", with: "\\u2029")
     }
 }
 
@@ -853,10 +963,13 @@ extension EPUBController: WKScriptMessageHandler {
             else { goToPreviousChapter() }
 
         case "scroll":
+            onAnnotationInteractionCleared?()
             let progress = body["progress"] as? Double ?? 0
             let atEnd = body["atEnd"] as? Bool ?? false
             onProgress?(currentChapterIndex, chapterCount, progress, atEnd)
 
+        case "annotationClear":
+            onAnnotationInteractionCleared?()
         case "highlight":
             if let id = body["id"] as? String, !id.isEmpty {
                 if let x = body["anchorX"] as? Double, let y = body["anchorY"] as? Double {

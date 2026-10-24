@@ -64,7 +64,7 @@ public enum LLMTranslation {
         id: engineID,
         displayName: "LLM 翻译",
         requiresNetwork: true,
-        note: "使用当前 AI 服务商与模型；能遵守术语表并结合完整段落翻译，会消耗模型额度。"
+        note: "使用独立选择的翻译服务商与模型；能遵守术语表并结合完整段落翻译，会消耗模型额度。"
     )
 }
 
@@ -92,7 +92,7 @@ public struct LLMTranslationEngine: TranslationEngine {
             .joined(separator: "\n")
         let provider = OpenAICompatibleProvider(config: config, apiKey: apiKey)
         let output = try await provider.completeText(messages: [
-            .system("你是严谨的专业翻译。只输出译文，不解释、不概括、不添加标题。保持原段落语义、指代、标点和论证关系。必须遵守术语表。"),
+            .system("你是严谨的专业翻译。全文使用指定的目标语言；仅在专有名词、原文缩写或术语表要求时保留其他语言。只输出译文，不解释、不概括、不添加标题。保持原段落语义、指代、标点和论证关系。表格保留换行、列对应关系、符号和数字，不改写为连续正文。必须遵守术语表。输出前检查是否遗漏句子或意外保留普通外语短语。"),
             .user("目标语言：\(targetName)\n术语表：\n\(terms)\n\n待翻译段落：\n\(text)")
         ])
         let trimmed = output.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -136,6 +136,7 @@ public enum TranslationEngineCatalog {
     public static let all: [TranslationEngineDescriptor] = [
         AppleSystemTranslation.descriptor,
         MicrosoftTranslationEngine().descriptor,
+        OfficialTranslationEngine.description,
         LLMTranslation.descriptor
     ]
 

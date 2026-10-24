@@ -476,7 +476,6 @@ struct CommandPaletteOverlay: View {
         case .showLiteratureGraph: return "point.3.connected.trianglepath.dotted"
         case .fontIncrease:   return "textformat.size.larger"
         case .fontDecrease:   return "textformat.size.smaller"
-        case .exportSummary:  return "square.and.arrow.up"
         case .exportTranscript: return "text.bubble"
         }
     }

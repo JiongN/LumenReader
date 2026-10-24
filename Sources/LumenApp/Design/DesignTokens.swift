@@ -140,6 +140,11 @@ public enum DS {
 
         /// AI 回复正文：行高放宽，长文可读
         public static var aiBody: Font { ui(size: 13.5) }
+
+        public static func readingPanel(size: CGFloat, weight: Font.Weight = .regular,
+                                        design: Font.Design = .default) -> Font {
+            UIFontGate.font(size: size, weight: weight, design: design)
+        }
     }
 
     // MARK: 动效

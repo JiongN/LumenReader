@@ -38,6 +38,22 @@ struct RootView: View {
 
             content
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .overlayPreferenceValue(AIPanelBoundsPreference.self) { anchors in
+                    GeometryReader { geometry in
+                        if let session = state.activeSession, let anchor = anchors[session.id],
+                           state.isAIPanelVisible, !state.isImmersive {
+                            let bounds = geometry[anchor]
+                            AIPanelView()
+                                .environmentObject(state)
+                                .environmentObject(settings)
+                                .environmentObject(session)
+                                .environmentObject(session.bridge)
+                                .environmentObject(state.chat)
+                                .frame(width: bounds.width, height: bounds.height)
+                                .position(x: bounds.midX, y: bounds.midY)
+                        }
+                    }
+                }
         }
         // 标题栏透明（fullSizeContentView）后，让整棵树延伸到窗口最顶，标签栏才能与
         // 红黄绿交通灯落在同一行（Obsidian 式）。交通灯悬浮在最左，TabBar 已预留空位。

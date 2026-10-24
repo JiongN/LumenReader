@@ -2,7 +2,8 @@ import Foundation
 import Combine
 import PDFKit
 import LumenKit
-import Translation
+@preconcurrency import Translation
+import NaturalLanguage
 
 // MARK: - 段落译文的状态
 
@@ -10,7 +11,6 @@ import Translation
 ///
 /// 四态**必须互相区分得开**：用户看的是一屏几十个段落，「这条翻好了 / 这条在翻 /
 /// 这条失败了 / 这条我压根没打算翻」如果长得一样，那就等于没有状态。
-/// 与 `docs/design/mockup-pdf-contrast-translation.html` 里画的那四种视觉一一对应。
 public enum ParagraphTranslationState: Equatable, Sendable {
     /// 排队中，还没轮到。
     case pending
@@ -151,11 +151,54 @@ public enum TranslationEligibility {
 /// 而这正是「逐行翻」被否掉的那个理由，不能在块这一层又犯一次。
 public enum TranslationTextSplitter {
 
+    /// Selection strings contain visual line wraps, not sentence boundaries.
+    /// Keep blank-line paragraphs and tabular rows, but translate prose as a whole.
+    public static func selectionText(_ text: String) -> String {
+        let lines = text.replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+            .replacingOccurrences(of: "\u{00AD}\n", with: "")
+            .replacingOccurrences(of: "\u{00AD}", with: "")
+            .components(separatedBy: "\n")
+        var blocks: [String] = []
+        var prose: [String] = []
+        func flush() {
+            guard !prose.isEmpty else { return }
+            blocks.append(PDFParagraphExtractor.joinLines(prose))
+            prose.removeAll(keepingCapacity: true)
+        }
+        for line in lines {
+            if line.trimmingCharacters(in: .whitespaces).isEmpty {
+                flush()
+            } else if line.contains("\t") {
+                flush()
+                blocks.append(line.trimmingCharacters(in: .whitespaces))
+            } else {
+                prose.append(line)
+            }
+        }
+        flush()
+        return blocks.joined(separator: "\n\n")
+    }
+
     /// 单块字符上限。留出余量：上限附近的实测值会随接口调整波动，压到 900 更稳。
     public static let defaultLimit = 900
 
+    static func splitInBackground(_ text: String, limit: Int = defaultLimit, preservingLines: Bool = false) async throws -> [String] {
+        let task = Task.detached(priority: .utility) {
+            try Task.checkCancellation()
+            let chunks = split(text, limit: limit, preservingLines: preservingLines)
+            try Task.checkCancellation()
+            return chunks
+        }
+        return try await withTaskCancellationHandler {
+            try await task.value
+        } onCancel: {
+            task.cancel()
+        }
+    }
+
     /// 切分成若干块。返回的块按原顺序拼接后**等于**原文（只多出被吃掉的空白）。
-    public static func split(_ text: String, limit: Int = defaultLimit) -> [String] {
+    public static func split(_ text: String, limit: Int = defaultLimit, preservingLines: Bool = false) -> [String] {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard trimmed.count > limit, limit > 0 else { return trimmed.isEmpty ? [] : [trimmed] }
 
@@ -163,7 +206,8 @@ public enum TranslationTextSplitter {
         var current = ""
 
         // 先按「句末标点 + 其后空白」切句，再贪心地把句子装进块。
-        for sentence in sentences(of: trimmed) {
+        let units = preservingLines ? lineUnits(trimmed) : sentences(of: trimmed)
+        for sentence in units {
             if sentence.count > limit {
                 // 单句就超限（中文长句很常见，因为中文没有词间空格）：
                 // 先把当前块收掉，再对这句硬切。
@@ -182,33 +226,36 @@ public enum TranslationTextSplitter {
         return chunks.filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
     }
 
+    private static func lineUnits(_ text: String) -> [String] {
+        var start = text.startIndex, result: [String] = []
+        for index in text.indices where text[index] == "\n" {
+            let end = text.index(after: index)
+            result.append(String(text[start..<end]))
+            start = end
+        }
+        if start < text.endIndex { result.append(String(text[start...])) }
+        return result
+    }
+
     /// 按句末标点切，**标点归前一句**。空白一并留在句尾，这样拼接回去不丢空格。
     static func sentences(of text: String) -> [String] {
-        let terminators: Set<Character> = ["。", "！", "？", "…", ".", "!", "?", ";", "；"]
-        var out: [String] = []
-        var current = ""
-        var index = text.startIndex
-
-        while index < text.endIndex {
-            let ch = text[index]
-            current.append(ch)
-            if terminators.contains(ch) {
-                // 把紧随其后的空白与右引号 / 右括号一并收进本句，
-                // 否则它们会掉到下一句开头，拼接时位置就错了。
-                var next = text.index(after: index)
-                while next < text.endIndex,
-                      text[next].isWhitespace || "」』）)\"’”".contains(text[next]) {
-                    current.append(text[next])
-                    next = text.index(after: next)
-                }
-                out.append(current)
-                current = ""
-                index = next
-                continue
-            }
-            index = text.index(after: index)
+        let tokenizer = NLTokenizer(unit: .sentence)
+        tokenizer.string = text
+        if let language = NLLanguageRecognizer.dominantLanguage(for: text) {
+            tokenizer.setLanguage(language)
         }
-        if !current.isEmpty { out.append(current) }
+        var out: [String] = []
+        var start = text.startIndex
+        for range in tokenizer.tokens(for: text.startIndex..<text.endIndex) {
+            var end = range.upperBound
+            while end < text.endIndex, text[end].isWhitespace {
+                end = text.index(after: end)
+            }
+            guard end > start else { continue }
+            out.append(String(text[start..<end]))
+            start = end
+        }
+        if start < text.endIndex { out.append(String(text[start...])) }
         return out
     }
 
@@ -217,7 +264,15 @@ public enum TranslationTextSplitter {
         var out: [String] = []
         var start = text.startIndex
         while start < text.endIndex {
-            let end = text.index(start, offsetBy: limit, limitedBy: text.endIndex) ?? text.endIndex
+            var end = text.index(start, offsetBy: limit, limitedBy: text.endIndex) ?? text.endIndex
+            if end < text.endIndex {
+                // A single over-limit sentence falls back to clause/word boundaries.
+                let candidates = text[start..<end].indices.filter { text[$0].isWhitespace || ",;:，；：、".contains(text[$0]) }
+                if let boundary = candidates.last,
+                   text.distance(from: start, to: boundary) >= max(1, limit / 2) {
+                    end = text.index(after: boundary)
+                }
+            }
             out.append(String(text[start..<end]))
             start = end
         }
@@ -237,28 +292,8 @@ public enum TranslationTextSplitter {
 
 // MARK: - 后台渲染器
 
-/// 给 OCR 兜底用的**独立** `PDFDocument` 渲染器。
-///
-/// 为什么另开一份文档而不是复用界面上那份：`PDFDocument` 不是线程安全的，
-/// 而界面上的那份**正在被 PDFView 每帧绘制**。同一实例上再开 4 个线程 `page.draw`
-/// 是踩未定义行为，而且这类 bug 只在特定文档上偶发、最难查。
-/// 另开一份的代价只是多占一份内存，换来的是「后台渲染永远不碰前台正在画的那份」。
-actor PDFPageRenderer {
-
-    private let document: PDFDocument?
-
-    init(url: URL) {
-        self.document = PDFDocument(url: url)
-    }
-
-    var isUsable: Bool { document != nil }
-
-    func image(for pageIndex: Int, scale: CGFloat) -> CGImage? {
-        guard let document, let page = document.page(at: pageIndex) else { return nil }
-        return Self.render(page, scale: scale)
-    }
-
-    /// 把一页画成位图。所有调用都被 actor 串行化 —— 见类型注释。
+/// Rendering helper for verification; callers own and confine their PDFPage.
+enum PDFPageRenderer {
     static func render(_ page: PDFPage, scale: CGFloat) -> CGImage? {
         let box = page.bounds(for: .mediaBox)
         let width = Int(box.width * scale)
@@ -305,8 +340,15 @@ final class PDFTranslationController: ObservableObject {
     @Published private(set) var phase: PDFTranslationPhase = .idle
     /// 段落对照栏的显示开关。
     @Published var isVisible: Bool = false
+    /// Physical PDF page indices, inclusive. Nil keeps the existing whole-document mode.
+    @Published var pageRange: ClosedRange<Int>?
+    private var preparedPageRange: ClosedRange<Int>?
+    private var preparedSelection: PDFParagraph?
+    private var preparedParsingOptions = DocumentAIOptions()
+    private let material: PDFTranslationMaterial
     /// 递增即表示 SwiftUI 需要创建/刷新一次系统翻译会话。
     @Published private(set) var appleSessionRequest = 0
+    private(set) var appleSourceLanguage: String?
 
     /// 这一轮的**文字来源**，必须如实告诉用户。
     ///
@@ -321,7 +363,9 @@ final class PDFTranslationController: ObservableObject {
     private var targetLanguage = TranslationLanguage.defaultID
     private var cacheScope = TranslationEngineCatalog.defaultID
     private var cache = TranslationCache()
+    private var sourceVersion = ""
     private var runTask: Task<Void, Never>?
+    private var preparationTask: Task<(PDFTranslationMaterial.Result, [Int]), Error>?
     /// 每次「从头开始」都把它加一，用来丢弃上一轮迟到的结果。
     private var generation = 0
     /// 距上次落盘又攒了几条 —— 攒够 8 条存一次，既不丢已完成的活也不每段都写盘。
@@ -330,7 +374,7 @@ final class PDFTranslationController: ObservableObject {
     private static let batchSize = 4
     private static let saveEvery = 8
 
-    init() {}
+    init(material: PDFTranslationMaterial = .shared) { self.material = material }
 
     // MARK: 派生读数（界面与自检都读这些）
 
@@ -363,54 +407,84 @@ final class PDFTranslationController: ObservableObject {
     /// **重复调用同一份文档会重置**（切走再切回来就是这样），但磁盘缓存命中，
     /// 所以不会白烧配额。
     func prepare(documentPath: String, target: String, engineID: String,
-                 glossary: [TranslationGlossaryEntry]) async {
+                 glossary: [TranslationGlossaryEntry], provider: AIProviderConfig? = nil,
+                 selection: PDFParagraph? = nil, parsingOptions: DocumentAIOptions = .init(), force: Bool = false) async {
         let normalizedTarget = TranslationLanguage.target(for: target).id
-        let nextScope = Self.cacheScope(engineID: engineID, glossary: glossary)
-        guard self.documentPath != documentPath || targetLanguage != normalizedTarget
-                || cacheScope != nextScope || paragraphs.isEmpty else { return }
+        let providerScope = engineID == LLMTranslation.engineID ? provider.map {
+            "\($0.baseURL)|\($0.selectedModel)|\($0.temperature)|\($0.maxTokens)"
+        } ?? "unconfigured" : ""
+        let nextScope = Self.cacheScope(engineID: engineID, glossary: glossary) + AppPaths.stableHash(providerScope)
+        let attributes = try? FileManager.default.attributesOfItem(atPath: documentPath)
+        let version = "\(attributes?[.size] ?? 0):\(attributes?[.modificationDate] ?? "")"
+        guard force || self.documentPath != documentPath || sourceVersion != version || targetLanguage != normalizedTarget
+                || cacheScope != nextScope || preparedPageRange != pageRange
+                || preparedSelection != selection || preparedParsingOptions != parsingOptions || paragraphs.isEmpty else { return }
 
         cancelRun()
         generation += 1
         self.documentPath = documentPath
+        sourceVersion = version
         targetLanguage = normalizedTarget
         cacheScope = nextScope
+        preparedPageRange = pageRange
+        preparedSelection = selection
+        preparedParsingOptions = parsingOptions
         paragraphs = []
         states = [:]
         sourceNote = nil
+        appleSourceLanguage = nil
         phase = .preparing
         cache = TranslationCache.load(from: AppPaths.translationCacheFile(forPath: documentPath))
 
-        let url = URL(fileURLWithPath: documentPath)
-        let extracted = await Self.extractText(with: url)
-        guard !Task.isCancelled else { phase = .cancelled; return }
-
-        var lines = extracted.lines
-        if extracted.needsOCR {
-            // 文字层不可信 —— 走整本 OCR。这一步要几分钟，期间界面显示进度。
-            let ocr = await recognizeBook(url: url)
-            guard !Task.isCancelled else { phase = .cancelled; return }
-            if ocr.hasContent {
-                lines = ocr.lines
-                sourceNote = "本文件文字层不可信，已改用整本 OCR 识别（\(ocr.pagesProcessed) 页）"
-            } else {
-                // OCR 也没结果 —— 不能假装成功。
-                sourceNote = nil
-                phase = .failed("文字层不可读，OCR 也没识别出内容（可能是纯图片页或加密文档）")
+        let token = generation
+        let all: [PDFParagraph]
+        if let selection {
+            guard !selection.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                  selection.text.count <= 16_000 else {
+                phase = .failed("选中文字须在 1–16,000 字内。")
                 return
             }
-        } else if lines.isEmpty {
-            sourceNote = nil
-            phase = .failed("这份 PDF 抽不出文字（可能是扫描件，或页面全部由图片组成）")
-            return
+            var normalized = selection
+            normalized.text = TranslationTextSplitter.selectionText(selection.text)
+            all = [normalized]
+            sourceNote = "划词"
         } else {
-            sourceNote = "文字取自 PDF 文字层"
+            let range = preparedPageRange, material = self.material
+            let task = Task {
+                let snapshot = try await PDFDocumentContextCache.shared.snapshot(path: documentPath, pageRange: range)
+                let result = try await material.prepare(snapshot, options: parsingOptions, pageRange: range)
+                return (result, snapshot.ocrPages)
+            }
+            preparationTask = task
+            defer { if token == generation { preparationTask = nil } }
+            do {
+                let (result, ocrPages) = try await withTaskCancellationHandler {
+                    try await task.value
+                } onCancel: { task.cancel() }
+                guard token == generation, !Task.isCancelled else { return }
+                all = result.paragraphs
+                sourceNote = result.note ?? (ocrPages.isEmpty ? "文字取自 PDF 文字层" : "OCR 文字已保存到原 PDF")
+            } catch {
+                guard token == generation, !Task.isCancelled else { return }
+                phase = .failed(error.localizedDescription)
+                return
+            }
         }
-
-        let all = PDFParagraphExtractor.paragraphs(from: lines, pageSizes: extracted.pageSizes)
+        guard token == generation, !Task.isCancelled else { return }
+        let savedAttributes = try? FileManager.default.attributesOfItem(atPath: documentPath)
+        sourceVersion = "\(savedAttributes?[.size] ?? 0):\(savedAttributes?[.modificationDate] ?? "")"
+        guard !all.isEmpty else { phase = .failed("未取得可翻译文字"); return }
+        if engineID == AppleSystemTranslation.engineID {
+            appleSourceLanguage = try? await TranslationSourceResolver.shared.resolve(
+                texts: all.filter { TranslationEligibility.skipReason(for: $0, target: normalizedTarget) == nil }.map(\.text),
+                pdfPath: documentPath, pageIndex: selection?.pageIndex ?? preparedPageRange?.lowerBound)
+            guard token == generation, !Task.isCancelled else { return }
+        }
 
         // 先把跳过项定下来，再填缓存命中 —— 顺序反了会让「已跳过」的段落被缓存里的
         // 旧译文盖掉（用户改了目标语言之后就会撞上这种情况）。
         let target = targetLanguage
+        paragraphs = all
         var fresh: [String: ParagraphTranslationState] = [:]
         for paragraph in all {
             if let reason = TranslationEligibility.skipReason(for: paragraph, target: target) {
@@ -427,29 +501,12 @@ final class PDFTranslationController: ObservableObject {
         phase = .idle
     }
 
-    /// 抽文字层 + 判可信度。整段在后台跑（大书的主线程待不住）。
-    private static func extractText(with url: URL) async -> (lines: [PDFTextLine],
-                                                             pageSizes: [Int: CGSize],
-                                                             needsOCR: Bool) {
-        await Task.detached(priority: .userInitiated) {
-            guard let doc = PDFDocument(url: url) else {
-                return ([], [:], false)
-            }
-            let lines = PDFLineExtractor.lines(in: doc)
-            let sizes = PDFLineExtractor.pageSizes(in: doc)
-
-            // 判可信度：抽几页当样本，逐页「文字层读数 vs 渲染后 OCR 读数」比一次。
-            // 样本页取**正文中段**而不是开头 —— 开头是封面 / 版权页 / 目录，
-            // 那几页几乎没有正文，拿它们判会把整本书误判（封面页文字层本来就短）。
-            let probe = samplePages(pageCount: doc.pageCount, count: 3)
-            var needsOCR = false
-            if lines.isEmpty {
-                needsOCR = true          // 一个字的文字层都没有 = 扫描件
-            } else if !probe.isEmpty {
-                needsOCR = pageSamplesSayOCRNeeded(pages: probe, doc: doc)
-            }
-            return (lines, sizes, needsOCR)
-        }.value
+    func clearSelection() {
+        stop()
+        paragraphs = []
+        states = [:]
+        preparedSelection = nil
+        phase = .idle
     }
 
     /// 采样页号：跳过前 10% 与后 5%（封面、目录、索引），在正文区间里均匀取。
@@ -460,52 +517,6 @@ final class PDFTranslationController: ObservableObject {
         guard upper > lower else { return [pageCount / 2] }
         let span = upper - lower
         return (0..<count).map { lower + span * $0 / max(1, count - 1) }
-    }
-
-    /// 逐页比对。**任一页判为不可信就主张 OCR** —— 一本书里缺 ToUnicode 的往往不是某一页，
-    /// 而是某个字体，通常成片出现；宁可多 OCR 一次，也不要拿乱码去翻。
-    private nonisolated static func pageSamplesSayOCRNeeded(pages: [Int], doc: PDFDocument) -> Bool {
-        // The caller already owns a private PDFDocument inside its detached task.
-        // A second detached task would send that non-Sendable document across a task boundary.
-        for index in pages {
-            guard let page = doc.page(at: index) else { continue }
-            let layer = page.string ?? ""
-            guard let image = PDFPageRenderer.render(page, scale: 2.0) else { continue }
-            guard let result = try? OCRService.recognize(in: image) else { continue }
-            let ocr = result.lines.map(\.text).joined(separator: "\n")
-            let verdict = TextLayerTrust.assess(textLayer: layer, ocr: ocr).verdict
-            if verdict.needsOCR { return true }
-        }
-        return false
-    }
-
-    /// 整本 OCR。进度回主线程更新 `phase`。
-    private func recognizeBook(url: URL) async -> BookOCR.Outcome {
-        let renderer = PDFPageRenderer(url: url)
-        let total = await Self.pageCount(of: url)
-        let pages = Array(0..<total)
-
-        phase = .recognizing(.init(completed: 0, total: total))
-        let outcome = await BookOCR.recognize(
-            pages: pages,
-            renderer: BookOCR.Renderer { index, scale in
-                await renderer.image(for: index, scale: scale)
-            },
-            progress: { [weak self] progress in
-                Task { @MainActor [weak self] in
-                    guard let self, self.phase.isBusy else { return }
-                    self.phase = .recognizing(.init(completed: progress.completed,
-                                                    total: progress.total))
-                }
-            }
-        )
-        return outcome
-    }
-
-    private static func pageCount(of url: URL) async -> Int {
-        await Task.detached(priority: .userInitiated) {
-            PDFDocument(url: url)?.pageCount ?? 0
-        }.value
     }
 
     // MARK: 跑
@@ -520,6 +531,10 @@ final class PDFTranslationController: ObservableObject {
             return
         }
         if engineID == AppleSystemTranslation.engineID {
+            guard appleSourceLanguage != nil else {
+                phase = .failed("无法确定原文语言。请选择包含完整句子的文字，或改用其他翻译引擎。")
+                return
+            }
             appleSessionRequest &+= 1
             return
         }
@@ -530,7 +545,7 @@ final class PDFTranslationController: ObservableObject {
         let token = generation
         runTask = Task { [weak self] in
             await self?.run(queue: queue, token: token, engine: engine, target: target)
-            await MainActor.run { [weak self] in self?.runTask = nil }
+            if let self, token == self.generation { self.runTask = nil }
         }
     }
 
@@ -545,6 +560,10 @@ final class PDFTranslationController: ObservableObject {
         }
         guard !queue.isEmpty else { return }
         if engineID == AppleSystemTranslation.engineID {
+            guard appleSourceLanguage != nil else {
+                phase = .failed("无法确定原文语言。请选择包含完整句子的文字，或改用其他翻译引擎。")
+                return
+            }
             appleSessionRequest &+= 1
             return
         }
@@ -555,7 +574,7 @@ final class PDFTranslationController: ObservableObject {
         let token = generation
         runTask = Task { [weak self] in
             await self?.run(queue: queue, token: token, engine: engine, target: target)
-            await MainActor.run { [weak self] in self?.runTask = nil }
+            if let self, token == self.generation { self.runTask = nil }
         }
     }
 
@@ -584,6 +603,8 @@ final class PDFTranslationController: ObservableObject {
     private func cancelRun() {
         runTask?.cancel()
         runTask = nil
+        preparationTask?.cancel()
+        preparationTask = nil
         // 换一代：上一轮迟到的结果会因为 token 不匹配被丢掉，
         // 不会把「已经废弃的译文」写进新状态。
         generation += 1
@@ -606,7 +627,7 @@ final class PDFTranslationController: ObservableObject {
                 let text = paragraph.text
                 let id = paragraph.id
                 group.addTask {
-                    (id, await Self.translate(text: text, engine: engine, target: target))
+                    (id, await Self.translate(text: text, engine: engine, target: target, isTable: paragraph.kind == .table))
                 }
             }
 
@@ -669,7 +690,7 @@ final class PDFTranslationController: ObservableObject {
         runTask = Task { [weak self] in
             guard let self else { return }
             await self.runAppleQueue(queue, session: session, token: token, target: normalizedTarget)
-            await MainActor.run { [weak self] in self?.runTask = nil }
+            if token == self.generation { self.runTask = nil }
         }
         await runTask?.value
     }
@@ -682,20 +703,46 @@ final class PDFTranslationController: ObservableObject {
         var requests: [TranslationSession.Request] = []
         var owners: [String: (paragraphID: String, chunkIndex: Int, chunkCount: Int)] = [:]
         var translated: [String: [Int: String]] = [:]
+        var failedParagraphs: Set<String> = []
+        let tables = Set(queue.filter { $0.kind == .table }.map(\.id))
 
         func flush() async -> Error? {
             guard !requests.isEmpty else { return nil }
             let current = requests
             requests.removeAll(keepingCapacity: true)
             do {
-                for try await response in session.translate(batch: current) {
-                    guard token == generation, !Task.isCancelled,
-                          let clientID = response.clientIdentifier,
+                let responses = try await AppleTranslationBatch.run(current,
+                    batch: { items in
+                        var responses: [TranslationSession.Response] = []
+                        for try await response in session.translate(batch: items) {
+                            try Task.checkCancellation()
+                            responses.append(response)
+                        }
+                        return responses
+                    },
+                    single: { try await session.translate($0).targetText })
+                guard token == generation, !Task.isCancelled else { return CancellationError() }
+                for request in current {
+                    guard let clientID = request.clientIdentifier,
                           let owner = owners.removeValue(forKey: clientID) else { continue }
-                    translated[owner.paragraphID, default: [:]][owner.chunkIndex] = response.targetText
+                    let outcome = responses[clientID] ?? .failure(AppleTranslationBatch.ResponseError.incomplete)
+                    guard !failedParagraphs.contains(owner.paragraphID) else { continue }
+                    switch outcome {
+                    case .failure(let error):
+                        if AppleTranslationBatch.stopsQueue(error) {
+                            states[owner.paragraphID] = .failed(Self.describe(error))
+                            return error
+                        }
+                        states[owner.paragraphID] = .failed(Self.describe(error))
+                        failedParagraphs.insert(owner.paragraphID)
+                        translated.removeValue(forKey: owner.paragraphID)
+                        continue
+                    case .success(let text):
+                        translated[owner.paragraphID, default: [:]][owner.chunkIndex] = text
+                    }
                     if translated[owner.paragraphID]?.count == owner.chunkCount {
                         let pieces = (0..<owner.chunkCount).compactMap { translated[owner.paragraphID]?[$0] }
-                        let joined = TranslationTextSplitter.join(pieces, target: target)
+                        let joined = tables.contains(owner.paragraphID) ? pieces.joined(separator: "\n") : TranslationTextSplitter.join(pieces, target: target)
                         guard !joined.isEmpty else {
                             states[owner.paragraphID] = .failed("系统翻译返回了空译文")
                             continue
@@ -707,7 +754,9 @@ final class PDFTranslationController: ObservableObject {
                     }
                     phase = .running(done: settledCount, total: paragraphs.count)
                 }
-                if pendingSinceSave >= Self.saveEvery { persistCache(force: true) }
+                if token == generation, !Task.isCancelled, pendingSinceSave >= Self.saveEvery {
+                    persistCache(force: true)
+                }
                 return nil
             } catch {
                 return error
@@ -716,27 +765,47 @@ final class PDFTranslationController: ObservableObject {
 
         for paragraph in queue {
             guard token == generation, !Task.isCancelled else { break }
-            let chunks = TranslationTextSplitter.split(paragraph.text)
+            let chunks: [String]
+            do { chunks = try await TranslationTextSplitter.splitInBackground(paragraph.text, preservingLines: paragraph.kind == .table) }
+            catch { break }
+            guard token == generation, !Task.isCancelled else { break }
             guard !chunks.isEmpty else {
                 states[paragraph.id] = .skipped("段落内容为空")
                 continue
             }
             states[paragraph.id] = .translating
             for (index, chunk) in chunks.enumerated() {
+                guard !failedParagraphs.contains(paragraph.id) else { break }
                 let requestID = UUID().uuidString
                 owners[requestID] = (paragraph.id, index, chunks.count)
                 requests.append(.init(sourceText: chunk, clientIdentifier: requestID))
                 if requests.count >= 24, let error = await flush() {
+                    guard token == generation, !Task.isCancelled else { return }
                     let reason = Self.describe(error)
+                    if AppleTranslationBatch.stopsQueue(error) {
+                        for item in queue where !state(of: item.id).isSettled {
+                            states[item.id] = .failed(reason)
+                        }
+                        persistCache(force: true)
+                        phase = .failed(reason)
+                        return
+                    }
                     for value in owners.values { states[value.paragraphID] = .failed(reason) }
                     requests.removeAll()
                     owners.removeAll()
                 }
             }
         }
+        guard token == generation, !Task.isCancelled else { return }
         if let error = await flush() {
+            guard token == generation, !Task.isCancelled else { return }
             let reason = Self.describe(error)
             for value in owners.values { states[value.paragraphID] = .failed(reason) }
+            if AppleTranslationBatch.stopsQueue(error) {
+                persistCache(force: true)
+                phase = .failed(reason)
+                return
+            }
         }
 
         guard token == generation, !Task.isCancelled else { return }
@@ -750,8 +819,8 @@ final class PDFTranslationController: ObservableObject {
     }
 
     /// 翻一段（含长段切分）。**非隔离静态方法** —— 网络请求不该占着主线程。
-    private static func translate(text: String, engine: any TranslationEngine, target: String) async -> TranslationOutcome {
-        let chunks = TranslationTextSplitter.split(text)
+    nonisolated private static func translate(text: String, engine: any TranslationEngine, target: String, isTable: Bool) async -> TranslationOutcome {
+        let chunks = TranslationTextSplitter.split(text, preservingLines: isTable)
         guard !chunks.isEmpty else { return .success("") }
 
         var pieces: [String] = []
@@ -769,19 +838,32 @@ final class PDFTranslationController: ObservableObject {
                 return .failure(Self.describe(error), stopsQueue: Self.isServiceWideFailure(error))
             }
         }
-        return .success(TranslationTextSplitter.join(pieces, target: target))
+        return .success(isTable ? pieces.joined(separator: "\n") : TranslationTextSplitter.join(pieces, target: target))
     }
 
     /// 把错误翻成人话。用户要判断的是「等一下再试」还是「去改设置」，
     /// 所以原因必须具体到能据此行动。
-    static func describe(_ error: Error) -> String {
+    nonisolated static func describe(_ error: Error) -> String {
+        switch error {
+        case TranslationError.unsupportedSourceLanguage:
+            return "Apple 不支持识别到的原文语言；请换用其他翻译引擎。"
+        case TranslationError.unsupportedTargetLanguage, TranslationError.unsupportedLanguagePairing:
+            return "Apple 不支持这组翻译语言；请换用其他翻译引擎。"
+        case TranslationError.unableToIdentifyLanguage:
+            return "Apple 无法判定这段文字的语言；请选取含完整句子的文字后重试。"
+        case TranslationError.nothingToTranslate:
+            return "Apple 判定这段文字无需翻译（可能已是目标语言或主要是编号）。"
+        case TranslationError.internalError:
+            return "Apple 系统翻译未能处理这段文字；可重试、检查系统语言包或换用其他引擎。"
+        default: break
+        }
         let nsError = error as NSError
         if nsError.domain == NSURLErrorDomain {
             switch nsError.code {
             case NSURLErrorSecureConnectionFailed, NSURLErrorServerCertificateUntrusted,
                  NSURLErrorServerCertificateHasBadDate, NSURLErrorServerCertificateNotYetValid,
                  NSURLErrorServerCertificateHasUnknownRoot:
-                return "微软翻译的安全连接失败；请检查网络或代理证书，稍后重试，或改用 Apple 系统翻译。"
+                return "翻译的安全连接失败；请检查网络或代理证书，稍后重试或换用其他引擎。"
             case NSURLErrorNotConnectedToInternet, NSURLErrorCannotFindHost,
                  NSURLErrorCannotConnectToHost, NSURLErrorNetworkConnectionLost,
                  NSURLErrorTimedOut:
@@ -808,7 +890,7 @@ final class PDFTranslationController: ObservableObject {
         return error.localizedDescription
     }
 
-    static func isServiceWideFailure(_ error: Error) -> Bool {
+    nonisolated static func isServiceWideFailure(_ error: Error) -> Bool {
         let nsError = error as NSError
         if nsError.domain == NSURLErrorDomain {
             return [NSURLErrorSecureConnectionFailed, NSURLErrorServerCertificateUntrusted,
@@ -838,7 +920,8 @@ final class PDFTranslationController: ObservableObject {
     }
 
     private func cacheKey(_ paragraphID: String, target: String) -> String {
-        "\(cacheScope)::\(target)::\(paragraphID)"
+        let text = paragraphs.first(where: { $0.id == paragraphID })?.text ?? ""
+        return "\(PDFDocumentContextCache.parserVersion)::\(AppPaths.stableHash(sourceVersion + text))::\(cacheScope)::\(target)::\(paragraphID)"
     }
 
     /// 缓存必须区分引擎和术语表。否则用户改了术语，界面仍会命中旧译文，

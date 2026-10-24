@@ -13,6 +13,19 @@ struct PanelWidthPolicyTests {
         #expect(result.reader >= 320)
     }
 
+    @Test func largeDesktopAllowsComparisonWidthAndNarrowingKeepsPreference() {
+        let scale = Double(DS.Size.windowScale(for: 2560))
+        let wide = PanelWidthPolicy.resolve(containerWidth: 2560, showsRail: true,
+            sidebarVisible: true, aiPanelPreferred: 380, sidebarPreferred: 900)
+        #expect(abs((wide.sidebar ?? 0) - 900 * scale) < 1)
+        #expect(wide.reader >= 320)
+        let narrow = PanelWidthPolicy.resolve(containerWidth: 940, showsRail: true,
+            sidebarVisible: true, aiPanelPreferred: 380, sidebarPreferred: 900)
+        #expect(narrow.reader >= 320)
+        #expect((narrow.sidebar ?? 0) < (wide.sidebar ?? 0))
+        #expect(PanelWidthPolicy.sidebarCap(containerWidth: 2560, showsRail: true, aiPanelVisible: true) > 700)
+    }
+
     @Test func narrowWindowProtectsReaderAndPanelMinimums() {
         let result = PanelWidthPolicy.resolve(containerWidth: 920, showsRail: true,
             sidebarVisible: true, aiPanelPreferred: 640, sidebarPreferred: 420)

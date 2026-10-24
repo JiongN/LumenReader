@@ -271,7 +271,6 @@ public enum LumenAction: String, CaseIterable, Codable, Sendable, Identifiable {
     case fontDecrease
 
     // AI
-    case exportSummary
     case exportTranscript
 
     public var id: String { rawValue }
@@ -298,7 +297,6 @@ public enum LumenAction: String, CaseIterable, Codable, Sendable, Identifiable {
         case .showLiteratureGraph: return "文献图谱"
         case .fontIncrease:   return "放大字号"
         case .fontDecrease:   return "缩小字号"
-        case .exportSummary:  return "导出 AI 摘要为 Markdown…"
         case .exportTranscript: return "导出对话记录为 Markdown…"
         }
     }
@@ -314,7 +312,7 @@ public enum LumenAction: String, CaseIterable, Codable, Sendable, Identifiable {
             return .reading
         case .fontIncrease, .fontDecrease:
             return .typography
-        case .exportSummary, .exportTranscript:
+        case .exportTranscript:
             return .ai
         }
     }
@@ -357,7 +355,6 @@ public enum LumenAction: String, CaseIterable, Codable, Sendable, Identifiable {
         case .fontIncrease:   return KeyCombo(key: "+", modifiers: [.command])
         case .fontDecrease:   return KeyCombo(key: "-", modifiers: [.command])
 
-        case .exportSummary:  return KeyCombo(key: "e", modifiers: [.command, .shift])
         // 「导出对话记录」的默认组合。取 ⇧⌘T（T = Transcript / 对话记录）：
         // 与既有全部默认均不冲突（⇧⌘E 摘要、⇧⌘C 复制全文、⇧⌘A AI 面板、⇧⌘R 最近打开、
         // ⌥⌘C 复制文件、⌥⌘S 侧栏、⌥⌘F 沉浸、⌥⌘←/→、⌘1–5、⌘K/G/O/W、⌘±），
@@ -391,7 +388,6 @@ public enum LumenAction: String, CaseIterable, Codable, Sendable, Identifiable {
         case .showLiteratureGraph: return "literature graph citation network 文献 图谱 引用"
         case .fontIncrease:   return "font bigger 字号 放大"
         case .fontDecrease:   return "font smaller 字号 缩小"
-        case .exportSummary:  return "export markdown 导出 摘要"
         case .exportTranscript: return "export transcript 导出 对话 记录"
         }
     }

@@ -715,7 +715,8 @@ final class AppState: ObservableObject {
 
     // MARK: - 轻提示
 
-    func showToast(_ message: String, isError: Bool = false) {
+    func showToast(_ message: String, isError: Bool = false, requiresAttention: Bool = false) {
+        guard isError || requiresAttention else { return }
         toast = StatusToast(message: message, isError: isError)
         toastTask?.cancel()
         toastTask = Task { @MainActor [weak self] in

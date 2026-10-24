@@ -53,7 +53,7 @@ final class GlobalShortcutRouter {
             guard let combo = services.keyBindings.combo(for: action),
                   combo == pressed else { continue }
             // 编辑正文时保留光标操作，但面板与 zoom 的显式快捷键仍可使用。
-            if isEditing && ![LumenAction.toggleSidebar, .toggleAIPanel, .toggleImmersive].contains(action) {
+            if isEditing && ![LumenAction.toggleSidebar, .toggleAIPanel, .toggleImmersive, .showSearch].contains(action) {
                 return event
             }
             // 命中用户配置的组合即整包吞掉，不取决于 isEnabled；否则禁用菜单项
@@ -63,7 +63,7 @@ final class GlobalShortcutRouter {
             } else if let hint = action.disabledHint {
                 // 只有主动声明了「禁用原因」的动作才弹提示（如 PDF 下的字号调整），
                 // 其余禁用项维持原样——把「假可用被换成哑巴」变成「有解释的静默」。
-                workspace.showToast(hint)
+                workspace.showToast(hint, requiresAttention: true)
             }
             return nil
         }

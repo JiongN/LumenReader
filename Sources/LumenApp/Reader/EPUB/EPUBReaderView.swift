@@ -22,6 +22,7 @@ struct EPUBReaderView: View {
     @EnvironmentObject private var state: AppState
     @EnvironmentObject private var bridge: ReaderBridge
     @EnvironmentObject private var session: ReaderSession
+    @EnvironmentObject private var settings: SettingsStore
 
     @StateObject private var controller: EPUBController
     /// 逐段翻译的编排器。持有它而不是每次现造，是因为翻译是跨章节的长任务：
@@ -69,20 +70,25 @@ struct EPUBReaderView: View {
         .onChange(of: reader) { _, newValue in
             controller.applyTheme(newValue.theme, reader: newValue)
         }
+        .onChange(of: settings.ui.translationTextSize, initial: true) { _, size in
+            controller.applyTranslationTextSize(size)
+        }
         // 翻译开关：开就翻当前章，关就撤掉全部译文（并取消在跑的请求）。
         .onChange(of: reader.epubTranslateEnabled) { _, enabled in
             enabled ? startTranslation() : stopTranslation()
+        }
+        .onChange(of: bridge.selectionTranslationMode) { _, selected in
+            if selected { translation.stop() }
+            else { startTranslation() }
         }
         .onChange(of: translationIdentity) { _, _ in
             if reader.epubTranslateEnabled { startTranslation() }
         }
         .onReceive(translation.$appleSessionRequest.dropFirst()) { _ in
-            var next = TranslationSession.Configuration(
-                source: nil,
-                target: Locale.Language(identifier: reader.translationTargetLanguage)
+            guard let source = translation.appleSourceLanguage else { return }
+            translationConfiguration = AppleTranslationConfiguration.next(
+                translationConfiguration, source: source, target: reader.translationTargetLanguage
             )
-            if translationConfiguration != nil { next.invalidate() }
-            translationConfiguration = next
         }
         .onReceive(controller.$chapterLoadRevision.dropFirst()) { _ in
             refreshTranslationIfEnabled()
@@ -112,7 +118,9 @@ struct EPUBReaderView: View {
 
     private var translationIdentity: String {
         let terms = reader.translationGlossary.map { "\($0.source)=\($0.target)" }.joined(separator: "|")
-        return "\(reader.translationEngineID)|\(reader.translationTargetLanguage)|\(terms)"
+        let provider = state.settingsStore.translationProvider
+        let model = provider.map { "\($0.id)|\($0.baseURL)|\($0.selectedModel)|\($0.temperature)|\($0.maxTokens)" } ?? ""
+        return "\(reader.translationEngineID)|\(reader.translationTargetLanguage)|\(terms)|\(model)"
     }
 
     // MARK: - 载入
@@ -285,6 +293,7 @@ struct EPUBReaderView: View {
         }
 
         bridge.goTo = { [weak controller] locator in controller?.go(to: locator) }
+        bridge.revealEvidence = { [weak controller] citation in controller?.revealEvidence(citation) }
         bridge.goToNextUnit = { [weak controller] in controller?.goToNextChapter() }
         bridge.goToPreviousUnit = { [weak controller] in controller?.goToPreviousChapter() }
 
@@ -312,20 +321,11 @@ struct EPUBReaderView: View {
 
     /// 打开开关：翻译当前这一章。
     private func startTranslation() {
-        guard state.settingsStore.reader.epubTranslateEnabled else { return }
+        guard state.settingsStore.reader.epubTranslateEnabled, !bridge.selectionTranslationMode else { return }
         let settings = state.settingsStore
         let target = settings.reader.translationTargetLanguage
         let engineID = settings.reader.translationEngineID
-        let customEngine: (any TranslationEngine)? = {
-            guard engineID == LLMTranslation.engineID,
-                  let config = settings.activeProvider,
-                  config.isConfigured else { return nil }
-            return LLMTranslationEngine(
-                config: config,
-                apiKey: AICredentialStore.read(account: config.keychainAccount) ?? "",
-                glossary: settings.reader.translationGlossary
-            )
-        }()
+        let customEngine = settings.configuredTranslationEngine
         controller.clearTranslations()
         translation.start(
             documentPath: document.url.standardizedFileURL.path,
@@ -334,6 +334,7 @@ struct EPUBReaderView: View {
             engineID: engineID,
             glossary: settings.reader.translationGlossary,
             customEngine: customEngine,
+            provider: settings.translationProvider,
             paragraphs: { [weak controller] in
                 guard let controller else { return [] }
                 return try await controller.prepareParagraphs()
@@ -402,7 +403,7 @@ struct EPUBReaderView: View {
             bridge.annotationRevision += 1
             state.showToast(note.isEmpty ? "已高亮" : "已加入批注")
         }
-        bridge.addHighlight = { note in addHighlight(note, hex: "#F3DFA6") }
+        bridge.addHighlight = { note in addHighlight(note, hex: "#FFD000") }
         bridge.addHighlightWithColor = { note, hex in addHighlight(note, hex: hex) }
         bridge.updateHighlightColor = { id, hex in
             guard store.updateHighlightColor(id: id, hex: hex) else { return false }
@@ -481,12 +482,29 @@ struct EPUBReaderView: View {
             bridge?.selectionFromDrag = false
             bridge?.focusAnnotation(id)
         }
+        controller.onAnnotationInteractionCleared = { [weak bridge] in
+            if bridge?.selectedAnnotationID != nil { bridge?.selectedAnnotationID = nil }
+        }
     }
 
     /// 接通「整本书级别」的两条数据通道：检索与切片。
     /// EPUB 天然以章为单位，直接复用章节边界，不需要像 PDF 那样人为分块。
     private func wireDocumentWideProviders(source: EPUBDocumentSource) {
         let bridge = self.bridge
+        let path = document.url.standardizedFileURL.path
+        bridge.documentContextProvider = {
+            await Task.detached(priority: .utility) {
+                let version = (try? DocumentSourceVersion.current(path: path)) ?? "unavailable"
+                let evidence = source.chapters.map { chapter in
+                    let locator = DocumentLocator.epub(chapterIndex: chapter.index, anchor: "", charOffset: 0)
+                    return DocumentEvidence(id: "chapter-\(chapter.index)", path: path,
+                        label: chapter.displayTitle, locator: locator, text: source.text(around: locator, radius: 0))
+                }
+                return DocumentContext(version: version, path: path, evidence: evidence,
+                    missingUnits: evidence.enumerated().filter { $0.element.text.isEmpty }.map(\.offset), unitCount: evidence.count,
+                    sections: source.chapters.map { .init(title: $0.displayTitle, startUnit: $0.index, endUnit: $0.index) })
+            }.value
+        }
 
         bridge.retrieveProvider = { query in
             var seenChapters = Set<Int>()

@@ -133,13 +133,10 @@ struct PDFReaderView: View {
         .onChange(of: reader.pdfCanvasBrightness) { _, _ in applyAppearance() }
         .onChange(of: reader.flowMode) { _, newValue in controller.apply(flowMode: newValue) }
         .onReceive(translation.$appleSessionRequest.dropFirst()) { _ in
-            var next = TranslationSession.Configuration(
-                source: nil,
-                target: Locale.Language(identifier: reader.translationTargetLanguage)
+            guard let source = translation.appleSourceLanguage else { return }
+            translationConfiguration = AppleTranslationConfiguration.next(
+                translationConfiguration, source: source, target: reader.translationTargetLanguage
             )
-            // 同一语言对的重试也必须改变 configuration 版本，否则 modifier 不会重跑。
-            if translationConfiguration != nil { next.invalidate() }
-            translationConfiguration = next
         }
         .onChange(of: isOCRRunning) { _, running in
             bridge.ocrRunningPage = running ? controller.currentPageIndex : nil
@@ -176,7 +173,8 @@ struct PDFReaderView: View {
         await translation.prepare(documentPath: document.url.standardizedFileURL.path,
                                   target: reader.translationTargetLanguage,
                                   engineID: reader.translationEngineID,
-                                  glossary: reader.translationGlossary)
+                                  glossary: reader.translationGlossary,
+                                  provider: state.settingsStore.translationProvider)
         guard !translation.phase.isFailure else { return }
         // `prepare` 会更新文档标题/页数并让上层视图重算。await 之后再提交
         // 一次显示态，避免自动启动时译文已入缓存、开关却回到关闭。
@@ -185,15 +183,7 @@ struct PDFReaderView: View {
     }
 
     private func startTranslation() {
-        let customEngine: (any TranslationEngine)? = {
-            guard reader.translationEngineID == LLMTranslation.engineID,
-                  let config = state.settingsStore.activeProvider else { return nil }
-            return LLMTranslationEngine(
-                config: config,
-                apiKey: AICredentialStore.read(account: config.keychainAccount) ?? "",
-                glossary: reader.translationGlossary
-            )
-        }()
+        let customEngine = state.settingsStore.configuredTranslationEngine
         translation.startAll(engineID: reader.translationEngineID,
                              target: reader.translationTargetLanguage,
                              customEngine: customEngine)
@@ -215,7 +205,7 @@ struct PDFReaderView: View {
                     Text("这一本是扫描版（没有文本层）")
                         .font(DS.Typo.ui(size: 12, weight: .semibold))
                         .foregroundStyle(DS.Palette.textPrimary)
-                    Text("识别本页文字后即可选中、复制，并交给 AI 提问与整书总结")
+                    Text("识别后自动保存到原 PDF；全文提问会识别全书")
                         .font(DS.Typo.ui(size: 11))
                         .foregroundStyle(DS.Palette.textSecondary)
                 }
@@ -230,7 +220,8 @@ struct PDFReaderView: View {
                             .foregroundStyle(DS.Palette.textSecondary)
                     }
                 } else {
-                    Button("识别本页文字") { Task { await runOCR() } }
+                    Button(controller.hasCachedOCR(controller.currentPageIndex) ? "本页已识别" : "识别本页文字") { Task { await runOCR() } }
+                        .disabled(controller.hasCachedOCR(controller.currentPageIndex))
                         .controlSize(.small)
                         .buttonStyle(.borderedProminent)
                         .tint(DS.Palette.accent)
@@ -273,7 +264,8 @@ struct PDFReaderView: View {
 
         do {
             let result = try await controller.recognize(page: page)
-            NSLog("%@", "[Lumen] OCR 第 \(page + 1) 页完成：\(result.lines.count) 行，平均置信度 \(Int(result.averageConfidence * 100))%")
+            let source = result.confidenceIsKnown ? "平均置信度 \(Int(result.averageConfidence * 100))%" : "读取已保存文字"
+            NSLog("%@", "[Lumen] OCR 第 \(page + 1) 页完成：\(result.lines.count) 行，\(source)")
             if result.isEmpty {
                 state.presentAlert(
                     title: "没有识别到文字",
@@ -322,10 +314,12 @@ struct PDFReaderView: View {
         bridge.revealTranslationParagraph = { [weak controller] paragraph, preferredPage in
             controller?.revealTranslationParagraph(paragraph, preferredPage: preferredPage)
         }
+        bridge.revealEvidence = { [weak controller] in controller?.revealEvidence($0) }
         wireDocumentWideProviders()
 
         // 恢复上次位置
-        if let locator = DocumentLocator.parse(storageKey: store.state.locationKey) {
+        if let locator = DocumentLocator.parse(storageKey: store.state.locationKey),
+           locator.pageIndex != controller.currentPageIndex {
             controller.go(to: locator)
         }
 
@@ -405,6 +399,13 @@ struct PDFReaderView: View {
     /// 与切片（整本书总结的 map 阶段）。PDF 没有章的概念，按固定页数分块。
     private func wireDocumentWideProviders() {
         let bridge = self.bridge
+        let path = document.url.standardizedFileURL.path
+        bridge.documentContextProvider = {
+            try await PDFDocumentContextCache.shared.snapshot(path: path).context
+        }
+        bridge.documentContextProgressProvider = { progress in
+            try await PDFDocumentContextCache.shared.snapshot(path: path, progress: progress).context
+        }
 
         // 卡顿自检 / 被动监视都要拿到真正被滚动的 PDFView。
         if LaunchOptions.jankReport || LaunchOptions.jankWatch {
@@ -523,6 +524,10 @@ struct PDFReaderView: View {
         controller.onInteractionAnchor = { [weak bridge] anchor in
             bridge?.selectionAnchor = anchor
         }
+        controller.onAnnotationInteractionCleared = { [weak bridge] in
+            if bridge?.selectedAnnotationID != nil { bridge?.selectedAnnotationID = nil }
+            if bridge?.selectionFromDrag == true { bridge?.selectionFromDrag = false }
+        }
 
         // 右键菜单里的「识别本页文字（OCR）」：菜单项动作只递增计数器，真正的识别
         // 由视图层的 `onReceive(controller.$ocrRequestTick)` 在当前视图上跑。
@@ -563,10 +568,9 @@ struct PDFReaderView: View {
 
         // MARK: 批注（写回原 PDF 文件）
 
-        // 只报告失败：成功那句由具体动作来说（「已写入原 PDF 文件」比
-        // 「已保存到原文件」更能说明改的是哪本书），两条 toast 叠着看只会打架。
+        // Successful saves update the document silently; failures remain actionable.
         let thumbnailURL = document.url
-        controller.onFileSaved = { [weak state, weak bridge] ok, message in
+        controller.onFileSaved = { [weak state, weak bridge, weak controller] ok, message in
             if !ok {
                 if message.hasPrefix("保存失败") || message.hasPrefix("无法准备批注保存") {
                     state?.presentAlert(title: "PDF 批注未保存",
@@ -576,11 +580,14 @@ struct PDFReaderView: View {
                 }
             }
             else if let bridge {
-                if message == "大文件批注已保存" { state?.showToast(message) }
+                if message == "OCR 文字已写入原 PDF", let controller {
+                    bridge.isScannedDocument = controller.detectScannedDocument()
+                }
                 // A new independently opened document observes the saved annotation revision.
                 let renderer = PDFThumbnailRenderer(url: thumbnailURL)
                 bridge.thumbnailProvider = { index, size in renderer.render(index: index, size: size) }
-                bridge.annotationRevision += 1
+                bridge.thumbnailRevision &+= 1
+                if message == "OCR 文字已写入原 PDF" { bridge.annotationRevision += 1 }
             }
         }
         bridge.addHighlight = { [weak controller] note in
@@ -606,7 +613,6 @@ struct PDFReaderView: View {
                 state.showToast("添加批注失败", isError: true)
             } else {
                 bridge.annotationRevision += 1
-                state.showToast(controller.pendingSaveCount > 0 ? "批注已添加，正在保存 PDF…" : "已写入原 PDF 文件")
             }
         }
         bridge.annotationsProvider = { [weak controller] in
@@ -614,7 +620,10 @@ struct PDFReaderView: View {
         }
         bridge.deleteAnnotation = { [weak controller] id in
             let ok = controller?.deleteAnnotation(id: id) ?? false
-            if ok { bridge.annotationRevision += 1 }
+            if ok {
+                bridge.annotationRevision += 1
+                if bridge.selectedAnnotationID == id { bridge.selectedAnnotationID = nil }
+            }
             return ok
         }
         // 侧栏点一条批注 → 正文翻到那一处（滚到位置 + 划线类短暂选中原文）
@@ -633,8 +642,25 @@ struct PDFReaderView: View {
             return ok
         }
         // 批注面板「新建」→ 当前页一条空白便签，返回条目让面板直接进入编辑
-        bridge.addNoteAtCurrentPosition = { [weak controller] in
-            controller?.addPageNoteAtCurrentPosition()
+        bridge.addNoteAtCurrentPosition = { [weak controller, weak bridge] in
+            guard let controller else { return nil }
+            if bridge?.selectionFromDrag == true, bridge?.selection?.isUsable == true {
+                let existingIDs = Set(await controller.annotationsList().map(\.id))
+                guard controller.addHighlight(fromCurrentSelection: "") else { return nil }
+                bridge?.selection = nil
+                return await controller.annotationsList().first { !existingIDs.contains($0.id) }
+            }
+            return controller.addPageNoteAtCurrentPosition()
+        }
+        controller.view.onNewAnnotationRequested = { [weak controller, weak bridge] pageIndex, selection, body in
+            guard let controller, let bridge else { return false }
+            let ok = controller.addContextAnnotation(pageIndex: pageIndex, selection: selection, body: body)
+            if ok {
+                bridge.annotationRevision += 1
+                bridge.selectedAnnotationID = nil
+                bridge.selection = nil
+            }
+            return ok
         }
         // 批注面板「修正截断」→ 把文件里已存在的半行矩形扩到整行并写回一次。
         // 面板负责弹确认框（这会改用户的 PDF 文件），这里只执行。
@@ -675,43 +701,18 @@ struct PDFReaderView: View {
 
         // 智能目录：只要每页**开头**那一小截。取满了再送过去是浪费——
         // 章节标题几乎都在页首，而全文喂进去既慢又贵，还会让模型在细节里迷路。
-        bridge.unitSnippetProvider = { [weak controller] in
-            guard let controller, controller.pageCount > 0 else { return [] }
-            var snippets: [(index: Int, text: String)] = []
-            snippets.reserveCapacity(controller.pageCount)
-
-            for index in 0..<controller.pageCount {
-                // 每 24 页让一次主线程。`page.string` 是同步的，一本五百页的书
-                // 一口气取完会把界面钉死好几秒——这是用户手动触发的动作，
-                // 也不该表现为「点了没反应」。
-                if index % 24 == 0 { await Task.yield() }
-
-                let text = controller.usableText(of: index)
-                guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { continue }
-                snippets.append((index: index, text: text))
+        bridge.unitSnippetProvider = {
+            guard let snapshot = try? await PDFDocumentContextCache.shared.snapshot(path: documentPath), !Task.isCancelled else { return [] }
+            return (0..<snapshot.context.unitCount).map { index in
+                (index: index, text: snapshot.paragraphs.filter { $0.pageIndex == index }.map(\.text).joined(separator: "\n\n"))
             }
-            return snippets
         }
 
-        bridge.sectionTextProvider = { [weak controller] start, end in
-            guard let controller, controller.pageCount > 0 else { return "" }
-            let lower = max(0, min(start, end))
-            let upper = min(controller.pageCount - 1, max(start, end))
-            guard lower <= upper else { return "" }
-
-            var pieces: [String] = []
-            var budget = 12_000
-
-            for page in lower...upper where budget > 0 {
-                if page % 24 == 0 { await Task.yield() }
-                let text = controller.usableText(of: page)
-                guard !text.isEmpty else { continue }
-                pieces.append(text)
-                // 预算按字符算、超了就停在整页边界上：截半页会把一页中间的
-                // 半句话喂给模型，摘要很容易顺着半句话编下去。
-                budget -= text.count
-            }
-            return pieces.joined(separator: "\n")
+        bridge.sectionTextProvider = { start, end in
+            guard let snapshot = try? await PDFDocumentContextCache.shared.snapshot(path: documentPath), !Task.isCancelled else { return "" }
+            return snapshot.context.evidence.filter {
+                $0.locator.pageIndex >= min(start, end) && $0.locator.pageIndex <= max(start, end)
+            }.map { "【\($0.label)】\n\($0.text)" }.joined(separator: "\n\n")
         }
 
         bridge.requestOCR = { [weak controller, weak state] page in
@@ -723,11 +724,6 @@ struct PDFReaderView: View {
                     if result.isEmpty {
                         state.presentAlert(title: "没有识别到文字",
                                            message: "第 \(page + 1) 页没有识别出任何文本。")
-                    } else {
-                        state.presentAlert(
-                            title: "已识别第 \(page + 1) 页",
-                            message: String(result.text.prefix(600))
-                        )
                     }
                 } catch {
                     state.presentAlert(
@@ -742,6 +738,7 @@ struct PDFReaderView: View {
         // ThumbnailPane，因为它才是实际可见性的知情者。
         let renderer = PDFThumbnailRenderer(url: document.url)
         bridge.thumbnailProvider = { index, size in renderer.render(index: index, size: size) }
+        bridge.thumbnailRevision &+= 1
         bridge.setPanelResizing = { [weak controller] active in controller?.setPanelResizing(active) }
         bridge.setPanelWidthDragging = { [weak controller] active in
             controller?.setPanelWidthDragging(active)
@@ -832,6 +829,7 @@ struct OCRResultSheet: View {
     }
 
     private var confidenceSummary: String {
+        guard payload.result.confidenceIsKnown else { return "文字来自已保存的 PDF" }
         let average = Int(payload.result.averageConfidence * 100)
         let low = payload.result.lowConfidenceLineCount
         var text = "\(payload.result.lines.count) 行 · 平均置信度 \(average)%"

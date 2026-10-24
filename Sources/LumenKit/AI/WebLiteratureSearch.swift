@@ -1,4 +1,5 @@
 import Foundation
+import NaturalLanguage
 
 // MARK: - 文献检索结果
 
@@ -26,47 +27,124 @@ public struct LiteratureHit: Sendable, Equatable {
 
 // MARK: - 联网文献检索
 
-/// Agent 的「联网搜索文献」能力。
-///
-/// 数据源选择是**被约束逼出来的**，不是随手挑的：知网（CNKI）没有公开接口，
-/// 抓取违反其服务条款；万方只有需要申请审批的开放平台；Web of Science 是
-/// Clarivate 的机构订阅接口，个人拿不到 key。所以这里用三个**免密钥、有公开文档、
-/// 长期稳定**的学术数据源：
-///
-/// - **Crossref**：全球 DOI 注册库，中文期刊凡注册过 DOI 的（相当一部分 CSSCI 期刊）也能查到；
-/// - **OpenAlex**：OurResearch 运营的开放学术图谱，为程序化访问设计，明确支持
-///   `mailto` 礼貌池，覆盖期刊与会议；
-/// - **arXiv**：预印本，教育技术、学习科学领域的很多新工作先出现在这里。
-///
-/// **Semantic Scholar 被换掉了**，理由是实测而非偏好：它不带 API key 时走共享配额池，
-/// 本机连测两次都是 HTTP 429（`curl` 与 `--agent-report` 两条通道都复现），
-/// 也就是说它在默认配置下**基本不产出结果**、只贡献一个错误。
-/// 「查得到」比「源多一个」重要，所以宁可换成真正可用的那一源。
-///
-/// 三者都只返回元数据（标题/作者/年份/来源/摘要），回答里引用的是可核查的出处，
-/// 而不是模型凭印象写出来的「某某（2019）研究表明」——后者是这类功能最容易翻车的地方。
+/// Crossref/OpenAlex/arXiv metadata search, not general web browsing.
+/// OpenAlex uses the configured API key; source failures remain visible.
+/// Only returned titles, identifiers and abstracts become search evidence.
 public enum WebLiteratureSearch {
+    private static let networkSession: URLSession = {
+        let config = URLSessionConfiguration.ephemeral
+        config.timeoutIntervalForRequest = 6
+        config.timeoutIntervalForResource = 10
+        config.waitsForConnectivity = false
+        return URLSession(configuration: config)
+    }()
 
     /// 各源默认取几条。总数控制在 10 条以内：塞太多会把原文上下文挤掉。
-    public static let perSource = 4
+    public static let perSource = 6
+
+    public struct QueryPlan: Codable, Sendable, Equatable {
+        public var query: String
+        public var fallbackQuery: String?
+        public var nativeQuery: String?
+
+        public init(query: String, fallbackQuery: String? = nil, nativeQuery: String? = nil) {
+            self.query = query
+            self.fallbackQuery = fallbackQuery
+            self.nativeQuery = nativeQuery
+        }
+
+        public var queries: [String] {
+            var seen = Set<String>()
+            return [query, fallbackQuery, nativeQuery].compactMap { value in
+                guard let value else { return nil }
+                let clean = value.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard (2...180).contains(clean.count), !clean.contains("\n"),
+                      seen.insert(clean.lowercased()).inserted else { return nil }
+                return clean
+            }
+        }
+    }
 
     public struct Outcome: Sendable {
         public var hits: [LiteratureHit]
         /// 各源的失败说明（有失败但不是全失败时，仍要把结果给模型，只是提示读者注意）
         public var failures: [String]
+        public var query: String = ""
+        public var cached = false
+
+        public init(hits: [LiteratureHit], failures: [String], query: String = "") {
+            self.hits = hits
+            self.failures = failures
+            self.query = query
+        }
 
         public var isEmpty: Bool { hits.isEmpty }
     }
 
+    /// At most three query variants; only weak initial recall triggers expansion.
+    public static func search(plan: QueryPlan, timeout: TimeInterval = 6, openAlexKey: String? = nil,
+                              session: URLSession? = nil) async -> Outcome {
+        let session = session ?? networkSession
+        let queries = plan.queries
+        guard let first = queries.first else { return .init(hits: [], failures: []) }
+        let key = "\(ObjectIdentifier(session)):\(openAlexKey ?? ""):\(queries.joined(separator: "|"))"
+        if var cached = await LiteratureSearchCache.shared.value(for: key) {
+            cached.cached = true
+            return cached
+        }
+        var outcome = await search(query: first, timeout: timeout, openAlexKey: openAlexKey, session: session)
+        var used = [first]
+        if outcome.hits.count < 4, queries.count > 1, !Task.isCancelled {
+            // Expand Crossref/OpenAlex only. Long AND expressions on arXiv are
+            // unlikely to help, and one slow preprint source must not multiply delay.
+            let expanded = await withTaskGroup(of: Outcome.self, returning: [Outcome].self) { group in
+                for query in queries.dropFirst() {
+                    group.addTask {
+                        async let cross = crossref(query, timeout: timeout, session: session)
+                        async let alex = openAlex(query, timeout: timeout, apiKey: openAlexKey, session: session)
+                        var hits: [LiteratureHit] = []
+                        var failures: [String] = []
+                        let (crossResult, alexResult) = await (cross, alex)
+                        for (name, result) in [("Crossref", crossResult), ("OpenAlex", alexResult)] {
+                            switch result {
+                            case .success(let values): hits += values
+                            case .failure(let error): failures.append("\(name)：\(error.localizedDescription)")
+                            }
+                        }
+                        return .init(hits: ranked(hits, query: query), failures: failures, query: query)
+                    }
+                }
+                var results: [Outcome] = []
+                for await result in group { results.append(result) }
+                return results.sorted { $0.query < $1.query }
+            }
+            for result in expanded {
+                outcome.hits += result.hits
+                outcome.failures += result.failures
+                used.append(result.query)
+            }
+        }
+        outcome.hits = Array(deduplicated(outcome.hits).prefix(10))
+        outcome.query = used.joined(separator: " / ")
+        outcome.failures = Array(Set(outcome.failures)).sorted()
+        // Empty failures never become sticky. Partial success gets a shorter TTL
+        // and retains source errors in the cached outcome.
+        if !Task.isCancelled, !outcome.hits.isEmpty {
+            await LiteratureSearchCache.shared.store(outcome, key: key)
+        }
+        return outcome
+    }
+
     /// 并发检索三个源。任何一个源失败都不影响其余结果。
-    public static func search(query: String, timeout: TimeInterval = 10) async -> Outcome {
+    public static func search(query: String, timeout: TimeInterval = 6, openAlexKey: String? = nil,
+                              session: URLSession? = nil) async -> Outcome {
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard trimmed.count >= 2 else { return Outcome(hits: [], failures: []) }
 
         return await withTaskGroup(of: (String, Result<[LiteratureHit], Error>).self) { group in
-            group.addTask { ("Crossref", await crossref(trimmed, timeout: timeout)) }
-            group.addTask { ("OpenAlex", await openAlex(trimmed, timeout: timeout)) }
-            group.addTask { ("arXiv", await arxiv(trimmed, timeout: timeout)) }
+            group.addTask { ("Crossref", await crossref(trimmed, timeout: timeout, session: session)) }
+            group.addTask { ("OpenAlex", await openAlex(trimmed, timeout: timeout, apiKey: openAlexKey, session: session)) }
+            group.addTask { ("arXiv", await arxiv(trimmed, timeout: timeout, session: session)) }
 
             var hits: [LiteratureHit] = []
             var failures: [String] = []
@@ -80,15 +158,78 @@ public enum WebLiteratureSearch {
 
             // 去重：同一篇可能同时被 Crossref 与 OpenAlex 返回。
             // 用标题归一化后比对（标点与大小写差异不该被当成两篇）。
-            var seen = Set<String>()
-            let deduped = hits.filter { hit in
-                let key = normalize(hit.title)
-                guard !key.isEmpty, !seen.contains(key) else { return false }
-                seen.insert(key)
-                return true
-            }
-            return Outcome(hits: deduped, failures: failures)
+            return Outcome(hits: ranked(hits, query: trimmed), failures: failures.sorted(), query: trimmed)
         }
+    }
+
+    /// A fuzzy catalogue match is not automatically relevant evidence.
+    public static func ranked(_ hits: [LiteratureHit], query: String) -> [LiteratureHit] {
+        let stops: Set<String> = ["the", "and", "for", "with", "from", "this", "that", "what", "how", "why", "are", "was", "has", "its", "related", "literature", "papers", "research", "studies", "find", "please", "文献", "相关", "研究", "查找"]
+        let lower = query.lowercased()
+        let terms = words(lower).subtracting(stops)
+        guard !terms.isEmpty else { return [] }
+        let scored = hits.compactMap { hit -> (LiteratureHit, Int)? in
+            let title = hit.title.lowercased()
+            let detail = (hit.abstract + " " + hit.authors).lowercased()
+            let titleWords = words(title)
+            let detailWords = words(detail)
+            func matchesTerm(_ term: String, text: String, tokens: Set<String>) -> Bool {
+                let cjk = term.unicodeScalars.contains { (0x3400...0x9FFF).contains($0.value) }
+                return cjk ? text.contains(term) : tokens.contains(term)
+            }
+            let titleMatches = terms.filter { matchesTerm($0, text: title, tokens: titleWords) }
+            let matches = terms.filter { matchesTerm($0, text: title, tokens: titleWords) || matchesTerm($0, text: detail, tokens: detailWords) }
+            guard matches.count >= min(2, terms.count) else { return nil }
+            return (hit, titleMatches.count * 3 + matches.count)
+        }.sorted {
+            if $0.1 != $1.1 { return $0.1 > $1.1 }
+            if $0.0.abstract.count != $1.0.abstract.count { return $0.0.abstract.count > $1.0.abstract.count }
+            if $0.0.title != $1.0.title { return $0.0.title < $1.0.title }
+            return $0.0.source < $1.0.source
+        }
+        return deduplicated(scored.map(\.0))
+    }
+
+    private static func words(_ text: String) -> Set<String> {
+        let tokenizer = NLTokenizer(unit: .word)
+        tokenizer.string = text
+        var terms = Set<String>()
+        tokenizer.enumerateTokens(in: text.startIndex..<text.endIndex) { range, _ in
+            var term = String(text[range]).lowercased()
+            if term.count > 4, term.hasSuffix("s"), !term.hasSuffix("ss"), !term.hasSuffix("us"), !term.hasSuffix("is") {
+                term.removeLast()
+            }
+            if term.count >= 2 { terms.insert(term) }
+            return true
+        }
+        if terms.contains("ai") || (terms.contains("artificial") && terms.contains("intelligence")) {
+            terms.subtract(["artificial", "intelligence"])
+            terms.insert("ai")
+        }
+        return terms
+    }
+
+    private static func deduplicated(_ hits: [LiteratureHit]) -> [LiteratureHit] {
+        var result: [LiteratureHit] = []
+        var identifiers: [String: Int] = [:]
+        var titles: [String: Int] = [:]
+        for hit in hits {
+            let title = normalize(hit.title)
+            guard !title.isEmpty else { continue }
+            let identifier = GraphIdentity.normalizedDOI(hit.identifier) ?? hit.identifier.lowercased()
+            if let index = (!identifier.isEmpty ? identifiers[identifier] : nil) ?? titles[title] {
+                let sources = Set((result[index].source + " / " + hit.source).components(separatedBy: " / "))
+                if hit.abstract.count > result[index].abstract.count { result[index] = hit }
+                result[index].source = sources.sorted().joined(separator: " / ")
+                if !identifier.isEmpty { identifiers[identifier] = index }
+                titles[title] = index
+            } else {
+                if !identifier.isEmpty { identifiers[identifier] = result.count }
+                titles[title] = result.count
+                result.append(hit)
+            }
+        }
+        return result
     }
 
     private static func normalize(_ title: String) -> String {
@@ -106,15 +247,19 @@ public enum WebLiteratureSearch {
     /// 写成「可核查的清单」而不是让模型自由发挥：每一条都带出处（DOI / arXiv 编号），
     /// 读者点开就能验证。原文没有、检索也没有的内容，明确要求它别编。
     public static func promptBlock(_ outcome: Outcome) -> String {
-        guard !outcome.isEmpty else { return "" }
-
-        var lines = ["【联网检索到的文献（来自公开学术数据库）】"]
+        var lines = ["【公开学术数据库检索】", "检索词：\(outcome.query)"]
+        if !outcome.failures.isEmpty { lines.append("数据源未完成：\(outcome.failures.joined(separator: "；"))") }
+        if outcome.isEmpty {
+            lines.append("没有取得通过相关性筛选的文献。不得把无结果解释为不存在相关研究，也不得声称已搜索整个互联网。请依据原文回答并说明检索限制。")
+            return lines.joined(separator: "\n")
+        }
         for (index, hit) in outcome.hits.prefix(10).enumerated() {
             var entry = "\(index + 1). \(hit.title)"
             if !hit.authors.isEmpty { entry += " — \(hit.authors)" }
             if !hit.year.isEmpty { entry += "（\(hit.year)）" }
             if !hit.venue.isEmpty { entry += "，\(hit.venue)" }
             if !hit.identifier.isEmpty { entry += "，\(hit.identifier)" }
+            entry += "，来源：\(hit.source)"
             lines.append(entry)
             if !hit.abstract.isEmpty {
                 lines.append("   摘要：\(truncate(hit.abstract, limit: 320))")
@@ -139,17 +284,21 @@ public enum WebLiteratureSearch {
         var request = URLRequest(url: url)
         request.timeoutInterval = timeout
         request.setValue(accept, forHTTPHeaderField: "Accept")
-        // 带上一个可联系的标识是 Crossref 的「礼貌池」要求，能显著降低被限流的概率
-        request.setValue("Lumen/1.0 (mailto:reader@example.com)", forHTTPHeaderField: "User-Agent")
+        request.setValue("LumenReader/1.0", forHTTPHeaderField: "User-Agent")
         return request
     }
 
-    private static func fetchJSON(_ url: URL, timeout: TimeInterval) async -> Result<Any, Error> {
+    private static func fetchJSON(_ url: URL, timeout: TimeInterval, session: URLSession,
+                                  apiKey: String? = nil) async -> Result<Any, Error> {
         do {
-            let (data, response) = try await URLSession.shared.data(for: request(url, timeout: timeout))
+            var request = request(url, timeout: timeout)
+            if let apiKey, !apiKey.isEmpty { request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization") }
+            let (bytes, response) = try await session.bytes(for: request, delegate: SameOriginRedirectPolicy())
+            defer { bytes.task.cancel() }
             if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
                 return .failure(SearchError.http(http.statusCode))
             }
+            let data = try await BoundedResponseData.read(bytes, response: response, maximum: BoundedResponseData.literatureLimit)
             guard let object = try? JSONSerialization.jsonObject(with: data) else {
                 return .failure(SearchError.malformed)
             }
@@ -179,7 +328,7 @@ public enum WebLiteratureSearch {
     ///
     /// 重试的定位是「提高命中率」，不是「保证成功」——重试后仍失败就如实报给读者，
     /// 而不是把失败吞掉、让「查不到文献」变成查不出原因的黑盒。
-    private static let maxAttempts = 3
+    private static let maxAttempts = 2
     private static let baseBackoff: TimeInterval = 0.8
     private static let maxBackoff: TimeInterval = 2.4
 
@@ -189,12 +338,14 @@ public enum WebLiteratureSearch {
     ) async -> Result<T, Error> {
         var last: Result<T, Error> = .failure(SearchError.malformed)
         for attempt in 0..<max(1, attempts) {
+            if Task.isCancelled { return .failure(CancellationError()) }
             last = await operation()
             if case .success = last { return last }
             if case .failure(let error) = last, !isTransient(error) { return last }
             if attempt < attempts - 1 {
                 let backoff = min(baseBackoff * pow(2, Double(attempt)), maxBackoff)
-                try? await Task.sleep(nanoseconds: UInt64(backoff * 1_000_000_000))
+                do { try await Task.sleep(for: .seconds(backoff)) }
+                catch { return .failure(error) }
             }
         }
         return last
@@ -206,7 +357,7 @@ public enum WebLiteratureSearch {
             return code == 429 || code == 408 || (500..<600).contains(code)
         }
         if let urlError = error as? URLError {
-            return [.timedOut, .networkConnectionLost, .cannotConnectToHost, .notConnectedToInternet]
+            return [.networkConnectionLost, .cannotConnectToHost]
                 .contains(urlError.code)
         }
         return false
@@ -226,7 +377,7 @@ public enum WebLiteratureSearch {
 
     // MARK: Crossref
 
-    public static func crossref(_ query: String, timeout: TimeInterval) async -> Result<[LiteratureHit], Error> {
+    public static func crossref(_ query: String, timeout: TimeInterval, session: URLSession? = nil) async -> Result<[LiteratureHit], Error> {
         var components = URLComponents(string: "https://api.crossref.org/works")!
         components.queryItems = [
             URLQueryItem(name: "query.bibliographic", value: query),
@@ -235,7 +386,7 @@ public enum WebLiteratureSearch {
         ]
         guard let url = components.url else { return .failure(SearchError.malformed) }
 
-        switch await withRetry({ await fetchJSON(url, timeout: timeout) }) {
+        switch await withRetry({ await fetchJSON(url, timeout: timeout, session: session ?? networkSession) }) {
         case .failure(let error):
             return .failure(error)
         case .success(let object):
@@ -273,7 +424,7 @@ public enum WebLiteratureSearch {
                     year: year,
                     venue: venue,
                     identifier: doi.isEmpty ? "" : "DOI: \(doi)",
-                    abstract: abstract,
+                    abstract: String(abstract.prefix(4000)),
                     source: "Crossref"
                 )
             }
@@ -283,18 +434,17 @@ public enum WebLiteratureSearch {
 
     // MARK: OpenAlex
 
-    public static func openAlex(_ query: String, timeout: TimeInterval) async -> Result<[LiteratureHit], Error> {
+    public static func openAlex(_ query: String, timeout: TimeInterval, apiKey: String? = nil,
+                                session: URLSession? = nil) async -> Result<[LiteratureHit], Error> {
         var components = URLComponents(string: "https://api.openalex.org/works")!
         components.queryItems = [
             URLQueryItem(name: "search", value: query),
             URLQueryItem(name: "per-page", value: String(perSource)),
-            // 带上邮箱即进入礼貌池，这是 OpenAlex 官方推荐的用法
-            URLQueryItem(name: "mailto", value: "reader@example.com"),
-            URLQueryItem(name: "select", value: "title,publication_year,doi,authorships,primary_location,abstract_inverted_index")
+            URLQueryItem(name: "select", value: "id,title,publication_year,doi,authorships,primary_location,abstract_inverted_index")
         ]
         guard let url = components.url else { return .failure(SearchError.malformed) }
 
-        switch await withRetry({ await fetchJSON(url, timeout: timeout) }) {
+        switch await withRetry({ await fetchJSON(url, timeout: timeout, session: session ?? networkSession, apiKey: apiKey) }) {
         case .failure(let error):
             return .failure(error)
         case .success(let object):
@@ -324,7 +474,7 @@ public enum WebLiteratureSearch {
                 }
 
                 // OpenAlex 的 doi 是完整 URL 形式（https://doi.org/10.xxx），剥掉前缀更省地方
-                var identifier = item["doi"] as? String ?? ""
+                var identifier = item["doi"] as? String ?? item["id"] as? String ?? ""
                 if let range = identifier.range(of: "doi.org/") {
                     identifier = "DOI: " + identifier[range.upperBound...]
                 }
@@ -352,19 +502,23 @@ public enum WebLiteratureSearch {
         guard let index, !index.isEmpty else { return "" }
         var placed: [(position: Int, word: String)] = []
         for (word, positions) in index {
-            for position in positions { placed.append((position, word)) }
+            for position in positions where (0..<10_000).contains(position) {
+                if placed.count >= 10_000 { break }
+                placed.append((position, word))
+            }
+            if placed.count >= 10_000 { break }
         }
-        return placed.sorted { $0.position < $1.position }
+        return String(placed.sorted { $0.position < $1.position }
             .map(\.word)
-            .joined(separator: " ")
+            .joined(separator: " ").prefix(4000))
     }
 
     // MARK: arXiv（Atom XML）
 
-    public static func arxiv(_ query: String, timeout: TimeInterval) async -> Result<[LiteratureHit], Error> {
+    public static func arxiv(_ query: String, timeout: TimeInterval, session: URLSession? = nil) async -> Result<[LiteratureHit], Error> {
         var components = URLComponents(string: "https://export.arxiv.org/api/query")!
         components.queryItems = [
-            URLQueryItem(name: "search_query", value: "all:\(query)"),
+            URLQueryItem(name: "search_query", value: arxivExpression(query)),
             URLQueryItem(name: "max_results", value: String(perSource))
         ]
         guard let url = components.url else { return .failure(SearchError.malformed) }
@@ -372,17 +526,26 @@ public enum WebLiteratureSearch {
         // arXiv 返回的是 Atom XML，不走 fetchJSON；重试逻辑与另两个源共用
         return await withRetry { () async -> Result<[LiteratureHit], Error> in
             do {
-                let (data, response) = try await URLSession.shared.data(
-                    for: request(url, timeout: timeout, accept: "application/atom+xml")
+                let (bytes, response) = try await (session ?? networkSession).bytes(
+                    for: request(url, timeout: timeout, accept: "application/atom+xml"), delegate: SameOriginRedirectPolicy()
                 )
+                defer { bytes.task.cancel() }
                 if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
                     return .failure(SearchError.http(http.statusCode))
                 }
-                return .success(ArxivAtomParser().parse(data))
+                let data = try await BoundedResponseData.read(bytes, response: response, maximum: BoundedResponseData.literatureLimit)
+                let parser = ArxivAtomParser()
+                let hits = parser.parse(data)
+                return parser.isMalformed ? .failure(SearchError.malformed) : .success(hits)
             } catch {
                 return .failure(error)
             }
         }
+    }
+
+    public static func arxivExpression(_ query: String) -> String {
+        query.split(whereSeparator: { !$0.isLetter && !$0.isNumber && $0 != "-" })
+            .prefix(10).map { "all:\($0)" }.joined(separator: " AND ")
     }
 }
 
@@ -391,6 +554,7 @@ public enum WebLiteratureSearch {
 /// 极小的 Atom 解析器：只取 arXiv 返回里我们真正要用的四个字段。
 /// 不引第三方 XML 库——为一个 feed 拉一个依赖不划算，而 Atom 结构固定得很。
 final class ArxivAtomParser: NSObject, XMLParserDelegate {
+    private(set) var isMalformed = false
 
     private var hits: [LiteratureHit] = []
     private var current: [String: String] = [:]
@@ -400,7 +564,8 @@ final class ArxivAtomParser: NSObject, XMLParserDelegate {
     func parse(_ data: Data) -> [LiteratureHit] {
         let parser = XMLParser(data: data)
         parser.delegate = self
-        parser.parse()
+        parser.shouldResolveExternalEntities = false
+        isMalformed = !parser.parse()
         return hits
     }
 
@@ -420,7 +585,7 @@ final class ArxivAtomParser: NSObject, XMLParserDelegate {
     }
 
     func parser(_ parser: XMLParser, foundCharacters string: String) {
-        text += string
+        if text.count < 8192 { text += String(string.prefix(8192 - text.count)) }
     }
 
     func parser(_ parser: XMLParser, didEndElement elementName: String,
@@ -448,7 +613,7 @@ final class ArxivAtomParser: NSObject, XMLParserDelegate {
             if current["summary"] == nil { current["summary"] = value }
         case "entry":
             insideEntry = false
-            if let title = current["title"], !title.isEmpty {
+            if hits.count < WebLiteratureSearch.perSource, let title = current["title"], !title.isEmpty {
                 hits.append(LiteratureHit(
                     title: title,
                     authors: current["authors"] ?? "",
@@ -463,5 +628,22 @@ final class ArxivAtomParser: NSObject, XMLParserDelegate {
             break
         }
         text = ""
+    }
+}
+
+private actor LiteratureSearchCache {
+    static let shared = LiteratureSearchCache()
+    private var entries: [String: (Date, WebLiteratureSearch.Outcome)] = [:]
+
+    func value(for key: String) -> WebLiteratureSearch.Outcome? {
+        entries = entries.filter { Date().timeIntervalSince($0.value.0) < ($0.value.1.failures.isEmpty ? 600 : 60) }
+        return entries[key]?.1
+    }
+
+    func store(_ outcome: WebLiteratureSearch.Outcome, key: String) {
+        if entries.count >= 32, let oldest = entries.min(by: { $0.value.0 < $1.value.0 })?.key {
+            entries.removeValue(forKey: oldest)
+        }
+        entries[key] = (Date(), outcome)
     }
 }

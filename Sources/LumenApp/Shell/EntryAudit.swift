@@ -89,11 +89,11 @@ enum EntryAudit {
         check("AI 面板 ⋯ 菜单不含任何导出项", exportInAIPanel.isEmpty,
               "得到 \(exportInAIPanel.map(\.id.rawValue))")
 
-        // 6. 「文件 > 导出」恰好两项，且就是摘要 + 对话记录（防止再多长出第三项）。
+        // 6. 只保留 Markdown 对话记录导出。
         let exportIDs = ActionEntries.entries(in: .fileExport).map(\.id)
-        check("「文件 > 导出」恰好两项：摘要 + 对话记录",
-              exportIDs == [.exportSummary, .exportTranscript],
-              "得到 \(exportIDs.map(\.rawValue))，期望 [exportSummary, exportTranscript]")
+        check("「文件 > 导出」只含 Markdown 对话记录",
+              exportIDs == [.exportTranscript],
+              "得到 \(exportIDs.map(\.rawValue))，期望 [exportTranscript]")
 
         // 7. 导出菜单的条目**结构上**由 planner 生成（LumenCommands 里是
         //    `ForEach(ActionEntries.entries(in: .fileExport))`），所以渲染条目数恒等于
@@ -102,13 +102,13 @@ enum EntryAudit {
         //    第 2/5/6 条类别归属断言。日志行里也写明这一点，避免把 8/0 误读成
         //    「重复入口不存在」的证明。
         check("导出菜单条目数 = \(exportIDs.count)（结构性护栏，非证伪项——真正抓重复的是上面的类别归属断言）",
-              exportIDs.count == 2)
+              exportIDs.count == 1)
 
-        // 8. planner 里登记为导出的可改绑动作，恰好覆盖两个导出 LumenAction
+        // 8. planner 里登记为导出的可改绑动作，覆盖现有导出 LumenAction
         //    （若将来新增导出动作却忘了登记，这里会红）。
         let plannedExportActions = Set(ActionEntries.entries(category: .export).compactMap { $0.action })
-        let knownExportActions: Set<LumenAction> = [.exportSummary, .exportTranscript]
-        check("planner 的导出条目覆盖全部导出动作（exportSummary / exportTranscript）",
+        let knownExportActions: Set<LumenAction> = [.exportTranscript]
+        check("planner 的导出条目只覆盖对话记录",
               plannedExportActions == knownExportActions,
               "得到 \(plannedExportActions.map(\.rawValue).sorted())")
 

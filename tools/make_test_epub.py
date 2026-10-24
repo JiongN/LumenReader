@@ -116,6 +116,8 @@ def build_chapter(title: str, body: str) -> str:
 
 
 def main() -> None:
+    # A long synthetic chapter must overflow in both continuous and paged modes;
+    # short content cannot provide evidence for real forward/backward scrolling.
     # mimetype 必须是第一个条目且不压缩，否则不是合法 EPUB
     with zipfile.ZipFile(TARGET, "w") as archive:
         archive.writestr(
@@ -129,12 +131,12 @@ def main() -> None:
         archive.writestr("OEBPS/css/book.css", BOOK_CSS, compress_type=zipfile.ZIP_DEFLATED)
         archive.writestr(
             "OEBPS/text/ch1.xhtml",
-            build_chapter("第一章　文化资本与学校", CH1_BODY),
+            build_chapter("第一章　文化资本与学校", CH1_BODY * 8),
             compress_type=zipfile.ZIP_DEFLATED,
         )
         archive.writestr(
             "OEBPS/text/ch2.xhtml",
-            build_chapter("第二章　家庭日常中的传递", CH2_BODY),
+            build_chapter("第二章　家庭日常中的传递", CH2_BODY * 8),
             compress_type=zipfile.ZIP_DEFLATED,
         )
 

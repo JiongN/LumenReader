@@ -4,8 +4,7 @@ import LumenKit
 
 /// AI 侧边面板。
 ///
-/// 交互的取值取向：所有 AI 动作都是「针对你现在看的这一块」发起的，
-/// 回答里必须带得回原文的引用。不做那种浮在半空、跟正文没有锚点的聊天窗口。
+/// 引用与原文跳转由当前阅读方式的「原文依据」技能控制。
 struct AIPanelView: View {
 
     private enum QuestionScope: String, CaseIterable, Identifiable {
@@ -16,7 +15,7 @@ struct AIPanelView: View {
         var title: String {
             switch self {
             case .currentUnit: return "当前页/章"
-            case .wholeDocument: return "全文检索"
+            case .wholeDocument: return "全文"
             case .compareDocument: return "双文档"
             }
         }
@@ -34,20 +33,21 @@ struct AIPanelView: View {
     @EnvironmentObject private var chat: AIChatModel
     /// 本面板所属标签的会话：划词请求按标签投递，不能读当前活动标签的代理。
     @EnvironmentObject private var session: ReaderSession
+    @EnvironmentObject private var settings: SettingsStore
     @Environment(\.openSettings) private var openSettings
 
-    /// 是否跟随最新内容自动滚到底部
-    @State private var followTail = true
-    /// 提示词模板编辑器
-    @State private var isTemplateEditorVisible = false
+    @State private var transcriptHeight: CGFloat = 600
     /// Agent 编辑器
-    @State private var isAgentEditorVisible = false
+    @State private var isAgentEditorVisible = LaunchOptions.flag("--reading-mode-editor")
     /// 普通问题默认只读当前页/章；全文与双文档比较必须由用户明确选择。
     @State private var questionScope: QuestionScope = LaunchOptions.aiQuestionScope == "compare"
         ? .compareDocument
         : (LaunchOptions.aiQuestionScope == "whole" ? .wholeDocument : .currentUnit)
     @State private var comparisonSessionID: UUID?
     @State private var didWarnDraftLimit = false
+    @State private var chartImage: AIImage?
+    @State private var chartPickerVisible = false
+    @State private var chartLoading = false
     private static let maxDraftCharacters = 6_000
 
     var body: some View {
@@ -63,18 +63,17 @@ struct AIPanelView: View {
             composer
         }
         .background(DS.Palette.surfaceSunken)
-        .onChange(of: session.pendingAIRequest) { _, request in
+        .onChange(of: session.pendingAIRequest, initial: true) { _, request in
             guard let request else { return }
             consume(request)
             session.pendingAIRequest = nil
         }
-        .sheet(isPresented: $isTemplateEditorVisible) {
-            PromptTemplateEditor()
-                .environmentObject(state)
-        }
         .sheet(isPresented: $isAgentEditorVisible) {
             AgentEditor()
                 .environmentObject(state)
+        }
+        .sheet(isPresented: $chartPickerVisible) {
+            if let image = chartImage { ChartRegionPicker(image: image) { runChart($0) } }
         }
     }
 
@@ -98,7 +97,6 @@ struct AIPanelView: View {
             webSearchToggle
             HStack(spacing: DS.Space.xs) {
                 providerMenu.layoutProbe("aiModelChip")
-                templateMenu
                 agentMenu
             }
             .frame(maxWidth: .infinity)
@@ -122,15 +120,36 @@ struct AIPanelView: View {
             ? "当前文档：\(current) · 会话始于：\(origin)"
             : "当前文档：\(current)"
 
-        return Text(label)
+        return HStack(spacing: DS.Space.xs) {
+            Text(label)
             .font(.system(size: 11))
             .foregroundStyle(DS.Palette.textSecondary)
             .lineLimit(1)
             .truncationMode(.middle)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.horizontal, Self.contentInset)
-            .padding(.bottom, DS.Space.xs)
             .help(label)
+            PanelTextSizeControl(size: $settings.ui.aiTextSize, label: "AI 回复字号")
+            if session.document.id.lowercased().hasSuffix(".pdf") {
+                Button {
+                    let path = session.document.id, page = bridge.currentUnitIndex
+                    let conversationID = chat.store.activeID
+                    chartLoading = true
+                    Task {
+                        defer { chartLoading = false }
+                        do {
+                            let image = try await PDFPageAssets.shared.image(path: path, pageIndex: page)
+                            guard session.document.id == path else { return }
+                            chartImage = image; chartPickerVisible = true
+                        } catch {
+                            if chat.store.activeID == conversationID { chat.appendNotice(error.localizedDescription) }
+                        }
+                    }
+                } label: { Image(systemName: chartLoading ? "hourglass" : "chart.xyaxis.line") }
+                .buttonStyle(.plain).help("框选并解读图表").disabled(chartLoading || chat.isStreaming)
+            }
+        }
+        .padding(.horizontal, Self.contentInset)
+        .padding(.bottom, DS.Space.xs)
     }
 
     /// planner 条目 + 「这一项之前要不要画分隔线」。首项之前不画。
@@ -156,7 +175,7 @@ struct AIPanelView: View {
         case .rerunLast:
             // 「重新生成」是**付费动作**，所以只放在菜单与气泡 footer 里，
             // 不给键盘快捷键：一次误触的代价是一次真实的模型调用。
-            Button(entry.title) { chat.rerunLast() }
+            Button(entry.title) { chat.rerunLast(settings: state.settingsStore, memory: state.aiMemoryPayload) }
                 .disabled(!chat.canRerunLast)
         case .rememberSelection:
             Button(entry.title) { rememberSelection() }
@@ -242,120 +261,49 @@ struct AIPanelView: View {
               : "尚未配置 AI 服务商，点击开始配置")
     }
 
-    /// 服务商在菜单里的一项。模型多于一个时给二级菜单——
-    /// 换服务商十有八九就是为了换模型，这一步不该再让人跑一趟设置页。
+    /// 切换服务商沿用设置中已选模型，不展开服务商的完整模型目录。
     @ViewBuilder
     private func providerMenuEntry(_ provider: AIProviderConfig) -> some View {
         let isActive = state.settingsStore.ai.activeProviderID == provider.id
 
-        if provider.models.count > 1 {
-            Menu {
-                ForEach(provider.models, id: \.self) { model in
-                    Button {
-                        activate(provider, model: model)
-                    } label: {
-                        if isActive && provider.selectedModel == model {
-                            Label(model, systemImage: "checkmark")
-                        } else {
-                            Text(model)
-                        }
-                    }
-                }
-            } label: {
-                if isActive {
-                    Label("\(provider.name)（\(provider.selectedModel)）", systemImage: "checkmark")
-                } else {
-                    Text("\(provider.name)（\(provider.selectedModel)）")
-                }
-            }
-        } else {
-            Button {
-                activate(provider)
-            } label: {
-                if isActive {
-                    Label(provider.name, systemImage: "checkmark")
-                } else {
-                    Text(provider.name)
-                }
-            }
-        }
-    }
-
-    /// 提示词模板切换。
-    ///
-    /// 「默认」放在最前面，而不是让某个预设默认选中：默认行为是经过调校的
-    /// （系统提示里逐条堵住了幻觉、客套话、过度概括），套模板是在它之上做加法。
-    /// 所以「不加东西」必须是一个一眼看得到、随时回得来的选项。
-    private var templateMenu: some View {
-        let templates = state.settingsStore.ai.templates
-        let activeID = state.settingsStore.ai.activeTemplateID
-
-        return Menu {
-            Button {
-                state.settingsStore.ai.activeTemplateID = nil
-                noteRerunAvailability("已切回默认读法")
-            } label: {
-                if activeID == nil {
-                    Label("默认", systemImage: "checkmark")
-                } else {
-                    Text("默认")
-                }
-            }
-
-            Divider()
-
-            ForEach(templates) { template in
-                Button {
-                    selectTemplate(template)
-                } label: {
-                    if template.id == activeID {
-                        Label(template.name, systemImage: "checkmark")
-                    } else {
-                        Text(template.name)
-                    }
-                }
-            }
-
-            Divider()
-
-            Button("编辑提示词…") { isTemplateEditorVisible = true }
+        Button {
+            activate(provider)
         } label: {
-            chipContent(text: activeTemplateName,
-                        icon: "text.badge.checkmark",
-                        maxTextWidth: 48)
+            if isActive {
+                Label("\(provider.name)（\(provider.selectedModel)）", systemImage: "checkmark")
+            } else {
+                Text("\(provider.name)（\(provider.selectedModel)）")
+            }
         }
-        .menuStyle(.borderlessButton)
-        .menuIndicator(.hidden)
-        .modifier(ChipShell(minHeight: 36))
-        .frame(minWidth: 0, maxWidth: .infinity)
-        .help("提示词模板：\(activeTemplateName)")
     }
 
-    /// Agent 切换。
-    ///
-    /// 放在提示词旁边，是因为两者常被同时用到但解决的不是同一件事：
-    /// 模板换「读法」（立场与输出形态），Agent 换「谁在读、带什么装备」
-    /// （角色、技能、要不要联网）。用户想换苏格拉底式追问时，他要找的是后者。
+    /// 单一阅读方式：阅读指令、技能与检索配置。
     private var agentMenu: some View {
         let agents = state.settingsStore.ai.agents
         let activeID = state.settingsStore.ai.activeAgentID
-        let active = agents.first { $0.id == activeID }
+        let active = state.settingsStore.ai.activeReadingMode
 
         return Menu {
                 Button {
                     state.settingsStore.ai.activeAgentID = nil
-                    noteRerunAvailability("已改为不用 Agent")
+                    noteRerunAvailability("已切回默认阅读方式")
                 } label: {
                     if activeID == nil {
-                        Label("不用 Agent", systemImage: "checkmark")
+                        Label("默认", systemImage: "checkmark")
                     } else {
-                        Text("不用 Agent")
+                        Text("默认")
                     }
                 }
 
                 Divider()
 
-                ForEach(agents) { agent in
+                Button {
+                    selectAgent(AgentConfig.mindMapMode)
+                } label: {
+                    Label("思维导图", systemImage: activeID == AgentConfig.mindMapMode.id ? "checkmark" : "point.3.connected.trianglepath.dotted")
+                }
+
+                ForEach(agents.filter { $0.id != AgentConfig.mindMapMode.id }) { agent in
                     Button {
                         selectAgent(agent)
                     } label: {
@@ -371,17 +319,17 @@ struct AIPanelView: View {
 
                 Divider()
 
-                Button("管理 Agent…") { isAgentEditorVisible = true }
+                Button("管理阅读方式…") { isAgentEditorVisible = true }
         } label: {
-            chipContent(text: active?.name ?? "Agent",
+            chipContent(text: active?.name ?? "阅读方式",
                         icon: "person.crop.circle.badge.checkmark",
-                        maxTextWidth: 48)
+                        maxTextWidth: 90)
         }
         .menuStyle(.borderlessButton)
         .menuIndicator(.hidden)
         .modifier(ChipShell(minHeight: 36))
         .frame(minWidth: 0, maxWidth: .infinity)
-        .help("Agent：\(active?.name ?? "不用 Agent")")
+        .help("阅读方式：\(active?.name ?? "默认")")
     }
 
     /// 头部「会话」切换菜单（全局共享会话之后新增）。
@@ -482,27 +430,12 @@ struct AIPanelView: View {
         }
     }
 
-    private var activeTemplateName: String {
-        guard let id = state.settingsStore.ai.activeTemplateID,
-              let template = state.settingsStore.ai.templates.first(where: { $0.id == id }) else {
-            return "默认"
-        }
-        return template.name
-    }
-
-    // MARK: - 切换模型 / 模板 / Agent
-
-    /// 切模板。切换本身已经对**下一次**请求生效（请求时才解析配置），
-    /// 但对「当前这条回答」不会自动重跑——那是付费动作，得由用户发起。
-    /// 所以切完给一句可操作的提示，而不是让他自己去发现「怎么没变」。
-    private func selectTemplate(_ template: PromptTemplate) {
-        state.settingsStore.ai.activeTemplateID = template.id
-        noteRerunAvailability("已切到模板「\(template.name)」")
-    }
+    // MARK: - 切换阅读方式
 
     private func selectAgent(_ agent: AgentConfig) {
         state.settingsStore.ai.activeAgentID = agent.id
-        noteRerunAvailability("已切到 Agent「\(agent.name)」")
+        if agent.id == AgentConfig.mindMapMode.id { questionScope = .wholeDocument }
+        noteRerunAvailability("已切到「\(agent.name)」")
     }
 
     /// 告诉用户「可以用新配置重跑上一条」。
@@ -615,51 +548,32 @@ struct AIPanelView: View {
     // MARK: - 对话区
 
     private var transcript: some View {
-        ScrollViewReader { proxy in
-            ScrollView {
-                if chat.bubbles.isEmpty {
-                    emptyState
-                } else {
-                    LazyVStack(alignment: .leading, spacing: DS.Space.m) {
-                        ForEach(chat.bubbles) { bubble in
-                            AIBubbleView(
-                                bubble: bubble,
-                                isStreaming: chat.streamingID == bubble.id,
-                                isLast: bubble.id == chat.bubbles.last?.id
-                            )
-                            .id(bubble.id)
+        ScrollView {
+            if chat.bubbles.isEmpty {
+                emptyState
+            } else {
+                VStack(alignment: .leading, spacing: DS.Space.m) {
+                    ForEach(chat.bubbles) { bubble in
+                        TranscriptMessage(id: bubble.id,
+                            keepMounted: chat.bubbles.suffix(2).contains(where: { $0.id == bubble.id }),
+                            viewportHeight: transcriptHeight) {
+                            AIBubbleView(bubble: bubble, isStreaming: chat.streamingID == bubble.id,
+                                         isLast: bubble.id == chat.bubbles.last?.id, chat: chat)
+                                .equatable()
                         }
-                        Color.clear.frame(height: 1).id(Self.bottomAnchor)
+                        .background {
+                            if LaunchOptions.flag("--transcript-report") {
+                                TranscriptScrollAudit(rowID: bubble.id)
+                            }
+                        }
                     }
-                    // 与 header / composer 共用同一个横向内边距，左右对称、内容不贴右边缘。
-                    .padding(.horizontal, Self.contentInset)
-                    .padding(.vertical, DS.Space.m)
                 }
-            }
-            .onScrollGeometryChange(for: Bool.self) { geometry in
-                geometry.contentOffset.y + geometry.containerSize.height >= geometry.contentSize.height - 48
-            } action: { _, atBottom in
-                followTail = atBottom
-            }
-            .onChange(of: chat.bubbles.count) { _, _ in
-                followTail = true
-                scrollToBottom(proxy, animated: true)
-            }
-            .onChange(of: chat.bubbles.last?.text) { _, _ in
-                guard followTail else { return }
-                scrollToBottom(proxy, animated: false)
+                .padding(.horizontal, Self.contentInset)
+                .padding(.vertical, DS.Space.m)
+                .background(TranscriptScrollFollower(tailID: chat.bubbles.last?.id))
             }
         }
-    }
-
-    private static let bottomAnchor = "lumen.ai.bottom"
-
-    private func scrollToBottom(_ proxy: ScrollViewProxy, animated: Bool) {
-        if animated {
-            withAnimation(DS.Motion.quick) { proxy.scrollTo(Self.bottomAnchor, anchor: .bottom) }
-        } else {
-            proxy.scrollTo(Self.bottomAnchor, anchor: .bottom)
-        }
+        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { transcriptHeight = $0 }
     }
 
     // MARK: - 空状态
@@ -670,10 +584,6 @@ struct AIPanelView: View {
                 Text("让 AI 帮你读这一页")
                     .font(DS.Typo.ui(size: 13.5, weight: .semibold))
                     .foregroundStyle(DS.Palette.textPrimary)
-                Text("选中正文后点浮动条上的按钮，或直接从下面开始。\n默认读取当前页/章；输入框左侧可切换全文检索或双文档对照。")
-                    .font(DS.Typo.ui(size: 11.5))
-                    .foregroundStyle(DS.Palette.textTertiary)
-                    .fixedSize(horizontal: false, vertical: true)
             }
 
             VStack(spacing: DS.Space.s) {
@@ -703,10 +613,6 @@ struct AIPanelView: View {
                     .font(DS.Typo.ui(size: 12, weight: .semibold))
                     .foregroundStyle(DS.Palette.textPrimary)
             }
-            Text("Lumen 采用 BYOK：密钥保存在本机应用数据目录，不经过任何中间服务器。\n支持 DeepSeek、OpenAI、Kimi、智谱、通义，以及本机的 Ollama / LM Studio。")
-                .font(DS.Typo.ui(size: 11.5))
-                .foregroundStyle(DS.Palette.textSecondary)
-                .fixedSize(horizontal: false, vertical: true)
             Button {
                 openSettings()
                 NSApp.activate(ignoringOtherApps: true)
@@ -789,10 +695,6 @@ struct AIPanelView: View {
 
     private var composer: some View {
         VStack(spacing: DS.Space.s) {
-            if let selection = bridge.selection, selection.isUsable {
-                selectionChip(selection)
-            }
-
             HStack(alignment: .center, spacing: DS.Space.s) {
                 questionScopeMenu
 
@@ -927,10 +829,10 @@ struct AIPanelView: View {
         case .currentUnit:
             return "默认只使用当前页或当前章的内容"
         case .wholeDocument:
-            return "检索当前整份文档，选取最相关的段落作为依据"
+            return "依据全文回答；超过模型容量时使用覆盖全文的分层摘要与原文证据"
         case .compareDocument:
             return selectedComparisonSession.map {
-                "同时检索当前文档与「\($0.title)」，回答时区分两份来源"
+                "读取当前文档与「\($0.title)」的全文，回答时区分两份来源"
             } ?? "先打开另一份文档，才能进行双文档比较"
         }
     }
@@ -943,7 +845,7 @@ struct AIPanelView: View {
                     chat.draft = String(value.prefix(Self.maxDraftCharacters))
                     if !didWarnDraftLimit {
                         didWarnDraftLimit = true
-                        state.showToast("输入已限制为 6000 字；长材料请放在文档中，再用「全文检索」提问")
+                        state.showToast("输入已限制为 6000 字；长材料请放在文档中，再用「全文」提问", requiresAttention: true)
                     }
                 } else {
                     chat.draft = value
@@ -994,47 +896,15 @@ struct AIPanelView: View {
             一起交给模型，因此每次提问会多花几秒。当前只接入这三个免密钥来源；
             万方等其他数据源需要单独的应用授权和接口接入。
 
-            勾了「联网检索」的 Agent 不需要再开这个——两者满足其一即触发。
+            阅读方式已启用检索时，无需重复开启。
             """
         )
         .accessibilityLabel("联网检索文献")
     }
 
     private var canSend: Bool {
-        !chat.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !chat.isStreaming
-    }
-
-    private func selectionChip(_ selection: ReaderSelection) -> some View {
-        HStack(spacing: DS.Space.s) {
-            Image(systemName: "text.quote")
-                .font(DS.Typo.ui(size: 10))
-                .foregroundStyle(DS.Palette.accent)
-            Text(selection.text.trimmingCharacters(in: .whitespacesAndNewlines).prefix(46) + (selection.text.count > 46 ? "…" : ""))
-                .font(DS.Typo.ui(size: 11))
-                .foregroundStyle(DS.Palette.textSecondary)
-                .lineLimit(1)
-            Spacer(minLength: 0)
-            Button {
-                // 同样要动画事务：否则划词条是瞬间消失，和它淡入出场的样子不对称。
-                withAnimation(DS.Motion.reveal) { bridge.selection = nil }
-            } label: {
-                Image(systemName: "xmark.circle.fill")
-                    .font(DS.Typo.ui(size: 11))
-                    .foregroundStyle(DS.Palette.textTertiary)
-            }
-            .buttonStyle(.plain)
-            .help("清除选中")
-        }
-        .padding(.horizontal, DS.Space.s)
-        .padding(.vertical, 5)
-        .background(
-            RoundedRectangle(cornerRadius: DS.Radius.s, style: .continuous)
-                .fill(DS.Palette.accentSoft)
-        )
-        // 几何可外部核对：300pt 下限下这枚「当前选中」条不能被挤换行、也不能
-        // 探出面板右边界（它内部是「图标 + 截断文本 + Spacer + 关闭」，理论上
-        // 只截断不溢出，但 300pt 是人工没法稳定复现的档位，交给探针守）。
-        .layoutProbe("aiSelectionChip")
+        !chat.isStreaming && (!chat.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            || activeAgent?.id == AgentConfig.mindMapMode.id)
     }
 
     // MARK: - 动作
@@ -1048,31 +918,29 @@ struct AIPanelView: View {
     /// 每次用 id 去查而不是在切换时缓存一份：模板可能在编辑器里被改名或删掉，
     /// 缓存的话会继续拿着一份已经不存在的旧副本。
     private var activeTemplate: PromptTemplate? {
-        guard let id = state.settingsStore.ai.activeTemplateID else { return nil }
-        return state.settingsStore.ai.templates.first { $0.id == id }
+        nil
     }
 
     /// 当前选中的 Agent。`nil` = 不加角色，走默认助手行为。
     /// 与 activeTemplate 同理，每次按 id 现查，避免拿到已被删除的旧副本。
     private var activeAgent: AgentConfig? {
-        guard let id = state.settingsStore.ai.activeAgentID else { return nil }
-        return state.settingsStore.ai.agents.first { $0.id == id }
+        state.settingsStore.ai.activeReadingMode
     }
 
     private func sendDraft() {
         guard canSend else { return }
-        let question = chat.draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        let draft = chat.draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        let question = draft.isEmpty ? "请将所提供的文献材料整理为思维导图，突出核心论点、论证关系、证据与限定条件。" : draft
         let (context, locator, citations) = resolveContext(for: .ask(question: question))
         // 双文档模式的 context 已明确包含 A / B 两份材料；若继续传当前选区，PromptLibrary
         // 会按“有选区就只用选区”的规则覆盖 context，比较会悄悄退化成单文档提问。
-        let requestSelection = questionScope == .compareDocument ? nil : bridge.selection
         // 全局共享会话之后，每次提问都要把「当前文档」记到气泡上，
         // 否则跨文档引用降级（见 ConversationCitationPolicy）无从判定这条回答属于哪本书。
         let sourcePath = state.document?.id
         let sourceTitle = state.document?.displayTitle
         chat.followUp(
             question: question,
-            selection: requestSelection,
+            selection: nil,
             metadata: bridge.metadata,
             locatorLabel: bridge.positionLabel,
             context: context,
@@ -1086,17 +954,29 @@ struct AIPanelView: View {
             skills: state.settingsStore.ai.skillLibrary,
             webSearchEnabled: state.settingsStore.ai.webSearchEnabled,
             sourcePath: sourcePath,
-            sourceTitle: sourceTitle
+            sourceTitle: sourceTitle,
+            contextLoader: wholeContextLoader(),
+            semantic: semanticConfiguration,
+            visionConfig: visualConfiguration,
+            imageLoader: chartLoader(question: question)
         )
     }
 
-    private func run(_ task: AITask) {
-        let (context, locator, citations) = resolveContext(for: task)
+    private func run(_ task: AITask, selection requestedSelection: ReaderSelection? = nil) {
+        let selection = requestedSelection ?? bridge.selection
+        let whole: Bool
+        switch task {
+        case .summarize(.wholeDocument): whole = true
+        case .ask, .custom: whole = questionScope == .wholeDocument || questionScope == .compareDocument
+        default: whole = false
+        }
+        let (context, locator, citations) = resolveContext(for: task, selection: selection)
         let sourcePath = state.document?.id
         let sourceTitle = state.document?.displayTitle
         chat.submit(
             task: task,
-            selection: bridge.selection,
+            selection: whole || task == .summarize(scope: .currentUnit)
+                || Self.retrievalQuery(for: task) != nil ? nil : selection,
             metadata: bridge.metadata,
             locatorLabel: bridge.positionLabel,
             context: context,
@@ -1110,18 +990,102 @@ struct AIPanelView: View {
             skills: state.settingsStore.ai.skillLibrary,
             webSearchEnabled: state.settingsStore.ai.webSearchEnabled,
             sourcePath: sourcePath,
-            sourceTitle: sourceTitle
+            sourceTitle: sourceTitle,
+            contextLoader: whole ? wholeContextLoader(force: true, includeComparison: task != .summarize(scope: .wholeDocument)) : nil,
+            semantic: semanticConfiguration,
+            visionConfig: visualConfiguration,
+            imageLoader: chartLoader(question: Self.retrievalQuery(for: task) ?? "")
         )
+    }
+
+    private func wholeContextLoader(force: Bool = false, includeComparison: Bool = true) -> (@MainActor () async throws -> [DocumentContext])? {
+        guard force || questionScope == .wholeDocument || questionScope == .compareDocument else { return nil }
+        let current = bridge.documentContextProvider
+        let currentProgress = bridge.documentContextProgressProvider
+        let compare = includeComparison && questionScope == .compareDocument
+        let other = selectedComparisonSession?.bridge.documentContextProvider
+        let otherProgress = selectedComparisonSession?.bridge.documentContextProgressProvider
+        return {
+            guard let current else { throw AIError.http(status: 400, message: "全文尚未就绪，请等待文档加载") }
+            let progress = chat.documentProgressHandler()
+            let document: DocumentContext
+            if let currentProgress { document = try await currentProgress(progress) }
+            else { document = try await current() }
+            var documents = [document]
+            try Task.checkCancellation()
+            if compare {
+                guard let other else { throw AIError.http(status: 400, message: "请打开并加载第二份文档") }
+                let document: DocumentContext
+                if let otherProgress { document = try await otherProgress(progress) }
+                else { document = try await other() }
+                documents.append(document)
+            }
+            if settings.ai.documentAI.parsingEnabled {
+                for index in documents.indices {
+                    documents[index] = try await EnhancedDocumentService.shared.enrich(documents[index],
+                        options: settings.ai.documentAI, progress: progress)
+                }
+            }
+            return documents
+        }
+    }
+
+    private var semanticConfiguration: SemanticIndexConfiguration? {
+        let option = settings.ai.documentAI
+        guard let provider = settings.ai.providers.first(where: { $0.id == option.embeddingProviderID }),
+              !option.embeddingModel.isEmpty else { return nil }
+        return .init(provider: provider, model: option.embeddingModel,
+            apiKey: AICredentialStore.read(account: provider.keychainAccount) ?? "")
+    }
+
+    private var visualConfiguration: AIProviderConfig? {
+        settings.visionProvider
+    }
+
+    private func runChart(_ image: AIImage) {
+        let (context, locator) = bridge.currentContextProvider?() ?? ("", .pdf(page: bridge.currentUnitIndex, charOffset: 0))
+        chat.submit(task: .ask(question: "解释图表的内容、变量、主要发现与限制。"), selection: nil,
+            metadata: bridge.metadata, locatorLabel: bridge.positionLabel, context: context, locator: locator,
+            config: settings.activeProvider, memory: state.aiMemoryPayload, translateTarget: settings.ai.translateTarget,
+            agent: activeAgent, skills: settings.ai.skillLibrary, sourcePath: session.document.id,
+            visionConfig: visualConfiguration, images: [image])
+    }
+
+    private func chartLoader(question: String) -> (@MainActor ([DocumentContext]) async throws -> [AIImage])? {
+        guard activeAgent?.skills.contains(AgentSkill.chartID) == true,
+              session.document.id.lowercased().hasSuffix(".pdf") else { return nil }
+        let path = session.document.id, current = bridge.currentUnitIndex
+        return { documents in
+            let matching = documents.filter { $0.path == path }.flatMap(\.evidence)
+            let hits = DocumentRetrieval(matching).search(question, limit: 4)
+            var pages: [Int] = []
+            if let expression = try? NSRegularExpression(pattern: "(?i)(?:fig(?:ure)?\\.?|图|table|表)\\s*([0-9]+)"),
+               let match = expression.firstMatch(in: question, range: NSRange(question.startIndex..., in: question)),
+               let number = Range(match.range(at: 1), in: question) {
+                let pattern = "(?i)(?:fig(?:ure)?\\.?|图|table|表)\\s*" + String(question[number]) + "(?![0-9])"
+                for source in matching where source.text.range(of: pattern, options: .regularExpression) != nil {
+                    if !pages.contains(source.locator.pageIndex) { pages.append(source.locator.pageIndex) }
+                }
+            }
+            for hit in hits where !pages.contains(hit.evidence.locator.pageIndex) { pages.append(hit.evidence.locator.pageIndex) }
+            if pages.isEmpty { pages = [current] }
+            var images: [AIImage] = []
+            for page in pages.prefix(4) { images.append(try await PDFPageAssets.shared.image(path: path, pageIndex: page)) }
+            return images
+        }
     }
 
     private func consume(_ request: AIRequest) {
         switch request.kind {
         case .explain:
-            run(.explain)
+            run(.explain, selection: request.selection)
         case .translate:
-            run(.translate)
+            run(.translate, selection: request.selection)
         case .ask:
-            run(.ask(question: request.customPrompt.isEmpty ? "这一段是什么意思？" : request.customPrompt))
+            questionScope = .currentUnit
+            let question = request.customPrompt.isEmpty ? "这一段是什么意思？" : request.customPrompt
+            let focus = request.selection.map { "\n\n【提问焦点】\n" + $0.text } ?? ""
+            run(.ask(question: question + focus))
         case .summarize:
             run(.summarize(scope: .currentUnit))
         case .summarizeAll:
@@ -1134,14 +1098,20 @@ struct AIPanelView: View {
     /// 决定这次请求要喂给模型什么上下文。
     ///
     /// 当前页是默认；全文模式才检索当前整本，双文档模式则分别检索两个已打开标签。
-    private func resolveContext(for task: AITask) -> (String, DocumentLocator, [DocumentLocator]) {
+    private func resolveContext(for task: AITask, selection: ReaderSelection? = nil) -> (String, DocumentLocator, [DocumentLocator]) {
+        // Document-wide requests load their material asynchronously inside the chat task.
+        if task == .summarize(scope: .wholeDocument)
+            || ((questionScope == .wholeDocument || questionScope == .compareDocument) && Self.retrievalQuery(for: task) != nil) {
+            return ("", bridge.selection?.locator ?? .pdf(page: 0, charOffset: 0), [])
+        }
         if questionScope == .compareDocument,
            let query = Self.retrievalQuery(for: task), !query.isEmpty,
            let comparison = resolveComparisonContext(query: query) {
             return comparison
         }
 
-        if let selection = bridge.selection {
+        if let selection = selection ?? bridge.selection,
+           task == .explain || task == .translate {
             return (selection.text, selection.locator, [selection.locator])
         }
 
@@ -1168,7 +1138,7 @@ struct AIPanelView: View {
         query: String
     ) -> (String, DocumentLocator, [DocumentLocator])? {
         guard let other = selectedComparisonSession else {
-            state.showToast("请先打开另一份文档，再选择双文档比较")
+            state.showToast("请先打开另一份文档，再选择双文档比较", requiresAttention: true)
             return nil
         }
 
@@ -1205,7 +1175,7 @@ struct AIPanelView: View {
         }
 
         guard !otherText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            state.showToast("「\(other.title)」尚未完成加载，请先切到该标签一次")
+            state.showToast("「\(other.title)」尚未完成加载，请先切到该标签一次", requiresAttention: true)
             return nil
         }
 
@@ -1232,17 +1202,7 @@ struct AIPanelView: View {
     }
 
     private func summarizeWholeDocument() {
-        guard let slices = bridge.slicesProvider?(), !slices.isEmpty else {
-            state.showToast("当前文档没有可用于全文总结的文字层")
-            return
-        }
-        state.showToast("将分段读取全文（共 \(bridge.unitCount) \(state.unitName)）；耗时与请求次数随篇幅和模型而变")
-        chat.summarizeDocument(
-            slices: slices,
-            metadata: bridge.metadata,
-            config: state.settingsStore.activeProvider,
-            memory: state.aiMemoryPayload
-        )
+        run(.summarize(scope: .wholeDocument))
     }
 
     private var currentUnitSummaryTitle: String {
@@ -1281,17 +1241,24 @@ private struct PanelMenuRow: Identifiable {
 
 // MARK: - 单条消息
 
-struct AIBubbleView: View {
+struct AIBubbleView: View, Equatable {
 
     let bubble: AIChatModel.Bubble
     let isStreaming: Bool
     /// 是不是最后一条消息。「重新生成」只挂在这条上——
     /// 挂在每条回答上会让人以为它能重跑任意一条，而模型只存了最近一次的快照。
     var isLast: Bool = false
+    let chat: AIChatModel
+
+    nonisolated static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.bubble == rhs.bubble && lhs.isStreaming == rhs.isStreaming
+            && lhs.isLast == rhs.isLast && lhs.chat === rhs.chat
+    }
 
     @EnvironmentObject private var bridge: ReaderBridge
     @EnvironmentObject private var state: AppState
-    @EnvironmentObject private var chat: AIChatModel
+    @EnvironmentObject private var settings: SettingsStore
+    private var textSize: CGFloat { CGFloat(settings.ui.aiTextSize) }
     @State private var showReasoning = false
     @State private var justRemembered = false
     /// 「已复制」「已批注」的短暂确认态。做成按钮上的对勾而不是 toast：
@@ -1312,7 +1279,7 @@ struct AIBubbleView: View {
     private var userBubble: some View {
         VStack(alignment: .trailing, spacing: DS.Space.xs) {
             Text(bubble.text)
-                .font(DS.Typo.aiBody)
+                .font(DS.Typo.readingPanel(size: textSize))
                 .foregroundStyle(DS.Palette.textPrimary)
                 .multilineTextAlignment(.leading)
                 .fixedSize(horizontal: false, vertical: true)
@@ -1330,7 +1297,9 @@ struct AIBubbleView: View {
     // MARK: AI
 
     private var assistantBubble: some View {
-        HStack(alignment: .top, spacing: DS.Space.s) {
+        let visibleText = WholeAnswerCoverage.visibleAnswer(bubble.text)
+        let sources = bubble.failed ? [] : bubble.answerEvidence ?? []
+        return HStack(alignment: .top, spacing: DS.Space.s) {
             ZStack {
                 Circle()
                     .fill(bubble.failed ? DS.Palette.danger.opacity(0.14) : DS.Palette.accentSoft)
@@ -1361,18 +1330,32 @@ struct AIBubbleView: View {
                     reasoningDisclosure
                 }
 
-                if bubble.text.isEmpty && isStreaming {
+                if isStreaming && bubble.expectedMindMap {
+                    thinkingIndicator
+                } else if bubble.text.isEmpty && isStreaming {
                     thinkingIndicator
                 } else if bubble.text.isEmpty && !bubble.progress.isEmpty {
                     Text(bubble.progress)
                         .font(DS.Typo.ui(size: 11.5))
                         .foregroundStyle(DS.Palette.textTertiary)
+                } else if !isStreaming, !bubble.failed, let map = MindMapResult.parse(visibleText) {
+                    MindMapView(root: map.root)
+                    if !map.surroundingText.isEmpty {
+                        MarkdownText(text: map.surroundingText, textColor: DS.Palette.textPrimary, fontSize: textSize, evidence: sources)
+                            .textSelection(.enabled)
+                    }
                 } else {
-                    MarkdownText(
-                        text: bubble.text,
-                        textColor: bubble.failed ? DS.Palette.danger : DS.Palette.textPrimary
-                    )
-                    .textSelection(.enabled)
+                    if !isStreaming, !bubble.failed, bubble.expectedMindMap {
+                        Text("未收到有效导图结构，原回答已保留。")
+                            .font(DS.Typo.ui(size: 11)).foregroundStyle(DS.Palette.warning)
+                    }
+                    MarkdownText(text: String(visibleText.prefix(16_000)),
+                        textColor: bubble.failed ? DS.Palette.danger : DS.Palette.textPrimary,
+                        fontSize: textSize, evidence: sources, isStreaming: isStreaming)
+                    if visibleText.count > 16_000 {
+                        Text("预览 · 前 16,000 字").font(DS.Typo.ui(size: 10.5))
+                            .foregroundStyle(DS.Palette.textTertiary)
+                    }
                 }
 
                 if isStreaming && !bubble.text.isEmpty {
@@ -1383,7 +1366,34 @@ struct AIBubbleView: View {
                     }
                 }
 
+                if !isStreaming && !bubble.searchCoverage.isEmpty {
+                    Text(bubble.searchCoverage).font(DS.Typo.ui(size: 10.5))
+                        .foregroundStyle(DS.Palette.textTertiary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .textSelection(.enabled)
+                }
                 if !bubble.text.isEmpty && !isStreaming && !bubble.failed {
+                    if !bubble.coverage.isEmpty {
+                        Text(bubble.coverage)
+                            .font(DS.Typo.ui(size: 10.5))
+                            .foregroundStyle(DS.Palette.textTertiary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    if !bubble.historyCoverage.isEmpty {
+                        Text(bubble.historyCoverage).font(DS.Typo.ui(size: 10.5))
+                            .foregroundStyle(DS.Palette.textTertiary)
+                    }
+                    if let usage = bubble.usage {
+                        Text("Tokens · 输入 \(usage.input.map(String.init) ?? "未知") · 输出 \(usage.output.map(String.init) ?? "未知") · 缓存 \(usage.cached.map(String.init) ?? "未知")\(bubble.usageReports < bubble.requestCount ? "（部分请求）" : "")")
+                            .font(DS.Typo.ui(size: 10))
+                            .foregroundStyle(DS.Palette.textTertiary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    } else if let estimate = bubble.estimatedInput {
+                        Text("输入约 \(estimate) tokens（估算）· 输出与缓存未知")
+                            .font(DS.Typo.ui(size: 10))
+                            .foregroundStyle(DS.Palette.textTertiary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                     // 探针：给 footer 行的实际宽度一个可断言的读数。
                     // 同名的多个探针会互相覆盖、消失时也会误注销，所以只有「最后一条」
                     // （最可能满配：引用编号 + 重新生成 + 复制 + 批注 + 记住）挂正式名字，
@@ -1393,6 +1403,12 @@ struct AIBubbleView: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         }
+        .environment(\.openURL, OpenURLAction { url in
+            guard url.scheme == "lumen-evidence" else { return .systemAction }
+            guard let source = InlineEvidenceLink.source(for: url, in: sources) else { return .discarded }
+            jumpToEvidence(source)
+            return .handled
+        })
     }
 
     private var reasoningDisclosure: some View {
@@ -1444,40 +1460,58 @@ struct AIBubbleView: View {
     /// 悬停才需要它，而挤不挤是每一帧都要承担的代价。多条引用最多显示 3 个。
     private var citationRow: some View {
         HStack(spacing: DS.Space.xs) {
-            ForEach(Array(bubble.citations.prefix(3).enumerated()), id: \.offset) { _, locator in
-                // 跨文档引用降级：只有引用指向「当前正在看的这份文档」才允许跳。
-                // 否则一键跳到另一本书的同一页码，是事实性错误（正确性红线）。
-                // 判定走纯函数 ConversationCitationPolicy，便于自检（见 ConversationAudit）。
-                let active = chat.isCitationActive(
-                    locator,
-                    bubbleDocPath: bubble.sourceDocPath,
-                    currentDocPath: state.document?.id
-                )
-                Button {
-                    bridge.goTo?(locator)
-                } label: {
-                    Text("→ \(citationNumber(locator))")
-                        .font(DS.Typo.ui(size: 10, weight: .medium))
-                        .lineLimit(1)
-                        .monospacedDigit()
-                        .foregroundStyle(active ? DS.Palette.accent : DS.Palette.textTertiary)
-                        .padding(.horizontal, 5)
-                        .padding(.vertical, 3)
-                        .background(Capsule().fill(active ? DS.Palette.accentSoft : DS.Palette.surfaceRaised))
-                        .contentShape(Capsule())
+            if let references = bubble.answerEvidence {
+                ForEach(Array(references.prefix(3).enumerated()), id: \.offset) { _, source in
+                    Button { jumpToEvidence(source) } label: {
+                        Text("[\(source.number ?? 0)] · \(citationNumber(source.locator))")
+                            .font(DS.Typo.ui(size: 10, weight: .medium))
+                    }
+                    .buttonStyle(.borderless)
+                    .help("\(URL(fileURLWithPath: source.path).lastPathComponent) · \(source.label)\n\(source.quote ?? "")")
                 }
-                .buttonStyle(.plain)
-                .disabled(!active)
-                .help(active ? citationHelp(locator) : crossDocCitationHelp(locator))
+                if references.count > 3 {
+                    Menu {
+                        ForEach(Array(references.enumerated()), id: \.offset) { _, source in
+                            Button("[\(source.number ?? 0)] \(URL(fileURLWithPath: source.path).lastPathComponent) · \(source.label)") {
+                                jumpToEvidence(source)
+                            }
+                        }
+                    } label: { Image(systemName: "doc.text.magnifyingglass") }
+                    .menuStyle(.borderlessButton)
+                    .help("回答的原文依据")
+                } else if references.isEmpty && !isStreaming {
+                    Image(systemName: "doc.text.magnifyingglass")
+                        .foregroundStyle(DS.Palette.textTertiary)
+                        .help("本次回答没有提供通过核验的原文引文")
+                }
             }
         }
     }
 
-    /// 引用指向另一本书 / 来源未知时，按钮的 tooltip：明确告诉用户为什么不能跳。
-    private func crossDocCitationHelp(_ locator: DocumentLocator) -> String {
-        switch locator {
-        case .pdf:  return "这条引用来自另一份文档，无法跳回当前文件"
-        case .epub: return "这条引用来自另一份文档，无法跳回当前文件"
+    private func jumpToEvidence(_ source: DocumentCitation) {
+        if !state.sessions.contains(where: { $0.document.id == source.path }) {
+            state.open(url: URL(fileURLWithPath: source.path))
+        }
+        guard let target = state.sessions.first(where: { $0.document.id == source.path }) else { return }
+        state.activate(target)
+        Task { @MainActor in
+            for _ in 0..<30 {
+                guard state.activeSessionID == target.id else { return }
+                if target.bridge.goTo != nil {
+                    do {
+                        guard try DocumentSourceVersion.matches(source) else {
+                            state.showToast("文件已变化，这条旧引用需重新核对", requiresAttention: true)
+                            return
+                        }
+                        guard state.activeSessionID == target.id else { return }
+                        if let reveal = target.bridge.revealEvidence { reveal(source) }
+                        else { target.bridge.goTo?(source.locator) }
+                    } catch { state.showToast("无法核对引用：\(error.localizedDescription)", isError: true) }
+                    return
+                }
+                try? await Task.sleep(for: .milliseconds(100))
+            }
+            state.showToast("文档尚未加载，请稍后重试引用", requiresAttention: true)
         }
     }
 
@@ -1486,14 +1520,6 @@ struct AIBubbleView: View {
         switch locator {
         case .pdf(let page, _):        return page + 1
         case .epub(let chapter, _, _): return chapter + 1
-        }
-    }
-
-    /// chip 的 tooltip：完整语义放这里，不放 chip 上（省宽度）。
-    private func citationHelp(_ locator: DocumentLocator) -> String {
-        switch locator {
-        case .pdf:  return "跳回第 \(citationNumber(locator)) 页"
-        case .epub: return "跳到第 \(citationNumber(locator)) 章"
         }
     }
 
@@ -1515,10 +1541,10 @@ struct AIBubbleView: View {
             if isLast && bubble.role == .assistant && !isStreaming {
                 iconAction(
                     systemImage: "arrow.clockwise",
-                    help: "用当前的模型 / 模板 / Agent 重新生成这条回答，是一次付费请求",
+                    help: "用当前模型与阅读方式重新生成，将发送新请求",
                     tint: chat.canRerunLast ? DS.Palette.accent : DS.Palette.textTertiary,
                     disabled: !chat.canRerunLast,
-                    action: { chat.rerunLast() }
+                    action: { chat.rerunLast(settings: state.settingsStore, memory: state.aiMemoryPayload) }
                 )
             }
 
@@ -1601,18 +1627,18 @@ struct AIBubbleView: View {
     }
 
     private func rememberAnswer() {
-        let text = bubble.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let text = WholeAnswerCoverage.visibleAnswer(bubble.text)
         guard !text.isEmpty else { return }
         state.remember(
             text: text,
-            source: state.currentDocumentTitle,
-            locatorLabel: bubble.citations.first?.displayLabel() ?? ""
+            source: bubble.sourceDocPath.map { URL(fileURLWithPath: $0).deletingPathExtension().lastPathComponent } ?? "AI 对话",
+            locatorLabel: bubble.evidence.first?.label ?? bubble.citations.first?.displayLabel() ?? ""
         )
         withAnimation(DS.Motion.quick) { justRemembered = true }
     }
 
     private func copyAnswer() {
-        let text = bubble.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let text = WholeAnswerCoverage.visibleAnswer(bubble.text)
         guard !text.isEmpty else { return }
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(text, forType: .string)
@@ -1630,13 +1656,31 @@ struct AIBubbleView: View {
     /// 一条回答常常横跨好几页，而读者此刻多半正看着最相关的那一页。
     /// 划词还在时把划的那段当锚文本：批注就钉在那句话旁边，而不是飘在页脚。
     private func annotateAnswer() {
-        let text = bubble.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let text = WholeAnswerCoverage.visibleAnswer(bubble.text)
         guard !text.isEmpty, let addNote = bridge.addPageNote else {
             state.showToast("当前文档不支持批注", isError: true)
             return
         }
 
-        let locator = bubble.citations.first
+        guard let currentPath = state.document?.id,
+              bubble.sourceDocPath == currentPath || bubble.answerEvidence?.contains(where: { $0.path == currentPath }) == true else {
+            state.showToast("请先打开这条回答的来源文档，再添加批注", isError: true)
+            return
+        }
+        let source = bubble.answerEvidence?.first(where: { $0.path == currentPath })
+        if let source {
+            do {
+                guard try DocumentSourceVersion.matches(source) else {
+                    state.showToast("文件已变化，请重新核对原文后添加批注", requiresAttention: true)
+                    return
+                }
+            } catch {
+                state.showToast("无法核对批注来源：\(error.localizedDescription)", isError: true)
+                return
+            }
+        }
+        let locator = source?.locator ?? (bubble.answerEvidence == nil
+            ? (bubble.evidence.first(where: { $0.path == currentPath })?.locator ?? bubble.citations.first) : nil)
         let unitIndex: Int
         switch locator {
         case .pdf(let page, _):      unitIndex = page
@@ -1644,8 +1688,8 @@ struct AIBubbleView: View {
         case nil:                     unitIndex = bridge.currentUnitIndex
         }
 
-        var anchor = ""
-        if let selection = bridge.selection, selection.isUsable,
+        var anchor = source?.quote ?? ""
+        if anchor.isEmpty, let selection = bridge.selection, selection.isUsable,
            selection.locator.pageIndex == unitIndex || selection.locator.chapterIndex == unitIndex {
             anchor = selection.text
         }

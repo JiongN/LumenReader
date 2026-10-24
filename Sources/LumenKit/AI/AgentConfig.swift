@@ -2,15 +2,8 @@ import Foundation
 
 // MARK: - Agent 技能
 
-/// 一条可复用的「技能」= 一段独立的行为要求 + 一个只用于辨认的名字。
-///
-/// 技能存在一个**全局技能库**里（`AISettings.skillLibrary`），Agent 只记自己勾了哪些 id。
-/// 为什么不做成每个 Agent 各存一份：技能是**读法**，不是某个角色的私产——
-/// 「论据回原文」这条规矩这次用在这个角色上，下次也想勾到另一个角色上；
-/// 各存一份的话，用户在 A 里调好的技能切到 B 就没了，只能重写一遍。
-///
-/// 代价如实写下：改一条技能的要求，**用它的所有 Agent 一起变**。
-/// 这本来就是「样式」该有的语义（改一处、处处生效），代价是不能给某个 Agent 留特例。
+/// Skills activate app capabilities; prompt-only reading requirements belong in persona.
+/// The instruction field remains Codable for lossless migration of older user settings.
 public struct AgentSkill: Codable, Identifiable, Sendable, Equatable {
     /// 稳定标识。
     ///
@@ -39,7 +32,7 @@ public extension AgentSkill {
     ///
     /// 用户改的是技能库里那一份（改完所有 Agent 一起变），这里的内置条目只用来
     /// **灌初始值**和**按 id 恢复**，不参与「用户改了哪条」的判断。
-    static let catalog: [AgentSkill] = [
+    static let legacyCatalog: [AgentSkill] = [
         AgentSkill(
             id: "socratic",
             name: "苏格拉底式",
@@ -110,6 +103,23 @@ public extension AgentSkill {
             name: "反方检验",
             instruction: "为核心判断补一个最强反对意见，并说明现有材料能否回应。"
         )
+    ]
+
+    static let evidenceID = "sourceEvidence"
+    static let chartID = "chartUnderstanding"
+    static let searchID = "academicSearch"
+    /// Code-backed capabilities; reading instructions belong in persona.
+    static let catalog: [AgentSkill] = [
+        .init(id: evidenceID, name: "原文依据", instruction: "核验原文引文，生成可跳转的页码与临时高亮。"),
+        .init(id: chartID, name: "图表解读", instruction: "读取相关页图与图表材料，交给配置的视觉模型。"),
+        .init(id: searchID, name: "学术检索", instruction: "检索真实学术题录和摘要，核对来源与相关性。")
+    ]
+
+    static let retiredPromptCatalog: [AgentSkill] = [
+        .init(id: "concepts", name: "概念辨析", instruction: "依据原文界定关键概念，比较近义概念及同一术语的不同用法。原文未说明的来源或定义不要补写。"),
+        .init(id: "critique", name: "论证检验", instruction: "梳理前提、推理与结论，检查隐含假设、证据缺口和最强反例。区分作者明示内容与分析者推论。"),
+        .init(id: "researchDesign", name: "研究设计", instruction: "区分研究问题、材料、方法、发现与解释，检查设计是否支持结论，不把作者解释当作数据。"),
+        .init(id: "evidenceTable", name: "证据对照", instruction: "梳理复杂判断时，用简短文字表格对照结论、原文证据、限定条件与待核查问题。只引用已提供的页/章来源，不编造证据，不要求画图。")
     ]
 
     /// 按 id 在内置技能里找一条。找不到返回 nil（旧配置里可能存着已下线的技能）。
@@ -274,7 +284,7 @@ public struct AgentConfig: Codable, Identifiable, Sendable, Equatable {
 
         // 「列文献」按 id 判定，不看名字（见 `AgentSkill.literatureID`）。
         let activeSkills = resolvedSkills(in: library)
-            .filter { $0.id != AgentSkill.literatureID || usesWebSearch }
+            .filter { ![AgentSkill.evidenceID, AgentSkill.chartID, AgentSkill.searchID].contains($0.id) && ($0.id != AgentSkill.literatureID || usesWebSearch) }
         let skillLines = activeSkills.compactMap { skill -> String? in
             let instruction = skill.instruction.trimmingCharacters(in: .whitespacesAndNewlines)
             // 刚点「新建技能」还没写的空条目不发出去——发一条空白要求只会让模型困惑。
@@ -323,12 +333,24 @@ public struct AgentConfig: Codable, Identifiable, Sendable, Equatable {
     ///
     /// 技能只写 id（内置技能里的那几条）。写错一个 id 的后果是那条技能静默不生效，
     /// 所以 `--agent-report` 里有一条「预设引用的技能都在内置技能里」的断言盯着它。
-    public static let presets: [AgentConfig] = [
+    public static var presets: [AgentConfig] {
+        legacyPresets.map { preset in
+            var result = preset
+            let instructions = preset.skills.compactMap { id in
+                AgentSkill.retiredPromptCatalog.first { $0.id == id }?.instruction
+            }
+            result.persona = ([preset.persona] + instructions).joined(separator: "\n")
+            result.skills = []
+            return result
+        }
+    }
+
+    private static let legacyPresets: [AgentConfig] = [
         AgentConfig(
             id: "8F5E1C42-4A2B-4C7E-9D31-5A6F0B2C7D10",
             name: "苏格拉底导师",
             persona: "你是一位善于提问的导师，面对的是正在读教育学与社会科学文献的研究者。你的目标不是替他把这段话读懂，而是让他在回答你的问题之后，自己读懂了。",
-            skills: ["socratic", "concepts", "cognitiveCheck"],
+            skills: ["concepts"],
             usesWebSearch: false,
             isBuiltIn: true
         ),
@@ -336,7 +358,7 @@ public struct AgentConfig: Codable, Identifiable, Sendable, Equatable {
             id: "1B7A93D0-6E4C-4F82-8A15-9C3D2E4F5A61",
             name: "教育学研究者",
             persona: "你与读者同属教育学研究共同体，熟悉质性研究、教育社会学与教育政策的常用理论框架。用同行的口吻讨论，不必解释领域常识。",
-            skills: ["evidence", "concepts", "outline", "researchDesign"],
+            skills: ["researchDesign"],
             usesWebSearch: false,
             isBuiltIn: true
         ),
@@ -344,7 +366,7 @@ public struct AgentConfig: Codable, Identifiable, Sendable, Equatable {
             id: "6E2B4A85-9C17-4D3F-A8B0-7F1C3E5D9A33",
             name: "文献综述助手",
             persona: "你帮读者把手上这本书放回研究传统里：它接的是哪条脉络，与哪些研究对话，又留下了什么没解决。",
-            skills: ["literature", "concepts", "evidence", "contextMapping"],
+            skills: ["concepts"],
             usesWebSearch: true,
             isBuiltIn: true
         ),
@@ -352,7 +374,7 @@ public struct AgentConfig: Codable, Identifiable, Sendable, Equatable {
             id: "A47C291E-53A8-4B89-9D24-67E1C3F50944",
             name: "理论精读助手",
             persona: "你是一位做概念史与理论分析的研究者。你关心作者如何界定概念、概念之间如何推演，以及论证在哪些句子发生转折。",
-            skills: ["concepts", "evidence", "outline", "critique", "argumentChain", "termShift"],
+            skills: ["concepts", "critique"],
             usesWebSearch: false,
             isBuiltIn: true
         ),
@@ -360,7 +382,7 @@ public struct AgentConfig: Codable, Identifiable, Sendable, Equatable {
             id: "D08F63B2-7C41-46E5-A190-2E4B6A8C1155",
             name: "研究写作编辑",
             persona: "你是一位社会科学论文编辑，帮助研究者把阅读所得转化为可写入论文的论点，同时严格区分原作者观点、读者推论与可核查事实。",
-            skills: ["evidence", "critique", "outline", "plainLanguage", "writableParagraph", "counterArgument"],
+            skills: ["critique"],
             usesWebSearch: false,
             isBuiltIn: true
         )

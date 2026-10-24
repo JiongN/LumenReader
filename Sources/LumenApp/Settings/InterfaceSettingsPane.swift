@@ -29,6 +29,13 @@ struct InterfaceSettingsPane: View {
                 .fixedSize(horizontal: false, vertical: true)
             }
 
+            Section("阅读面板字号") {
+                Stepper("AI 回复 · \(Int(settings.ui.aiTextSize)) pt", value: $settings.ui.aiTextSize,
+                        in: UISettings.TextSize.range, step: 1)
+                Stepper("译文 · \(Int(settings.ui.translationTextSize)) pt", value: $settings.ui.translationTextSize,
+                        in: UISettings.TextSize.range, step: 1)
+            }
+
             Section("动效") {
                 Toggle("界面动效", isOn: $settings.ui.animationsEnabled)
 

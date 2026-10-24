@@ -16,9 +16,8 @@ import LumenKit
 /// 2. `page.selectionForLine(at:)` **不做分栏判断** —— 两栏版面上左栏点与右栏点返回
 ///    **一模一样**的 bounds。
 ///
-/// 两条合起来的后果：**多栏版面只能整行整行地取，无法按栏切分**。所以下面的
-/// `lines(in:)` 在单栏文档上是准确的，多栏文档上会把左右栏的行混在一条里。
-/// 这一点如实写在这里、也写进 `docs/VERIFY.md`，不假装解决了。
+/// 因此先用 `selectionsByLine()`；宽行再按字符坐标中的显著空隙拆开，
+/// 不依赖矩形选择来裁剪左右栏。页内阅读顺序由纯几何聚类器统一决定。
 enum PDFLineExtractor {
 
     /// 逐页取行。
@@ -52,16 +51,105 @@ enum PDFLineExtractor {
         guard box.width > 1, box.height > 1 else { return [] }
         // 扫描件没有文字层：selection 会是空选区（不是 nil），下面按文字为空剔掉。
         guard let selection = page.selection(for: box) else { return [] }
+        let source = (page.string ?? "") as NSString
 
-        return selection.selectionsByLine().compactMap { line in
-            let text = (line.string ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !text.isEmpty else { return nil }
+        let extracted = selection.selectionsByLine().flatMap { line -> [PDFTextLine] in
+            var text = (line.string ?? "").components(separatedBy: .newlines).joined(separator: " ")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !text.isEmpty else { return [] }
+            // PDFKit may logically dehyphenate a word while splitting its glyphs
+            // across two visual selections ("tea" / "chers\nmake"). Only join
+            // when the original character range proves there was no separator.
+            if line.numberOfTextRanges(on: page) > 0 {
+                let range = line.range(at: line.numberOfTextRanges(on: page) - 1, on: page)
+                let end = range.location == NSNotFound ? 0 : NSMaxRange(range)
+                if end > 0, end < source.length,
+                   Self.isLatinLetter(source.character(at: end - 1)), Self.isLatinLetter(source.character(at: end)),
+                   text.last?.isLetter == true {
+                    text += "-"
+                }
+            }
             // bounds(for:) 取的是**这一行所在的页**上的矩形。跨页选择的行会给出
             // 这一行自己那页的矩形，所以这里不需要额外判页 —— 但要防它返回空矩形。
             let bounds = line.bounds(for: page)
-            guard bounds.width > 0.5, bounds.height > 0.5 else { return nil }
-            return PDFTextLine(pageIndex: pageIndex, text: text, bounds: bounds)
+            guard bounds.width > 0.5, bounds.height > 0.5 else { return [] }
+            if bounds.width > box.width * 0.7 {
+                let separated = splitAtGutters(line, page: page, pageIndex: pageIndex)
+                if separated.count > 1 { return separated }
+            }
+            return [PDFTextLine(pageIndex: pageIndex, text: text, bounds: bounds)]
         }
+        // Whole sideways tables have a shared reading orientation, unlike a marginal watermark.
+        let rotated = extracted.filter { $0.bounds.height > $0.bounds.width * 2 && $0.text.count > 4 }
+        let isRotatedPage = rotated.count >= 12 && rotated.count > extracted.count / 2
+        let oriented = extracted.map { line -> PDFTextLine in
+            guard isRotatedPage, line.bounds.height > line.bounds.width || line.bounds.width < 16,
+                  line.bounds.minY > box.height * 0.04 else { return line }
+            let r = line.bounds
+            return .init(pageIndex: pageIndex, text: line.text,
+                bounds: CGRect(x: r.minY, y: box.width - r.maxX, width: r.height, height: r.width), sourceBounds: r)
+        }
+        return coalesceFragments(oriented)
+    }
+
+    private static func isLatinLetter(_ code: unichar) -> Bool {
+        (65...90).contains(code) || (97...122).contains(code)
+    }
+
+    static func coalesceFragments(_ lines: [PDFTextLine]) -> [PDFTextLine] {
+        let sorted = lines.sorted {
+            let a = ($0.bounds.midY * 0.5).rounded(), b = ($1.bounds.midY * 0.5).rounded()
+            return a == b ? $0.bounds.minX < $1.bounds.minX : a > b
+        }
+        var result: [PDFTextLine] = []
+        for line in sorted {
+            if let index = result.indices.last, result[index].pageIndex == line.pageIndex {
+                let previous = result[index]
+                let overlap = min(previous.bounds.maxY, line.bounds.maxY) - max(previous.bounds.minY, line.bounds.minY)
+                let gap = line.bounds.minX - previous.bounds.maxX
+                let height = min(previous.height, line.height)
+                if overlap >= height * 0.5, gap >= -height * 0.5, gap <= max(3, height * 0.8),
+                   abs(previous.bounds.midY - line.bounds.midY) < height * 0.5 {
+                    result[index].text += " " + line.text
+                    result[index].bounds = previous.bounds.union(line.bounds)
+                    if previous.sourceBounds != nil || line.sourceBounds != nil {
+                        result[index].sourceBounds = (previous.sourceBounds ?? previous.bounds).union(line.sourceBounds ?? line.bounds)
+                    }
+                    continue
+                }
+            }
+            result.append(line)
+        }
+        return result
+    }
+
+    private static func splitAtGutters(_ selection: PDFSelection, page: PDFPage, pageIndex: Int) -> [PDFTextLine] {
+        let source = (page.string ?? "") as NSString
+        var parts: [PDFTextLine] = [], text = "", bounds = CGRect.null
+        var previous: CGRect?
+        func flush() {
+            let cleaned = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !cleaned.isEmpty, !bounds.isNull {
+                parts.append(PDFTextLine(pageIndex: pageIndex, text: cleaned, bounds: bounds))
+            }
+            text = ""; bounds = .null; previous = nil
+        }
+        for rangeIndex in 0..<selection.numberOfTextRanges(on: page) {
+            let range = selection.range(at: rangeIndex, on: page)
+            guard range.location != NSNotFound, NSMaxRange(range) <= source.length else { continue }
+            for index in range.location..<NSMaxRange(range) {
+                let glyph = page.characterBounds(at: index)
+                let character = source.substring(with: NSRange(location: index, length: 1))
+                if glyph.width > 0, glyph.height > 0 {
+                    if let previous, glyph.minX - previous.maxX > max(24, previous.height * 2.5) { flush() }
+                    bounds = bounds.union(glyph)
+                    previous = glyph
+                }
+                text += character
+            }
+        }
+        flush()
+        return parts
     }
 
     /// 页号 → 页面尺寸。

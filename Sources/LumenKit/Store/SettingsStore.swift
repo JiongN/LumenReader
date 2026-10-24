@@ -124,6 +124,56 @@ public final class SettingsStore: ObservableObject {
         activeProvider != nil
     }
 
+    public var translationProvider: AIProviderConfig? {
+        settings.ai.translationProvider(for: settings.reader)
+    }
+
+    public var visionProvider: AIProviderConfig? { settings.ai.visionProvider }
+
+    public func providerID(for purpose: AIModelPurpose) -> UUID? {
+        switch purpose {
+        case .chat: return activeProvider?.id
+        case .translation: return settings.reader.translationProviderID
+        case .vision: return settings.ai.documentAI.visionProviderID
+        }
+    }
+
+    public func model(for purpose: AIModelPurpose) -> String {
+        switch purpose {
+        case .chat: return activeProvider?.selectedModel ?? ""
+        case .translation: return settings.reader.translationModel
+        case .vision: return settings.ai.documentAI.visionModel
+        }
+    }
+
+    public func selectProvider(id: UUID?, for purpose: AIModelPurpose) {
+        guard id != providerID(for: purpose) else { return }
+        let model = settings.ai.providers.first(where: { $0.id == id })?.selectedModel ?? ""
+        switch purpose {
+        case .chat: settings.ai.activeProviderID = id
+        case .translation: settings.reader.translationProviderID = id
+        case .vision: settings.ai.documentAI.visionProviderID = id
+        }
+        selectModel(model, for: purpose)
+    }
+
+    public func selectModel(_ model: String, for purpose: AIModelPurpose) {
+        let model = model.trimmingCharacters(in: .whitespacesAndNewlines)
+        switch purpose {
+        case .chat:
+            guard let id = providerID(for: .chat),
+                  let index = settings.ai.providers.firstIndex(where: { $0.id == id }) else { return }
+            settings.ai.providers[index].selectedModel = model
+        case .translation: settings.reader.translationModel = model
+        case .vision: settings.ai.documentAI.visionModel = model
+        }
+    }
+
+    public func selectTranslationProvider(_ provider: AIProviderConfig, model: String) {
+        settings.reader.translationProviderID = provider.id
+        settings.reader.translationModel = model.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
     public func upsertProvider(_ provider: AIProviderConfig) {
         if let index = settings.ai.providers.firstIndex(where: { $0.id == provider.id }) {
             settings.ai.providers[index] = provider

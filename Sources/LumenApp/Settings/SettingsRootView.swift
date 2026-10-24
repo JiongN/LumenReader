@@ -71,10 +71,6 @@ struct ReadingSettingsPane: View {
                 ThemeSwatchPicker(selection: $settings.reader.themeID)
                     .padding(.vertical, DS.Space.xs)
 
-                Text("主题同时作用于 PDF 背景与 EPUB 排版。切换 EPUB 主题不会重新加载页面，因此不会闪烁。")
-                    .font(DS.Typo.ui(size: 11))
-                    .foregroundStyle(DS.Palette.textTertiary)
-                    .fixedSize(horizontal: false, vertical: true)
             }
 
             Section("排版") {
@@ -127,9 +123,6 @@ struct ReadingSettingsPane: View {
                     valueText: { String(format: "%.3f", $0) }
                 )
 
-                Text("正文宽度随阅读区域自动调整；双栏在窄窗口下自动显示为单栏。")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
 
                 LabeledSlider(
                     title: "段间距",
@@ -162,12 +155,11 @@ struct ReadingSettingsPane: View {
             Section("翻页") {
                 Toggle("EPUB 双栏阅读", isOn: $settings.reader.epubDoubleColumn)
                     .help("双栏以左右两页排版；窄于 760 点时自动回到单栏。")
-                Picker("模式", selection: $settings.reader.flowMode) {
-                    ForEach(ReadingFlowMode.allCases) { mode in
-                        Text(mode.displayName).tag(mode)
-                    }
-                }
-                .pickerStyle(.segmented)
+                Toggle("连续滚动", isOn: Binding(
+                    get: { settings.reader.flowMode == .continuous },
+                    set: { settings.reader.flowMode = $0 ? .continuous : .paged }
+                ))
+                .help("默认开启。关闭后按页翻阅；PDF 单页和双页均遵循此设置。")
 
                 Toggle("EPUB 滚动到章末自动进入下一章", isOn: $settings.reader.autoAdvanceOnScrollEnd)
             }
@@ -195,8 +187,7 @@ struct ReadingSettingsPane: View {
                 Toggle("EPUB 逐段翻译", isOn: $settings.reader.epubTranslateEnabled)
                     .help("译文显示在每段原文上方，可随时关闭。")
 
-                Text("PDF 和 EPUB 都从阅读区左侧工具栏开启段落对照翻译；EPUB 译文显示在原文上方。"
-                     + "Apple 系统翻译首次使用某个语言对时可能需要下载语言包。")
+                Text("Apple 翻译首次使用可能需要下载语言包。")
                     .font(DS.Typo.ui(size: 11))
                     .foregroundStyle(DS.Palette.textTertiary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -351,7 +342,7 @@ struct AboutPane: View {
 
             UpdateCheckSection()
 
-            Text("不建书库、不收集数据、不上传文档。\nAI 请求只发送你当前需要处理的那段文本。")
+            Text("AI 材料发送至所选服务商；密钥仅保存在本机。")
                 .font(DS.Typo.ui(size: 11))
                 .foregroundStyle(DS.Palette.textTertiary)
                 .multilineTextAlignment(.center)

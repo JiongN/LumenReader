@@ -4,6 +4,21 @@ import Testing
 
 @Suite("文献图谱身份、关系与接口")
 struct LiteratureGraphTests {
+    @Test func oversizedGraphResponsesAndAbstractsAreBounded() async throws {
+        let oversized = OpenAlexGraphClient { _ in
+            GraphHTTPResponse(status: 200, data: Data(repeating: 32, count: 4 * 1024 * 1024 + 1))
+        }
+        do {
+            _ = try await oversized.candidates(GraphIdentity(title: "test"))
+            Issue.record("Oversized graph response accepted")
+        } catch { #expect(error as? AIError == .responseTooLarge) }
+        let data = try JSONSerialization.data(withJSONObject: ["id": "https://openalex.org/W1", "title": "test",
+            "abstract_inverted_index": ["word": Array(0..<20_000)]])
+        let bounded = OpenAlexGraphClient { _ in GraphHTTPResponse(status: 200, data: data) }
+        let result = try #require(try await bounded.work(id: "W1"))
+        #expect(result.abstract.count == 4000)
+    }
+
     private func paper(_ id: String, doi: String? = nil) -> GraphPaper {
         GraphPaper(id: "https://openalex.org/\(id)", doi: doi, title: id, authors: [], year: 2024, venue: "", abstract: "", openAccessURL: nil, referencedIDs: [], relatedIDs: [], citedByCount: 0)
     }
@@ -172,6 +187,33 @@ struct LiteratureGraphTests {
         }
         _ = try await client.candidates(GraphIdentity(title: "test"))
         #expect(await counter.value() == 3)
+    }
+
+    @Test("限流退避中取消不会发起后续请求")
+    func cancellationDuringRetry() async throws {
+        actor Counter {
+            var count = 0
+            func next() { count += 1 }
+            func value() -> Int { count }
+        }
+        let counter = Counter()
+        let client = OpenAlexGraphClient { _ in
+            await counter.next()
+            return GraphHTTPResponse(status: 429, data: Data())
+        }
+        let task = Task { try await client.candidates(GraphIdentity(title: "cancel retry")) }
+        for _ in 0..<50 {
+            if await counter.value() > 0 { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        task.cancel()
+        do {
+            _ = try await task.value
+            Issue.record("Cancelled request completed unexpectedly")
+        } catch is CancellationError {} catch {
+            Issue.record("Unexpected cancellation error: \(error)")
+        }
+        #expect(await counter.value() == 1)
     }
 
     @Test("图谱请求把独立 OpenAlex Key 作为 Bearer 发送")

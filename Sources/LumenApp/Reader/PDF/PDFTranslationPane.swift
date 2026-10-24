@@ -1,10 +1,12 @@
 import SwiftUI
+import AppKit
 import LumenKit
 
 /// PDF 翻译固定在左侧导航中。列表只呈现译文；正文原文仍由 PDFKit 显示，
-/// 点击译文会定位并选中对应原段，避免双语卡片重复占用窄侧栏。
+/// 译文单击定位原文；拖选、双击和复制保持原生文字行为。
 struct PDFTranslationPane: View {
     @ObservedObject var controller: PDFTranslationController
+    var selectionOnly = false
 
     @EnvironmentObject private var bridge: ReaderBridge
     @EnvironmentObject private var state: AppState
@@ -14,6 +16,28 @@ struct PDFTranslationPane: View {
     @State private var targetTerm = ""
     @State private var glossaryExpanded = false
     @State private var localError: String?
+    @State private var editingRange = false
+    @State private var firstPage = "1"
+    @State private var lastPage = "1"
+    @State private var locatedSelection: (documentID: String, paragraph: PDFParagraph, locator: DocumentLocator)?
+    private var selectionMode: Bool {
+        get { bridge.selectionTranslationMode }
+        nonmutating set { bridge.selectionTranslationMode = newValue }
+    }
+
+    private var selectedParagraph: PDFParagraph? {
+        guard selectionMode else { return nil }
+        guard bridge.selectionFromDrag, let selection = bridge.selection, selection.isUsable else {
+            return locatedSelection?.documentID == state.document?.id ? locatedSelection?.paragraph : nil
+        }
+        let page: Int
+        switch selection.locator {
+        case .pdf(let index, _): page = index
+        case .epub(let index, _, _): page = index
+        }
+        return PDFParagraph(pageIndex: page, text: selection.text, bounds: .zero,
+                            lineCount: 1, firstLineOrdinal: 0, isShort: false)
+    }
 
     private var reader: ReaderSettings { settings.reader }
 
@@ -34,7 +58,10 @@ struct PDFTranslationPane: View {
     private var isLLM: Bool { reader.translationEngineID == LLMTranslation.engineID }
     private var taskIdentity: String {
         let terms = reader.translationGlossary.map { "\($0.source)=\($0.target)" }.joined(separator: "|")
-        return "\(reader.translationEngineID)|\(reader.translationTargetLanguage)|\(terms)"
+        let provider = isLLM ? settings.translationProvider.map { "\($0.id)|\($0.baseURL)|\($0.selectedModel)|\($0.temperature)|\($0.maxTokens)" } ?? "" : ""
+        let selectionID = selectionMode ? "selection:\(selectedParagraph.map { AppPaths.stableHash($0.text) + $0.id } ?? "empty")" : "pages"
+        let parsing = settings.ai.documentAI
+        return "\(state.document?.id ?? "")|\(reader.translationEngineID)|\(reader.translationTargetLanguage)|\(terms)|\(provider)|\(String(describing: controller.pageRange))|\(selectionID)|\(parsing.parsingEnabled)|\(parsing.parsingBaseURL)|\(parsing.parsingModel)"
     }
 
     var body: some View {
@@ -45,6 +72,8 @@ struct PDFTranslationPane: View {
         }
         .background(DS.Palette.surfaceSunken)
         .task(id: taskIdentity) { await prepareAndStart(reset: false) }
+        .onDisappear { controller.stop() }
+        .onChange(of: selectionMode) { _, enabled in if !enabled { locatedSelection = nil } }
         .accessibilityElement(children: .contain)
         .accessibilityLabel("PDF 段落翻译")
     }
@@ -71,14 +100,13 @@ struct PDFTranslationPane: View {
                         .lineLimit(1)
                 }
                 .menuStyle(.borderlessButton)
-                .frame(width: 62)
+                .fixedSize()
+                .help("目标语言")
             }
 
             HStack(spacing: DS.Space.s) {
                 if isLLM {
-                    Label(llmModelName, systemImage: "sparkles")
-                        .lineLimit(1)
-                        .help("使用当前 AI 服务商与模型")
+                    TranslationModelMenu()
                 } else {
                     Menu {
                         machineEngineButton(AppleSystemTranslation.descriptor)
@@ -88,12 +116,57 @@ struct PDFTranslationPane: View {
                             .lineLimit(1)
                     }
                     .menuStyle(.borderlessButton)
+                    .fixedSize()
+                    .help("翻译引擎")
                 }
                 Spacer(minLength: 4)
                 phaseControls
             }
             .font(DS.Typo.ui(size: 11.5, weight: .medium))
             .foregroundStyle(DS.Palette.textSecondary)
+
+            HStack(spacing: DS.Space.s) {
+                Menu {
+                    if !selectionOnly {
+                    Button("全部页") { selectionMode = false; controller.pageRange = nil; editingRange = false }
+                    Button("当前页") {
+                        selectionMode = false
+                        let page = bridge.currentUnitIndex
+                        firstPage = String(page + 1); lastPage = firstPage
+                        controller.pageRange = page...page; editingRange = false
+                    }
+                    Button("自选页码…") {
+                        firstPage = String((controller.pageRange?.lowerBound ?? bridge.currentUnitIndex) + 1)
+                        lastPage = String((controller.pageRange?.upperBound ?? max(0, bridge.unitCount - 1)) + 1)
+                        editingRange = true
+                    }
+                    Divider()
+                    } else {
+                        Button("逐段翻译") { selectionMode = false }
+                    }
+                    Button("划词译") { selectionMode = true; editingRange = false }
+                } label: {
+                    Text(selectionMode ? "划词译" : controller.pageRange.map { "第 \($0.lowerBound + 1)–\($0.upperBound + 1) 页" } ?? "全部页")
+                        .lineLimit(1)
+                }
+                .menuStyle(.borderlessButton)
+                .fixedSize()
+                .help("翻译范围")
+                Spacer(minLength: 0)
+                PanelTextSizeControl(size: $settings.ui.translationTextSize, label: "译文字号")
+            }
+            .font(DS.Typo.ui(size: 11.5))
+            if editingRange {
+                HStack(spacing: DS.Space.s) {
+                    TextField("起始页", text: $firstPage).accessibilityLabel("翻译起始 PDF 页码")
+                    Text("–")
+                    TextField("结束页", text: $lastPage).accessibilityLabel("翻译结束 PDF 页码")
+                    Button { applyPageRange() } label: { Image(systemName: "checkmark") }
+                        .help("应用翻译页码范围")
+                }
+                .textFieldStyle(.roundedBorder)
+                .onSubmit { applyPageRange() }
+            }
 
             DisclosureGroup(isExpanded: $glossaryExpanded) {
                 glossaryEditor
@@ -102,16 +175,17 @@ struct PDFTranslationPane: View {
                     .font(DS.Typo.ui(size: 11.5, weight: .semibold))
             }
             .tint(DS.Palette.accent)
-
-            if !isLLM, !reader.translationGlossary.isEmpty {
-                Text("术语表由 LLM 严格执行；系统与微软翻译不保证采用指定译法。")
-                    .font(DS.Typo.ui(size: 10.5))
-                    .foregroundStyle(DS.Palette.textTertiary)
-            }
+            .help("LLM 使用指定术语；机器翻译不保证采用指定译法")
             if let localError {
                 Text(localError)
                     .font(DS.Typo.ui(size: 10.5))
                     .foregroundStyle(DS.Palette.warning)
+            }
+            if let note = controller.sourceNote, note != "文字取自 PDF 文字层", note != "划词" {
+                Text(note)
+                    .font(DS.Typo.ui(size: 10.5))
+                    .foregroundStyle(DS.Palette.textSecondary)
+                    .textSelection(.enabled)
             }
         }
         .padding(DS.Space.m)
@@ -137,6 +211,18 @@ struct PDFTranslationPane: View {
         )
     }
 
+    private func applyPageRange() {
+        guard let start = Int(firstPage), let end = Int(lastPage),
+              start >= 1, end >= start, end <= bridge.unitCount else {
+            localError = "页码范围须在 1–\(bridge.unitCount) 内，且起始页不大于结束页。"
+            return
+        }
+        localError = nil
+        selectionMode = false
+        controller.pageRange = (start - 1)...(end - 1)
+        editingRange = false
+    }
+
     @ViewBuilder
     private func machineEngineButton(_ descriptor: TranslationEngineDescriptor) -> some View {
         Button {
@@ -154,11 +240,6 @@ struct PDFTranslationPane: View {
 
     private var machineEngineName: String {
         TranslationEngineCatalog.descriptor(for: reader.translationEngineID).displayName
-    }
-
-    private var llmModelName: String {
-        guard let provider = settings.activeProvider, provider.isConfigured else { return "未配置 AI" }
-        return provider.selectedModel.isEmpty ? provider.name : provider.selectedModel
     }
 
     @ViewBuilder
@@ -231,8 +312,9 @@ struct PDFTranslationPane: View {
         } else if case .failed(let reason) = controller.phase, controller.doneCount == 0 {
             sidebarState(reason, icon: "exclamationmark.triangle", showsProgress: false)
         } else if controller.paragraphs.isEmpty {
-            sidebarState("这篇文档抽不出可翻译段落", icon: "checkmark.circle", showsProgress: false)
+            sidebarState(selectionMode ? "尚未选中文字" : "这篇文档抽不出可翻译段落", icon: "text.cursor", showsProgress: false)
         } else {
+            ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: DS.Space.m) {
                     if case .failed(let reason) = controller.phase {
@@ -240,62 +322,88 @@ struct PDFTranslationPane: View {
                             .font(DS.Typo.ui(size: 12))
                             .foregroundStyle(DS.Palette.warning)
                     }
-                    HStack {
-                        Text("全篇译文 · 上下滚动查看")
-                            .font(DS.Typo.ui(size: 11.5, weight: .semibold))
-                        Spacer()
-                        Text("点击译文定位原文")
-                            .font(DS.Typo.ui(size: 10))
-                            .foregroundStyle(DS.Palette.textTertiary)
-                    }
                     ForEach(pageSections, id: \.page) { section in
                         VStack(alignment: .leading, spacing: DS.Space.s) {
-                            Text("第 \(section.page + 1) 页")
+                            Text("第 \(section.page + 1) \(selectionOnly ? "章" : "页")")
                                 .font(DS.Typo.ui(size: 10.5, weight: .semibold))
                                 .foregroundStyle(DS.Palette.textTertiary)
                             ForEach(section.paragraphs) { paragraph in translationRow(paragraph) }
                         }
+                        .id(section.page)
                     }
                 }
                 .padding(DS.Space.m)
+            }
+            .task {
+                // Only align when opening the pane; never chase live scrolling.
+                await Task.yield()
+                let currentPage = LaunchOptions.jumpToUnit.map { max(0, $0 - 1) } ?? bridge.currentUnitIndex
+                if let page = pageSections.last(where: { $0.page <= currentPage })?.page ?? pageSections.first?.page {
+                    proxy.scrollTo(page, anchor: .top)
+                }
+            }
             }
         }
     }
 
     private func translationRow(_ paragraph: PDFParagraph) -> some View {
-        Button {
-            // 定位到该段自己的页（起始片段页），而不是当前主文档停在哪一页。
-            // 全篇译文可上下滚动，行内不再有「当前页」的概念，必须按段定位。
-            let page = paragraph.fragments.first?.pageIndex ?? paragraph.pageIndex
-            bridge.revealTranslationParagraph?(paragraph, page)
-        } label: {
             VStack(alignment: .leading, spacing: DS.Space.xs) {
+                if selectionMode {
+                    Text(paragraph.text)
+                        .font(DS.Typo.readingPanel(size: CGFloat(settings.ui.translationTextSize)))
+                        .foregroundStyle(DS.Palette.textSecondary)
+                        .textSelection(.enabled)
+                    Divider()
+                }
+                if paragraph.kind == .table {
+                    Label("表格", systemImage: "tablecells")
+                        .font(DS.Typo.ui(size: 9.5, weight: .semibold))
+                        .foregroundStyle(DS.Palette.textSecondary)
+                }
                 if paragraph.spansPages {
                     Text("跨页 · \(paragraph.pageIndices.map { String($0 + 1) }.joined(separator: "–"))")
                         .font(DS.Typo.ui(size: 9.5, weight: .semibold))
                         .foregroundStyle(DS.Palette.accent)
                 }
-                translationState(controller.state(of: paragraph.id))
+                translationState(controller.state(of: paragraph.id), paragraph: paragraph)
+                HStack(spacing: DS.Space.s) {
+                    Spacer(minLength: 0)
+                    if let text = controller.state(of: paragraph.id).translation {
+                        Button { copyTranslation(text) } label: { Image(systemName: "doc.on.doc") }
+                            .help("复制译文")
+                    }
+                }
+                .buttonStyle(.borderless)
+                .font(DS.Typo.ui(size: 11))
             }
             .padding(DS.Space.s)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(DS.Palette.surfaceRaised,
-                        in: RoundedRectangle(cornerRadius: DS.Radius.m, style: .continuous))
+            .background {
+                RoundedRectangle(cornerRadius: DS.Radius.m, style: .continuous)
+                    .fill(DS.Palette.surfaceRaised)
+                    .onTapGesture { reveal(paragraph) }
+            }
             .overlay(RoundedRectangle(cornerRadius: DS.Radius.m, style: .continuous)
                 .strokeBorder(DS.Palette.separator, lineWidth: 0.5))
-        }
-        .buttonStyle(.plain)
+            .contextMenu {
+                if let text = controller.state(of: paragraph.id).translation {
+                    Button("复制译文") { copyTranslation(text) }
+                }
+            }
+    }
+
+    private func copyTranslation(_ text: String) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
     }
 
     @ViewBuilder
-    private func translationState(_ value: ParagraphTranslationState) -> some View {
+    private func translationState(_ value: ParagraphTranslationState, paragraph: PDFParagraph) -> some View {
         switch value {
         case .done(let text):
-            Text(text)
-                .font(DS.Typo.ui(size: 12.5))
-                .foregroundStyle(DS.Palette.textPrimary)
-                .multilineTextAlignment(.leading)
-                .textSelection(.enabled)
+            TranslationText(text: text, size: CGFloat(settings.ui.translationTextSize),
+                            color: DS.Palette.textPrimary) { reveal(paragraph) }
+                .id("\(state.document?.id ?? "")|\(paragraph.id)")
         case .translating:
             Label("翻译中…", systemImage: "ellipsis").foregroundStyle(DS.Palette.textSecondary)
         case .failed(let reason):
@@ -305,6 +413,16 @@ struct PDFTranslationPane: View {
         case .pending:
             Text("等待翻译…").foregroundStyle(DS.Palette.textTertiary)
         }
+    }
+
+    private func reveal(_ paragraph: PDFParagraph) {
+        let page = paragraph.fragments.first?.pageIndex ?? paragraph.pageIndex
+        if selectionMode, let selection = selectedParagraph, let documentID = state.document?.id,
+           let locator = bridge.selection?.locator ?? locatedSelection?.locator {
+            locatedSelection = (documentID, selection, locator)
+        }
+        if let reveal = bridge.revealTranslationParagraph { reveal(paragraph, page) }
+        else if let locator = locatedSelection?.locator { bridge.goTo?(locator) }
     }
 
     private func sidebarState(_ text: String, icon: String, showsProgress: Bool) -> some View {
@@ -335,19 +453,28 @@ struct PDFTranslationPane: View {
 
     private func prepareAndStart(reset: Bool) async {
         guard let path = state.document?.url.standardizedFileURL.path else { return }
+        let selection = selectedParagraph
+        if selectionMode {
+            controller.stop()
+            guard selection != nil else { controller.clearSelection(); return }
+            do { try await Task.sleep(for: .milliseconds(300)) } catch { return }
+        }
+        guard !Task.isCancelled else { return }
         localError = nil
         controller.isVisible = true
         if reset { controller.resetTranslations() }
         await controller.prepare(documentPath: path,
                                  target: reader.translationTargetLanguage,
                                  engineID: reader.translationEngineID,
-                                 glossary: reader.translationGlossary)
-        guard !controller.phase.isFailure else { return }
+                                 glossary: reader.translationGlossary,
+                                 provider: settings.translationProvider, selection: selection,
+                                 parsingOptions: settings.ai.documentAI, force: reset)
+        guard !Task.isCancelled, !controller.phase.isFailure, controller.phase != .cancelled else { return }
         startAll()
     }
 
     private func startAll() {
-        if isLLM, !(settings.activeProvider?.isConfigured ?? false) {
+        if isLLM, !(settings.translationProvider?.isConfigured ?? false) {
             localError = "请先在“设置 → AI”中添加服务商与模型。"
             return
         }
@@ -363,11 +490,6 @@ struct PDFTranslationPane: View {
     }
 
     private func makeCustomEngine() -> (any TranslationEngine)? {
-        guard isLLM, let config = settings.activeProvider else { return nil }
-        return LLMTranslationEngine(
-            config: config,
-            apiKey: AICredentialStore.read(account: config.keychainAccount) ?? "",
-            glossary: reader.translationGlossary
-        )
+        settings.configuredTranslationEngine
     }
 }

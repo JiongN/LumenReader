@@ -1,82 +1,115 @@
 import SwiftUI
+import LumenKit
 
 /// 轻量 Markdown 渲染。
 ///
-/// 没有引第三方 Markdown 库，因为 AI 回复需要的排版其实很窄——段落、项目符号、
-/// 粗体斜体、行内代码、代码块——而完整实现（如 swift-markdown）遇到流式输出中
-/// 「尚未闭合的 `**` 或 ` ``` `」时容易整段解析失败，恰恰是流式场景最不能接受的。
-/// 这里对未闭合标记一律按普通文本处理，边吐边渲染始终稳定。
+/// Foundation parses Markdown off the main thread. Prose shares one native
+/// layout per section; wide tables and code keep their horizontal scrollers.
 struct MarkdownText: View {
 
     let text: String
     var textColor: Color = DS.Palette.textPrimary
     var accent: Color = DS.Palette.accent
+    var fontSize: CGFloat = 14.5
+    var evidence: [DocumentCitation] = []
+    var isStreaming: Bool
+    @State private var parsed: [Block]?
+    @State private var parsedSource: String?
+
+    init(text: String, textColor: Color = DS.Palette.textPrimary,
+         accent: Color = DS.Palette.accent, fontSize: CGFloat = 14.5,
+         evidence: [DocumentCitation] = [], isStreaming: Bool = false) {
+        self.text = text
+        self.textColor = textColor
+        self.accent = accent
+        self.fontSize = fontSize
+        self.evidence = evidence
+        self.isStreaming = isStreaming
+        let cached = isStreaming ? nil : Self.parsedCache.object(forKey: text as NSString)?.blocks
+        _parsed = State(initialValue: cached)
+        _parsedSource = State(initialValue: cached == nil ? nil : text)
+    }
+
+    private final class CachedBlocks {
+        let blocks: [Block]
+        init(_ blocks: [Block]) { self.blocks = blocks }
+    }
+
+    private static let parsedCache: NSCache<NSString, CachedBlocks> = {
+        let cache = NSCache<NSString, CachedBlocks>()
+        cache.countLimit = 24
+        cache.totalCostLimit = 8 * 1024 * 1024
+        return cache
+    }()
 
     var body: some View {
+        let ready = !isStreaming && parsedSource == text
+        let sections = ready ? Self.sections(parsed ?? []) : [Section(id: 0, kind: .prose([]))]
         VStack(alignment: .leading, spacing: DS.Space.s) {
-            ForEach(Self.parse(text)) { block in
-                view(for: block)
+            ForEach(sections) { section in
+                switch section.kind {
+                case .prose(let blocks):
+                    NativeAnswerText(text: text, blocks: ready ? blocks : nil, fontSize: fontSize,
+                        textColor: textColor, accent: accent, evidence: evidence)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                case .code(let content): codeView(content)
+                case .table(let table): tableView(table)
+                }
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+        .tint(accent)
+        .task(id: isStreaming ? nil : text) {
+            guard !isStreaming else { return }
+            let source = text
+            if parsedSource == source, parsed != nil { return }
+            if let cached = Self.parsedCache.object(forKey: source as NSString) {
+                parsed = cached.blocks
+                parsedSource = source
+                return
+            }
+            let blocks = await Task.detached(priority: .utility) { Self.parse(source) }.value
+            guard !Task.isCancelled else { return }
+            Self.parsedCache.setObject(CachedBlocks(blocks), forKey: source as NSString,
+                                       cost: source.utf8.count * 3)
+            parsed = blocks
+            parsedSource = source
+        }
     }
 
-    @ViewBuilder
-    private func view(for block: Block) -> some View {
-        switch block.kind {
-        case .heading(let level, let content):
-            Text(inline(content))
-                .font(DS.Typo.ui(size: level <= 2 ? 14.5 : 13.5, weight: .semibold))
-                .foregroundStyle(textColor)
-                .padding(.top, DS.Space.xxs)
+    struct Section: Identifiable {
+        enum Kind { case prose([Block]), code(String), table(Table) }
+        var id: Int
+        var kind: Kind
+    }
 
-        case .paragraph(let content):
-            Text(inline(content))
-                .font(DS.Typo.aiBody)
-                .foregroundStyle(textColor)
-                .lineSpacing(4)
-                .fixedSize(horizontal: false, vertical: true)
-
-        case .bullets(let items):
-            VStack(alignment: .leading, spacing: DS.Space.xs) {
-                ForEach(Array(items.enumerated()), id: \.offset) { _, item in
-                    HStack(alignment: .firstTextBaseline, spacing: DS.Space.s) {
-                        Circle()
-                            .fill(accent.opacity(0.55))
-                            .frame(width: 4, height: 4)
-                            .padding(.top, 6)
-                        Text(inline(item))
-                            .font(DS.Typo.aiBody)
-                            .foregroundStyle(textColor)
-                            .lineSpacing(4)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                }
+    static func sections(_ blocks: [Block]) -> [Section] {
+        var result: [Section] = [], prose: [Block] = []
+        func flush() {
+            guard !prose.isEmpty else { return }
+            result.append(.init(id: result.count, kind: .prose(prose)))
+            prose = []
+        }
+        for block in blocks {
+            switch block.kind {
+            case .code(let code): flush(); result.append(.init(id: result.count, kind: .code(code)))
+            case .table(let table): flush(); result.append(.init(id: result.count, kind: .table(table)))
+            default: prose.append(block)
             }
+        }
+        flush()
+        return result
+    }
 
-        case .numbered(let items):
-            VStack(alignment: .leading, spacing: DS.Space.xs) {
-                ForEach(Array(items.enumerated()), id: \.offset) { index, item in
-                    HStack(alignment: .firstTextBaseline, spacing: DS.Space.s) {
-                        Text("\(index + 1).")
-                            .font(DS.Typo.ui(size: 12, weight: .semibold, design: .rounded))
-                            .foregroundStyle(accent)
-                            .frame(minWidth: 15, alignment: .trailing)
-                        Text(inline(item))
-                            .font(DS.Typo.aiBody)
-                            .foregroundStyle(textColor)
-                            .lineSpacing(4)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                }
-            }
-
-        case .code(let content):
+    private func codeView(_ content: String) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
             ScrollView(.horizontal, showsIndicators: false) {
-                Text(content)
-                    .font(DS.Typo.ui(size: 11.5, design: .monospaced))
+                Text(String(content.prefix(8000)))
+                    .font(DS.Typo.readingPanel(size: max(11, fontSize - 2), design: .monospaced))
                     .foregroundStyle(textColor)
                     .textSelection(.enabled)
+                    .frame(maxWidth: 1000, alignment: .leading)
+                    .fixedSize(horizontal: false, vertical: true)
                     .padding(DS.Space.s)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -84,36 +117,77 @@ struct MarkdownText: View {
                 RoundedRectangle(cornerRadius: DS.Radius.s, style: .continuous)
                     .fill(DS.Palette.surfaceSunken)
             )
+            if content.count > 8000 {
+                Text("代码预览 · 前 8,000 字")
+                    .font(DS.Typo.ui(size: 10.5)).foregroundStyle(DS.Palette.textTertiary)
+            }
+        }
+    }
+
+    private func tableView(_ table: Table) -> some View {
+            ScrollView(.horizontal) {
+                VStack(alignment: .leading, spacing: 0) {
+                    tableRow(table.header, alignments: table.alignments, header: true)
+                        .background(DS.Palette.surfaceSunken)
+                    ForEach(Array(table.rows.enumerated()), id: \.offset) { _, row in
+                        Divider()
+                        tableRow(row, alignments: table.alignments, header: false)
+                    }
+                }
+                .fixedSize(horizontal: true, vertical: false)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func tableRow(_ cells: [String], alignments: [Table.ColumnAlignment], header: Bool) -> some View {
+        HStack(alignment: .top, spacing: 0) {
+            ForEach(cells.indices, id: \.self) { index in
+                let alignment = alignments[index]
+                Text(inline(cells[index]))
+                    .font(DS.Typo.readingPanel(size: fontSize))
+                    .fontWeight(header ? .semibold : .regular)
+                    .foregroundStyle(textColor)
+                    .multilineTextAlignment(alignment == .center ? .center : alignment == .trailing ? .trailing : .leading)
+                    .frame(width: 160, alignment: alignment == .center ? .center : alignment == .trailing ? .trailing : .leading)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(8)
+            }
         }
     }
 
     private func inline(_ source: String) -> AttributedString {
-        (try? AttributedString(
+        let value = (try? AttributedString(
             markdown: source,
             options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)
         )) ?? AttributedString(source)
+        return InlineEvidenceLink.render(value, sources: evidence)
     }
 
     // MARK: - 解析
 
-    struct Block: Identifiable {
-        enum Kind: Equatable {
-            case heading(Int, String)
-            case paragraph(String)
-            case bullets([String])
-            case numbered([String])
+    struct Table: Equatable, Sendable {
+        enum ColumnAlignment: Equatable, Sendable { case leading, center, trailing }
+        var header: [String]
+        var alignments: [ColumnAlignment]
+        var rows: [[String]]
+    }
+
+    struct Block: Identifiable, Sendable {
+        enum Kind: Equatable, Sendable {
+            case heading(Int, AttributedString)
+            case paragraph(AttributedString)
+            case listItem(marker: String, depth: Int, showsMarker: Bool, content: AttributedString)
             case code(String)
+            case table(Table)
         }
         let id: Int
         let kind: Kind
     }
 
-    static func parse(_ text: String) -> [Block] {
+    nonisolated static func parse(_ text: String) -> [Block] {
         var blocks: [Block] = []
         var counter = 0
-        var paragraph: [String] = []
-        var bullets: [String] = []
-        var numbered: [String] = []
+        var markup: [String] = []
         var codeLines: [String] = []
         var inCode = false
 
@@ -122,25 +196,12 @@ struct MarkdownText: View {
             return counter
         }
 
-        func flushParagraph() {
-            guard !paragraph.isEmpty else { return }
-            let joined = joinParagraph(paragraph)
-            if !joined.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                blocks.append(Block(id: nextID(), kind: .paragraph(joined)))
+        func flushMarkup() {
+            guard !markup.isEmpty else { return }
+            for kind in markupBlocks(markup.joined(separator: "\n")) {
+                blocks.append(Block(id: nextID(), kind: kind))
             }
-            paragraph = []
-        }
-
-        func flushBullets() {
-            guard !bullets.isEmpty else { return }
-            blocks.append(Block(id: nextID(), kind: .bullets(bullets)))
-            bullets = []
-        }
-
-        func flushNumbered() {
-            guard !numbered.isEmpty else { return }
-            blocks.append(Block(id: nextID(), kind: .numbered(numbered)))
-            numbered = []
+            markup = []
         }
 
         func flushCode() {
@@ -149,7 +210,11 @@ struct MarkdownText: View {
             codeLines = []
         }
 
-        for rawLine in text.components(separatedBy: .newlines) {
+        let lines = text.components(separatedBy: .newlines)
+        var lineIndex = 0
+        while lineIndex < lines.count {
+            let rawLine = lines[lineIndex]
+            lineIndex += 1
             let line = rawLine.trimmingCharacters(in: .whitespaces)
 
             if line.hasPrefix("```") {
@@ -157,7 +222,7 @@ struct MarkdownText: View {
                     flushCode()
                     inCode = false
                 } else {
-                    flushParagraph(); flushBullets(); flushNumbered()
+                    flushMarkup()
                     inCode = true
                 }
                 continue
@@ -168,76 +233,119 @@ struct MarkdownText: View {
                 continue
             }
 
-            if line.isEmpty {
-                flushParagraph(); flushBullets(); flushNumbered()
+            if lineIndex < lines.count, let header = tableCells(line), (2...12).contains(header.count),
+               let parsedAlignments = tableAlignments(lines[lineIndex]),
+               parsedAlignments.count == header.count || parsedAlignments.count == header.count + 1 {
+                flushMarkup()
+                lineIndex += 1
+                let alignments = Array(parsedAlignments.prefix(header.count))
+                var rows: [[String]] = []
+                while lineIndex < lines.count, rows.count < 200,
+                      let cells = tableCells(lines[lineIndex]), cells.count <= header.count {
+                    rows.append(cells + Array(repeating: "", count: header.count - cells.count))
+                    lineIndex += 1
+                }
+                blocks.append(Block(id: nextID(), kind: .table(Table(header: header, alignments: alignments, rows: rows))))
                 continue
             }
 
-            if let match = headingLevel(line) {
-                flushParagraph(); flushBullets(); flushNumbered()
-                blocks.append(Block(id: nextID(), kind: .heading(match.level, match.content)))
-                continue
-            }
-
-            if line.hasPrefix("- ") || line.hasPrefix("* ") || line.hasPrefix("• ") {
-                flushParagraph(); flushNumbered()
-                bullets.append(String(line.dropFirst(2)))
-                continue
-            }
-
-            if let content = numberedContent(line) {
-                flushParagraph(); flushBullets()
-                numbered.append(content)
-                continue
-            }
-
-            flushBullets(); flushNumbered()
-            paragraph.append(line)
+            if line.hasPrefix("• ") {
+                markup.append(String(rawLine.prefix(while: \.isWhitespace)) + "- " + line.dropFirst(2))
+            } else { markup.append(rawLine) }
         }
 
         // 流式输出时的收尾：代码块未闭合也照常渲染，不要把它吞掉
         if inCode { flushCode() }
-        flushParagraph(); flushBullets(); flushNumbered()
+        flushMarkup()
 
         return blocks
     }
 
-    private static func headingLevel(_ line: String) -> (level: Int, content: String)? {
-        guard line.hasPrefix("#") else { return nil }
-        let hashes = line.prefix { $0 == "#" }
-        guard hashes.count <= 6 else { return nil }
-        let content = line.dropFirst(hashes.count).trimmingCharacters(in: .whitespaces)
-        guard !content.isEmpty else { return nil }
-        return (hashes.count, content)
-    }
-
-    private static func numberedContent(_ line: String) -> String? {
-        guard let dot = line.firstIndex(of: "."),
-              dot > line.startIndex,
-              line[line.startIndex..<dot].allSatisfy(\.isNumber) else { return nil }
-        let rest = line[line.index(after: dot)...].trimmingCharacters(in: .whitespaces)
-        return rest.isEmpty ? nil : rest
-    }
-
-    /// 合并同一个段落里的多行。
-    /// 中文之间不插空格，否则会出现「这是 一句 中文」这种断字；拉丁文字之间补空格。
-    private static func joinParagraph(_ lines: [String]) -> String {
-        var result = ""
-        for line in lines {
-            guard let last = result.last, let first = line.first else {
-                result += line
-                continue
-            }
-            if isCJK(last) && isCJK(first) {
-                result += line
-            } else {
-                result += " " + line
-            }
+    nonisolated private static func tableAlignments(_ line: String) -> [Table.ColumnAlignment]? {
+        guard let cells = tableCells(line) else { return nil }
+        var result: [Table.ColumnAlignment] = []
+        for cell in cells {
+            var dashes = cell[...]
+            if dashes.first == ":" { dashes = dashes.dropFirst() }
+            if dashes.last == ":" { dashes = dashes.dropLast() }
+            guard dashes.count >= 3, dashes.allSatisfy({ $0 == "-" }) else { return nil }
+            result.append(cell.hasSuffix(":") ? (cell.hasPrefix(":") ? .center : .trailing) : .leading)
         }
         return result
     }
 
-    private static func isCJK(_ character: Character) -> Bool {
+    nonisolated private static func tableCells(_ line: String) -> [String]? {
+        let characters = Array(line.trimmingCharacters(in: .whitespaces))
+        var cells: [String] = [], cell = "", index = 0, codeDelimiter = 0
+        var escaped = false
+        while index < characters.count {
+            let character = characters[index]
+            index += 1
+            if escaped {
+                if character == "|" { cell.removeLast() }
+                cell.append(character); escaped = false
+            } else if character == "\\" {
+                cell.append(character); escaped = true
+            } else if character == "`" {
+                var count = 1
+                while index < characters.count && characters[index] == "`" { count += 1; index += 1 }
+                if codeDelimiter == 0 { codeDelimiter = count }
+                else if codeDelimiter == count { codeDelimiter = 0 }
+                cell += String(repeating: "`", count: count)
+            } else if character == "|" && codeDelimiter == 0 {
+                cells.append(cell); cell = ""
+            } else { cell.append(character) }
+        }
+        guard !cells.isEmpty else { return nil }
+        cells.append(cell)
+        if characters.first == "|", cells.first == "" { cells.removeFirst() }
+        if characters.last == "|", cells.last == "" { cells.removeLast() }
+        return cells.map { $0.trimmingCharacters(in: .whitespaces) }
+    }
+
+    nonisolated private static func markupBlocks(_ source: String) -> [Block.Kind] {
+        guard var parsed = try? AttributedString(markdown: source) else {
+            return [.paragraph(AttributedString(source))]
+        }
+        // Foundation keeps soft line breaks as spaces; do not split CJK words.
+        for run in Array(parsed.runs).reversed() where run.inlinePresentationIntent?.contains(.softBreak) == true {
+            let range = run.range
+            let before = range.lowerBound > parsed.startIndex ? parsed.characters[parsed.characters.index(before: range.lowerBound)] : nil
+            let after = range.upperBound < parsed.endIndex ? parsed.characters[range.upperBound] : nil
+            if let before, let after, isCJK(before), isCJK(after) {
+                parsed.replaceSubrange(range, with: AttributedString(""))
+            } else {
+                let remaining = run.inlinePresentationIntent?.subtracting(.softBreak)
+                parsed[range].inlinePresentationIntent = remaining?.isEmpty == true ? nil : remaining
+            }
+        }
+        var groups: [(intent: PresentationIntent?, content: AttributedString)] = []
+        for run in parsed.runs {
+            let intent = run.presentationIntent
+            var content = AttributedString(parsed[run.range])
+            content.presentationIntent = nil
+            if let last = groups.last, last.intent == intent {
+                groups[groups.count - 1].content.append(content)
+            } else { groups.append((intent, content)) }
+        }
+        var seenItems = Set<Int>()
+        return groups.map { group in
+            let components = group.intent?.components ?? []
+            let depth = components.filter { $0.kind == .orderedList || $0.kind == .unorderedList }.count
+            if let index = components.firstIndex(where: { if case .listItem = $0.kind { return true }; return false }),
+               case .listItem(let ordinal) = components[index].kind {
+                let ordered = components.dropFirst(index + 1).first?.kind == .orderedList
+                return .listItem(marker: ordered ? "\(ordinal)." : "•", depth: depth,
+                                 showsMarker: seenItems.insert(components[index].identity).inserted, content: group.content)
+            }
+            if case .header(let level) = components.first?.kind {
+                return .heading(level, group.content)
+            }
+            return .paragraph(group.content)
+        }
+    }
+
+    nonisolated private static func isCJK(_ character: Character) -> Bool {
         guard let scalar = character.unicodeScalars.first else { return false }
         switch scalar.value {
         case 0x3000...0x303F,   // CJK 标点

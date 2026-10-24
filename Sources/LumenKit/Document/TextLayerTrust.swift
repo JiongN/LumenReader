@@ -38,6 +38,19 @@ import CoreGraphics
 /// elgar 141 种（0.000）—— 乱码书反而字符种类最多。别再用它。
 public enum TextLayerTrust {
 
+    /// Cheap triage before any page rendering. A readable text layer does not
+    /// need an OCR sample merely to prove that it is readable.
+    public static func hasInvalidEncoding(_ text: String) -> Bool {
+        text.unicodeScalars.contains { scalar in
+            scalar.value == 0xFFFD || scalar.value == 0 ||
+                (scalar.value < 0x20 && ![9, 10, 12, 13].contains(scalar.value))
+        }
+    }
+
+    public static func needsVisualCheck(_ text: String) -> Bool {
+        hasInvalidEncoding(text) || !text.contains { $0.isLetter || $0.isNumber }
+    }
+
     /// 单页的判定结论。
     public enum Verdict: String, Sendable, Equatable, CaseIterable {
         /// 文字层与 OCR 互相印证，可以直接用文字层。

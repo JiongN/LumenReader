@@ -81,7 +81,9 @@ cleanup_stage() {
 trap cleanup_stage EXIT
 
 echo "▶︎ 编译（${CONFIG}）…"
-swift build --disable-sandbox -c "$CONFIG"
+BUILD_JOBS="${LUMEN_BUILD_JOBS:-2}"
+[[ "$BUILD_JOBS" =~ ^[1-9][0-9]*$ ]] || { echo "LUMEN_BUILD_JOBS 必须是正整数" >&2; exit 1; }
+swift build --disable-sandbox -c "$CONFIG" --jobs "$BUILD_JOBS"
 
 BIN=".build/$CONFIG/$APP_NAME"
 if [[ ! -f "$BIN" ]]; then
@@ -94,7 +96,9 @@ echo "▶︎ 组装 bundle（暂存到 ${STAGE}）…"
 mkdir -p "$STAGE/Contents/MacOS" "$STAGE/Contents/Resources"
 
 cp "$BIN" "$STAGE/Contents/MacOS/$APP_NAME"
+cp ".build/$CONFIG/LumenPDFWorker" "$STAGE/Contents/MacOS/LumenPDFWorker"
 cp "$ROOT/Resources/Info.plist" "$STAGE/Contents/Info.plist"
+cp "$ROOT/Resources/ThirdPartyNotices.txt" "$STAGE/Contents/Resources/ThirdPartyNotices.txt"
 
 if [[ -f "$ROOT/Resources/AppIcon.icns" ]]; then
     cp "$ROOT/Resources/AppIcon.icns" "$STAGE/Contents/Resources/AppIcon.icns"
@@ -118,6 +122,7 @@ SIGN_IDENTITY="-"
 if security find-identity -v -p codesigning 2>/dev/null | grep -q '"Lumen Dev"'; then
     SIGN_IDENTITY="Lumen Dev"
 fi
+codesign --force --sign "$SIGN_IDENTITY" --timestamp=none "$STAGE/Contents/MacOS/LumenPDFWorker" >/dev/null 2>&1
 codesign --force --sign "$SIGN_IDENTITY" --timestamp=none "$STAGE" >/dev/null 2>&1
 
 # ── 证伪演练钩子 ──────────────────────────────────────────────

@@ -45,6 +45,7 @@ final class ReaderSession: ObservableObject, Identifiable {
     @Published var busy: BusyState?
     var busyCancel: (() -> Void)?
     var fullTextTask: Task<Void, Never>?
+    var fullTextRequestID = UUID()
 
     /// 文档元数据（书名、页数）是异步加载的，转发它的变更，
     /// 标签标题 / 窗口标题才能在加载完成后刷新。

@@ -35,13 +35,9 @@ public actor MicrosoftTranslator {
             }
         }
 
-        /// 值得换一张凭证重试一次的错误。
-        ///
-        /// 400 / 401 / 403 基本都是凭证过期或被判滥用；429 是限流，
-        /// 换凭证不一定有用，但重试一次的成本远低于直接把失败甩给用户。
-        var isRetryable: Bool {
+        var needsCredentialRefresh: Bool {
             if case .serverStatus(let code, _) = self {
-                return [400, 401, 403, 429].contains(code)
+                return [400, 401, 403].contains(code)
             }
             return false
         }
@@ -72,6 +68,8 @@ public actor MicrosoftTranslator {
     private let session: URLSession
     private var credentials: Credentials?
     private var credentialsDate: Date = .distantPast
+    private var credentialTask: Task<Credentials, Error>?
+    private var rateLimitedUntil: Date = .distantPast
     /// 页面给的有效期是 1 小时，这里 40 分钟就换，不在边界上赌。
     private let refreshInterval: TimeInterval = 40 * 60
 
@@ -83,24 +81,44 @@ public actor MicrosoftTranslator {
 
     /// 翻译一段文本。`to` / `from` 用必应的语言标签（`zh-Hans` / `en` / `auto-detect`）。
     ///
-    /// 失败只重试一次，且重试前强制换凭证：绝大多数失败都是凭证过期，
-    /// 不换凭证的重试只是把同一个错误跑两遍、白白多等一个来回。
+    /// Retry once for stale credentials or a transient connection/server failure.
+    /// Rate limiting is shared across callers; changing credentials cannot bypass it.
     public func translate(_ text: String, to target: String, from source: String = "auto-detect") async throws -> String {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return "" }
 
-        var last: TranslationError = .emptyResponse
+        var refresh = false
         for attempt in 0..<2 {
-            let credentials = try await currentCredentials(forceRefresh: attempt > 0)
+            try Task.checkCancellation()
+            guard Date() >= rateLimitedUntil else { throw TranslationError.serverStatus(429, "") }
             do {
+                let credentials = try await currentCredentials(forceRefresh: refresh)
+                try Task.checkCancellation()
                 return try await perform(trimmed, to: target, from: source, credentials: credentials)
-            } catch let error as TranslationError {
-                last = error
-                if attempt == 0, error.isRetryable { continue }
+            } catch {
+                try Task.checkCancellation()
+                guard attempt == 0 else { throw error }
+                if let error = error as? TranslationError, error.needsCredentialRefresh {
+                    refresh = true
+                    continue
+                }
+                if Self.isTransient(error) {
+                    try await Task.sleep(for: .milliseconds(500))
+                    continue
+                }
                 throw error
             }
         }
-        throw last
+        throw TranslationError.emptyResponse
+    }
+
+    private static func isTransient(_ error: Error) -> Bool {
+        if case TranslationError.serverStatus(let status, _) = error {
+            return [500, 502, 503, 504].contains(status)
+        }
+        let ns = error as NSError
+        return ns.domain == NSURLErrorDomain && [NSURLErrorTimedOut, NSURLErrorNetworkConnectionLost,
+            NSURLErrorCannotConnectToHost].contains(ns.code)
     }
 
     // MARK: 请求
@@ -119,6 +137,7 @@ public actor MicrosoftTranslator {
         ]
 
         var request = URLRequest(url: components.url ?? Self.endpoint)
+        request.timeoutInterval = 20
         request.httpMethod = "POST"
         request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
         request.setValue(Self.pageURL.absoluteString, forHTTPHeaderField: "Referer")
@@ -132,25 +151,48 @@ public actor MicrosoftTranslator {
             URLQueryItem(name: "token", value: credentials.token),
             URLQueryItem(name: "key", value: credentials.key)
         ]
-        request.httpBody = form.percentEncodedQuery?.data(using: .utf8)
+        // URLComponents treats '+' as a literal; HTML form decoders treat it as a space.
+        request.httpBody = form.percentEncodedQuery?.replacingOccurrences(of: "+", with: "%2B").data(using: .utf8)
 
-        let (data, response) = try await session.data(for: request)
+        let (bytes, response) = try await session.bytes(for: request)
+        let data = try await BoundedResponseData.read(bytes, response: response, maximum: 1024 * 1024)
         let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+        if status == 429 { recordRateLimit(response) }
         guard status == 200 else {
             let body = String(data: data, encoding: .utf8) ?? ""
             let prefix = String(body.prefix(120))
             throw TranslationError.serverStatus(status, prefix)
         }
 
-        guard let json = try? JSONSerialization.jsonObject(with: data),
+        guard let json = try? JSONSerialization.jsonObject(with: data) else { throw TranslationError.undecodable }
+        if let failure = json as? [String: Any], let code = failure["statusCode"] as? Int, code != 200 {
+            if code == 429 { recordRateLimit(response) }
+            throw TranslationError.serverStatus(code, "")
+        }
+        guard
               let list = json as? [[String: Any]],
               let first = list.first,
               let translations = first["translations"] as? [[String: Any]],
-              let text = translations.first?["text"] as? String,
-              !text.isEmpty else {
+              let text = translations.first?["text"] as? String else {
             throw TranslationError.undecodable
         }
+        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw TranslationError.emptyResponse }
         return text
+    }
+
+    private func recordRateLimit(_ response: URLResponse) {
+        let header = (response as? HTTPURLResponse)?.value(forHTTPHeaderField: "Retry-After")
+        let seconds: TimeInterval
+        if let header, let value = TimeInterval(header), value.isFinite, value >= 0 {
+            seconds = value
+        } else if let header {
+            let formatter = DateFormatter()
+            formatter.locale = Locale(identifier: "en_US_POSIX")
+            formatter.timeZone = TimeZone(secondsFromGMT: 0)
+            formatter.dateFormat = "EEE, dd MMM yyyy HH:mm:ss zzz"
+            seconds = formatter.date(from: header)?.timeIntervalSinceNow ?? 60
+        } else { seconds = 60 }
+        rateLimitedUntil = max(rateLimitedUntil, Date().addingTimeInterval(max(1, seconds)))
     }
 
     // MARK: 凭证获取与缓存
@@ -161,7 +203,11 @@ public actor MicrosoftTranslator {
 
         if !forceRefresh, let cached, age < refreshInterval { return cached }
 
-        let fresh = try await fetchCredentials()
+        if let credentialTask { return try await credentialTask.value }
+        let pending = Task { try await self.fetchCredentials() }
+        credentialTask = pending
+        defer { credentialTask = nil }
+        let fresh = try await pending.value
         credentials = fresh
         credentialsDate = Date()
         return fresh
@@ -169,12 +215,15 @@ public actor MicrosoftTranslator {
 
     private func fetchCredentials() async throws -> Credentials {
         var request = URLRequest(url: Self.pageURL)
+        request.timeoutInterval = 20
         request.setValue(Self.browserUA, forHTTPHeaderField: "User-Agent")
         request.setValue("zh-CN,zh;q=0.9,en;q=0.8", forHTTPHeaderField: "Accept-Language")
         request.setValue("text/html,application/xhtml+xml", forHTTPHeaderField: "Accept")
 
-        let (data, response) = try await session.data(for: request)
+        let (bytes, response) = try await session.bytes(for: request)
+        let data = try await BoundedResponseData.read(bytes, response: response, maximum: 8 * 1024 * 1024)
         let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+        if status == 429 { recordRateLimit(response) }
         guard status == 200 else {
             throw TranslationError.serverStatus(status, "")
         }

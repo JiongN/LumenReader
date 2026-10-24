@@ -78,8 +78,6 @@ extension LumenAction {
             return hasDocument
         case .showThumbnails:
             return state.document?.kind == .pdf
-        case .exportSummary:
-            return !state.chat.lastSubstantialAnswer.isEmpty
         case .exportTranscript:
             return !state.chat.bubbles.isEmpty
         }
@@ -136,14 +134,13 @@ extension LumenAction {
         case .fontIncrease:
             // 只有快捷键路径（这里）会在撞边界时弹提示；滑块路径不弹，避免拖动噪声。
             if case .atLimit(_, isMin: false) = state.stepFontScale(by: 0.1) {
-                state.showToast("字号已到最大")
+                state.showToast("字号已到最大", requiresAttention: true)
             }
         case .fontDecrease:
             if case .atLimit(_, isMin: true) = state.stepFontScale(by: -0.1) {
-                state.showToast("字号已到最小")
+                state.showToast("字号已到最小", requiresAttention: true)
             }
 
-        case .exportSummary: state.exportSummaryToFile()
         case .exportTranscript: state.exportTranscriptToFile()
         }
     }
@@ -174,6 +171,7 @@ extension AppState {
         }
         setSidebarVisible(true)
         withAnimation(DS.Motion.quick) { bridge.sidebarTab = tab }
+        if tab == .search { bridge.searchFocusRevision &+= 1 }
     }
 
     // 反馈的硬边界：提示只能挂在这一条「快捷键路径」上。
@@ -191,21 +189,6 @@ extension AppState {
             settingsStore.reader.fontScale = s
         }
         return step
-    }
-
-    /// 导出最近一条实质回答。菜单、命令面板、AI 面板的 ⋯ 都走这一条。
-    func exportSummaryToFile() {
-        let summary = chat.lastSubstantialAnswer
-        guard !summary.isEmpty else {
-            showToast("还没有可导出的 AI 摘要", isError: true)
-            return
-        }
-        ExportService.exportSummary(
-            documentTitle: currentDocumentTitle,
-            metadata: documentMetadata,
-            summary: summary,
-            transcript: chat.bubbles
-        )
     }
 
     func exportTranscriptToFile() {

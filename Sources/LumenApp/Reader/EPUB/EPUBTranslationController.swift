@@ -18,6 +18,7 @@ final class EPUBTranslationController: ObservableObject {
     @Published private(set) var failureCount = 0
     @Published private(set) var errorMessage: String?
     @Published private(set) var appleSessionRequest = 0
+    private(set) var appleSourceLanguage: String?
 
     var onFinish: ((_ failed: Int) -> Void)?
     var onError: ((_ message: String) -> Void)?
@@ -47,6 +48,7 @@ final class EPUBTranslationController: ObservableObject {
         engineID: String,
         glossary: [TranslationGlossaryEntry],
         customEngine: (any TranslationEngine)?,
+        provider: AIProviderConfig? = nil,
         paragraphs: @escaping () async throws -> [String],
         markLoading: @escaping ([Int]) -> Void,
         apply: @escaping (Int, String, EPUBTranslationState) -> Void
@@ -59,10 +61,14 @@ final class EPUBTranslationController: ObservableObject {
         failureCount = 0
         errorMessage = nil
         queuedAppleItems = []
+        appleSourceLanguage = nil
         self.apply = apply
 
         let normalizedTarget = TranslationLanguage.target(for: target).id
-        let scope = Self.cacheScope(engineID: engineID, glossary: glossary)
+        let modelScope = engineID == LLMTranslation.engineID ? provider.map {
+            "\($0.baseURL)|\($0.selectedModel)|\($0.temperature)|\($0.maxTokens)"
+        } ?? "unconfigured" : ""
+        let scope = Self.cacheScope(engineID: engineID, glossary: glossary) + AppPaths.stableHash(modelScope)
         let cacheURL = AppPaths.translationCacheFile(forPath: documentPath)
         self.cacheURL = cacheURL
         cache = TranslationCache.load(from: cacheURL)
@@ -110,6 +116,12 @@ final class EPUBTranslationController: ObservableObject {
                 markLoading(queue.map(\.index))
 
                 if engineID == AppleSystemTranslation.engineID {
+                    self.appleSourceLanguage = try await TranslationSourceResolver.shared.resolve(texts: items.map(\.text))
+                    guard token == self.generation, !Task.isCancelled else { return }
+                    guard self.appleSourceLanguage != nil else {
+                        self.finishWithError("无法确定原文语言，请改用其他翻译引擎。")
+                        return
+                    }
                     self.queuedAppleItems = queue
                     self.task = nil
                     self.appleSessionRequest &+= 1
@@ -177,7 +189,12 @@ final class EPUBTranslationController: ObservableObject {
                     do {
                         var pieces: [String] = []
                         for chunk in TranslationTextSplitter.split(item.text) {
-                            pieces.append(try await engine.translate(chunk, to: target, from: "auto-detect"))
+                            try Task.checkCancellation()
+                            let piece = try await engine.translate(chunk, to: target, from: "auto-detect")
+                            guard !piece.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                                throw AIError.emptyResponse
+                            }
+                            pieces.append(piece)
                         }
                         return (item, .success(TranslationTextSplitter.join(pieces, target: target)))
                     } catch {
@@ -202,12 +219,19 @@ final class EPUBTranslationController: ObservableObject {
             guard token == generation, !Task.isCancelled else { return }
             do {
                 var translated: [String] = []
-                for chunk in TranslationTextSplitter.split(item.text) {
+                let chunks = try await TranslationTextSplitter.splitInBackground(item.text)
+                guard token == generation, !Task.isCancelled else { return }
+                for chunk in chunks {
                     let response = try await session.translate(chunk)
+                    guard token == generation, !Task.isCancelled else { return }
+                    guard !response.targetText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                        throw AppleTranslationBatch.ResponseError.empty
+                    }
                     translated.append(response.targetText)
                 }
                 consume(.success(TranslationTextSplitter.join(translated, target: target)), for: item)
             } catch {
+                guard token == generation, !Task.isCancelled else { return }
                 consume(.failure(error), for: item)
             }
         }
@@ -269,6 +293,6 @@ final class EPUBTranslationController: ObservableObject {
     }
 
     private static func describe(_ error: Error) -> String {
-        (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+        PDFTranslationController.describe(error)
     }
 }

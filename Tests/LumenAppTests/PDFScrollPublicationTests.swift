@@ -55,11 +55,25 @@ struct PDFScrollPublicationTests {
         defer { token.cancel() }
         // The sequence lasts longer than the idle interval, but no individual
         // gap does. A throttle (instead of a debounce) would fail this assertion.
-        for _ in 0..<5 {
-            NotificationCenter.default.post(name: .PDFViewPageChanged, object: controller.view)
-            try await Task.sleep(nanoseconds: 70_000_000)
-            #expect(changes == 0)
+        var gaps: [Double] = []
+        let start = ContinuousClock.now
+        var previous = start
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            // Schedule native notifications up front: a delayed Swift task wake-up
+            // must not silently turn this continuous-input fixture into an idle gap.
+            for index in 0..<6 {
+                DispatchQueue.main.asyncAfter(deadline: .now() + Double(index) * 0.07) {
+                    let now = ContinuousClock.now
+                    let elapsed = previous.duration(to: now)
+                    gaps.append(Double(elapsed.components.seconds) * 1_000 + Double(elapsed.components.attoseconds) / 1e15)
+                    previous = now
+                    NotificationCenter.default.post(name: .PDFViewPageChanged, object: controller.view)
+                    #expect(changes == 0)
+                    if index == 5 { continuation.resume() }
+                }
+            }
         }
+        print("PDF continuous notification gaps (ms): \(gaps)")
         #expect(state.isActivelyScrolling)
         try await Task.sleep(nanoseconds: 350_000_000)
         #expect(!state.isActivelyScrolling)
@@ -178,6 +192,38 @@ struct PDFScrollPublicationTests {
         controller.setPanelWidthDragging(false)
         try await Task.sleep(nanoseconds: 100_000_000)
         #expect(controller.view.autoScales)
+    }
+
+    @Test func zoomDoesNotMovePDFViewCoordinateOrigin() throws {
+        let (controller, _, url) = try fixture()
+        defer { controller.unload(); try? FileManager.default.removeItem(at: url) }
+        let origin = controller.view.bounds.origin
+        controller.stepZoom(by: 1.5)
+        #expect(controller.view.bounds.origin == origin)
+    }
+
+    @Test func panelNarrowingKeepsManuallyFittedPageInsideViewport() async throws {
+        let (controller, _, url) = try fixture()
+        defer { controller.unload(); try? FileManager.default.removeItem(at: url) }
+        controller.zoomToFitWidth()
+        controller.view.autoScales = false
+        controller.setPanelResizing(true)
+        controller.view.setFrameSize(NSSize(width: 340, height: 400))
+        controller.setPanelResizing(false)
+        try await Task.sleep(nanoseconds: 100_000_000)
+        let page = try #require(controller.view.currentPage)
+        let rect = controller.view.convert(page.bounds(for: .cropBox), from: page)
+        #expect(rect.width <= controller.view.bounds.width + 1)
+        #expect(rect.minX >= controller.view.bounds.minX - 1)
+        #expect(rect.maxX <= controller.view.bounds.maxX + 1)
+        // Closing the panel should grow the fitted page again, not leave the
+        // reduced scale behind after the first narrowing.
+        controller.setPanelWidthDragging(true)
+        controller.view.setFrameSize(NSSize(width: 600, height: 400))
+        controller.setPanelWidthDragging(false)
+        try await Task.sleep(nanoseconds: 100_000_000)
+        let expanded = controller.view.convert(page.bounds(for: .cropBox), from: page)
+        #expect(abs(expanded.width - 552) < 1)
     }
 
     @Test func dividerDragSuspendsAutomaticFitUntilRelease() async throws {

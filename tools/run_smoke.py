@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import tempfile
 from smoke_log import diagnostic_failures
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -46,12 +47,15 @@ required = {
 results = []
 for name, args in cases.items():
     image = OUT / f"{name}.png"
-    env = dict(os.environ, LUMEN_TEST_DATA=str(OUT / f"data-{name}"))
+    # Each run needs fresh state; old test conversation titles affect numbering.
+    data_dir = tempfile.mkdtemp(prefix=f"data-{name}-", dir=OUT)
+    env = dict(os.environ, LUMEN_TEST_DATA=data_dir)
     with (OUT / f"{name}.log").open("w") as log:
         try:
             # First WebKit launch can take longer than the native PDF cases.
             capture_delay = "25" if name == "epub" else "9"
-            result = subprocess.run([str(APP), *args, "--capture", str(image), "--capture-delay", capture_delay, "--capture-screen", "1"], env=env, stdout=log, stderr=log, timeout=60)
+            capture_screen = os.environ.get("LUMEN_SMOKE_CAPTURE_SCREEN", "1")
+            result = subprocess.run([str(APP), *args, "--capture", str(image), "--capture-delay", capture_delay, "--capture-screen", capture_screen], env=env, stdout=log, stderr=log, timeout=60)
             code = result.returncode
         except subprocess.TimeoutExpired:
             code = 124

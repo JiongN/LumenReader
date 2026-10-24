@@ -128,9 +128,6 @@ struct SmartOutlinePane: View {
                 .foregroundStyle(DS.Palette.textSecondary)
                 .multilineTextAlignment(.center)
                 .fixedSize(horizontal: false, vertical: true)
-            Text("首次生成通常要十几秒。")
-                .font(DS.Typo.ui(size: 11))
-                .foregroundStyle(DS.Palette.textTertiary)
         }
         .padding(DS.Space.xl)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -172,22 +169,9 @@ struct SmartOutlinePane: View {
             Text("AI 智能目录")
                 .font(DS.Typo.callout)
                 .foregroundStyle(DS.Palette.textSecondary)
-            Text(hintText)
-                .font(DS.Typo.ui(size: 11))
-                .foregroundStyle(DS.Palette.textTertiary)
-                .multilineTextAlignment(.center)
-                .fixedSize(horizontal: false, vertical: true)
         }
         .padding(DS.Space.xl)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-    }
-
-    /// 已经内嵌了书签的文档，先说清楚「这不是没有目录，是机器又读了一遍」——
-    /// 否则用户会以为功能没生效。
-    private var hintText: String {
-        bridge.outline.isEmpty
-            ? "让 AI 读一遍每\(state.unitName)开头的内容，自动推断出章节结构。生成后可点击跳转，也可逐节生成摘要。"
-            : "这份文档已内嵌目录。智能目录会由 AI 重新归纳一份，两者可以对照着看。"
     }
 
     // MARK: - 条目列表
@@ -259,17 +243,12 @@ struct SmartOutlinePane: View {
         HStack(spacing: DS.Space.xs) {
             Text("\(outline.entries.count) 项")
             Spacer(minLength: 0)
-            Text(outline.modelName)
-                .lineLimit(1)
-                .truncationMode(.middle)
-            Text("·")
-            Text(outline.generatedAt, format: .dateTime.month().day().hour().minute())
-                .monospacedDigit()
         }
         .font(DS.Typo.ui(size: 10))
         .foregroundStyle(DS.Palette.textTertiary)
         .padding(.horizontal, DS.Space.s)
         .padding(.vertical, 5)
+        .help("\(outline.modelName) · \(outline.generatedAt.formatted(date: .abbreviated, time: .shortened))")
     }
 
     /// 当前阅读位置落在哪一条上：取「起点不晚于当前位置」的最后一条。

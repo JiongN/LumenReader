@@ -6,6 +6,7 @@ import LumenKit
 struct EPUBTranslationPane: View {
     @ObservedObject var controller: EPUBTranslationController
     @EnvironmentObject private var settings: SettingsStore
+    @EnvironmentObject private var bridge: ReaderBridge
 
     private var reader: ReaderSettings { settings.reader }
     private var isLLM: Bool { reader.translationEngineID == LLMTranslation.engineID }
@@ -41,6 +42,7 @@ struct EPUBTranslationPane: View {
                     .toggleStyle(.switch)
                     .controlSize(.small)
                 Spacer(minLength: 0)
+                PanelTextSizeControl(size: $settings.ui.translationTextSize, label: "译文字号")
                 Menu(targetName) {
                     ForEach(TranslationLanguage.targets) { language in
                         Button(language.displayName) {
@@ -49,7 +51,11 @@ struct EPUBTranslationPane: View {
                     }
                 }
                 .menuStyle(.borderlessButton)
+                .fixedSize()
+                .font(DS.Typo.ui(size: 11, weight: .medium))
+                .help("目标语言")
             }
+            .font(DS.Typo.ui(size: 11.5))
 
             Picker("翻译方式", selection: engineMode) {
                 Text("机器翻译").tag(false)
@@ -58,11 +64,18 @@ struct EPUBTranslationPane: View {
             .pickerStyle(.segmented)
             .labelsHidden()
 
+            Menu {
+                Button("划词译") {
+                    bridge.beginSelectionTranslation()
+                }
+            } label: { Text("当前章") }
+            .menuStyle(.borderlessButton)
+            .fixedSize()
+            .font(DS.Typo.ui(size: 11.5))
+
             HStack(spacing: DS.Space.s) {
                 if isLLM {
-                    Label(llmModelName, systemImage: "sparkles")
-                        .lineLimit(1)
-                        .help("使用当前 AI 服务商与模型")
+                    TranslationModelMenu()
                 } else {
                     Menu {
                         machineEngineButton(AppleSystemTranslation.descriptor)
@@ -72,6 +85,8 @@ struct EPUBTranslationPane: View {
                             .lineLimit(1)
                     }
                     .menuStyle(.borderlessButton)
+                    .fixedSize()
+                    .help("翻译引擎")
                 }
                 Spacer(minLength: 0)
                 if controller.isRunning {
@@ -97,8 +112,7 @@ struct EPUBTranslationPane: View {
             if !reader.epubTranslateEnabled {
                 SidebarEmptyState(
                     icon: "character.book.closed",
-                    title: "逐段翻译已关闭",
-                    message: "打开后，译文会紧跟在当前章节每段原文的下方。"
+                    title: "逐段翻译已关闭"
                 )
             } else if let error = controller.errorMessage {
                 Label(error, systemImage: "exclamationmark.triangle")
@@ -113,16 +127,10 @@ struct EPUBTranslationPane: View {
                     .monospacedDigit()
                     .padding(.horizontal, DS.Space.m)
                     .padding(.top, DS.Space.m)
-                Text("译文直接显示在正文中；切换章节会自动翻译新章节，已完成的结果会从缓存恢复。")
-                    .font(DS.Typo.ui(size: 11))
-                    .foregroundStyle(DS.Palette.textSecondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .padding(.horizontal, DS.Space.m)
             } else {
                 SidebarEmptyState(
                     icon: "character.book.closed",
-                    title: "正在准备逐段翻译",
-                    message: "章节载入后会识别正文段落并开始翻译。"
+                    title: "正在准备逐段翻译"
                 )
             }
         }
@@ -161,8 +169,4 @@ struct EPUBTranslationPane: View {
         TranslationEngineCatalog.descriptor(for: reader.translationEngineID).displayName
     }
 
-    private var llmModelName: String {
-        guard let provider = settings.activeProvider, provider.isConfigured else { return "未配置 AI" }
-        return provider.selectedModel.isEmpty ? provider.name : provider.selectedModel
-    }
 }

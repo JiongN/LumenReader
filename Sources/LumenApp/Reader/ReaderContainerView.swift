@@ -53,6 +53,7 @@ struct ReaderContainerView: View {
         // 卡顿自检：三栏整棵树每次重排都会走到这里。必须写在 body 里而不是做成 ViewModifier——
         // 修饰符对「值相等的节点」会被复用，tick 只在首帧跑一次，计数恒为 0（本轮踩过）。
         let _ = Jank.tick(.containerBody)
+        GeometryReader { viewport in
         HStack(spacing: 0) {
             // 图标栏常驻（沉浸模式除外）：内容面板可以收起，切页签的入口不能跟着消失。
             if !state.isImmersive {
@@ -148,23 +149,21 @@ struct ReaderContainerView: View {
                     onDragStateChange: { bridge.setPanelWidthDragging?($0) }
                 )
 
-                AIPanelView()
+                Color.clear
                     .frame(width: aiPanelWidth)
+                    .anchorPreference(key: AIPanelBoundsPreference.self, value: .bounds) { [session.id: $0] }
                     .layoutProbe("aiPanel")
                     .background(DS.Palette.surfaceSunken)
                     .transition(.opacity.combined(with: .offset(x: 10)))
             }
         }
         .layoutProbe("readerHStack")
-        // 量窗口内容区宽度。用 background 而不是把 HStack 包进 GeometryReader：
-        // GeometryReader 会参与布局并把「谁决定宽度」这件事搅进来，
-        // 而这里只是想读一个数，不该反过来影响布局。
-        .background {
-            GeometryReader { proxy in
-                Color.clear
-                    .onAppear { containerWidth = proxy.size.width }
-                    .onChange(of: proxy.size.width) { _, width in containerWidth = width }
-            }
+        // Measure the parent's proposal, never the HStack's content width.
+        // Measuring the expanded PDF/panels feeds their old width back into
+        // the budget and prevents the workspace from shrinking with its window.
+        .frame(width: viewport.size.width, height: viewport.size.height)
+        .onAppear { containerWidth = viewport.size.width }
+        .onChange(of: viewport.size.width) { _, width in containerWidth = width }
         }
         // environmentObject 必须放在所有 overlay 之后：overlay 会把内容包在修饰过的视图
         // 之外，先注入的话 overlay 里的视图看不到这个环境对象，运行时直接 fatalError。
@@ -808,7 +807,7 @@ struct ReaderContainerView: View {
         // 页数不同耗时差好几倍。固定等待要么白白拖慢文本件，要么在扫描件上
         // 于半途 dump 出「剪贴板还是空的」这种假失败。
         let deadline = Date().addingTimeInterval(120)
-        while state.busy != nil, Date() < deadline {
+        while state.fullTextTask != nil || state.busy != nil, Date() < deadline {
             try? await Task.sleep(nanoseconds: 300_000_000)
         }
         // 再让出一点时间给写剪贴板和 toast 落定
@@ -850,6 +849,8 @@ struct ReaderStatusLayer: View {
                     }
                 }
                 .buttonStyle(.plain)
+                .contentShape(Rectangle())
+                .pointerStyle(.link)
                 .onHover { hovering in
                     withAnimation(DS.Motion.hover) { isJumpHovering = hovering }
                 }
@@ -892,6 +893,8 @@ struct ReaderStatusLayer: View {
                     .overlay(Capsule(style: .continuous).strokeBorder(DS.Palette.separator, lineWidth: 0.5))
             )
             .shadow(color: .black.opacity(0.10), radius: 10, y: 3)
+            .contentShape(Capsule())
+            .pointerStyle(.default)
             // 探针挂在 shadow 之后、外层 padding 之前：测的是胶囊本身的框，
             // 不含那 16pt 内边距，和「有没有压到别的东西」直接可比。
             .layoutProbe("statusChip")
@@ -927,9 +930,9 @@ struct ControlChip: View {
 enum HighlightSwatches {
     struct Swatch { let name: String; let hex: String }
     static let all: [Swatch] = [
-        .init(name: "奶油黄", hex: "#F3DFA6"), .init(name: "薄荷绿", hex: "#B9DFC9"),
-        .init(name: "雾霭蓝", hex: "#BDD8E7"), .init(name: "樱花粉", hex: "#EBC5CF"),
-        .init(name: "杏桃橙", hex: "#F1D1B6")
+        .init(name: "奶油黄", hex: "#FFD000"), .init(name: "薄荷绿", hex: "#68D991"),
+        .init(name: "雾霭蓝", hex: "#64C9F2"), .init(name: "樱花粉", hex: "#FF85B0"),
+        .init(name: "杏桃橙", hex: "#FFA45B")
     ]
 }
 
@@ -1061,7 +1064,10 @@ struct SelectionActionBar: View {
             Divider().frame(height: 15)
 
             actionButton("解释", icon: "sparkles") { trigger(.explain) }
-            actionButton("翻译", icon: "character.book.closed") { trigger(.translate) }
+            actionButton("划词译", icon: "character.book.closed") {
+                bridge.beginSelectionTranslation()
+                state.revealSidebar(tab: .translation)
+            }
         }
         // 防压缩：整条浮层锚在底部中央，文字动作不可被压成省略号。
         .fixedSize()

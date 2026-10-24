@@ -6,13 +6,15 @@ public struct GraphIdentity: Codable, Sendable, Equatable {
     public var year: Int?
     public var doi: String?
     public var source: String
+    public var cnkiURL: URL?
 
-    public init(title: String = "", authors: [String] = [], year: Int? = nil, doi: String? = nil, source: String = "本地") {
+    public init(title: String = "", authors: [String] = [], year: Int? = nil, doi: String? = nil, source: String = "本地", cnkiURL: URL? = nil) {
         self.title = title
         self.authors = authors
         self.year = year
         self.doi = Self.normalizedDOI(doi)
         self.source = source
+        self.cnkiURL = cnkiURL.flatMap { CNKIPage.articleURL($0.absoluteString, relativeTo: $0) }
     }
 
     public static func normalizedDOI(_ value: String?) -> String? {
@@ -37,8 +39,9 @@ public struct GraphPaper: Codable, Sendable, Identifiable, Equatable {
     public var referencedIDs: [String]
     public var relatedIDs: [String]
     public var citedByCount: Int
+    public var sourceCitation: String?
 
-    public init(id: String, doi: String?, title: String, authors: [String], year: Int?, venue: String, abstract: String, openAccessURL: URL?, referencedIDs: [String], relatedIDs: [String], citedByCount: Int) {
+    public init(id: String, doi: String?, title: String, authors: [String], year: Int?, venue: String, abstract: String, openAccessURL: URL?, referencedIDs: [String], relatedIDs: [String], citedByCount: Int, sourceCitation: String? = nil) {
         self.id = id
         self.doi = GraphIdentity.normalizedDOI(doi)
         self.title = title
@@ -50,6 +53,7 @@ public struct GraphPaper: Codable, Sendable, Identifiable, Equatable {
         self.referencedIDs = referencedIDs
         self.relatedIDs = relatedIDs
         self.citedByCount = citedByCount
+        self.sourceCitation = sourceCitation
     }
 }
 
@@ -123,8 +127,15 @@ public enum GraphMerge {
               let localIndex = snapshot.papers.firstIndex(where: { $0.id == localID }) else { return }
         let existing = snapshot.papers.first { $0.id == paper.id || (paper.doi != nil && $0.doi == paper.doi && $0.id != localID) }
         let canonicalID = existing?.id ?? paper.id
+        let original = snapshot.papers[localIndex].sourceCitation ?? snapshot.papers[localIndex].title
         snapshot.papers.remove(at: localIndex)
-        if existing == nil { snapshot.papers.append(paper) }
+        if existing == nil {
+            var confirmed = paper
+            confirmed.sourceCitation = confirmed.sourceCitation ?? original
+            snapshot.papers.append(confirmed)
+        } else if let index = snapshot.papers.firstIndex(where: { $0.id == canonicalID }), snapshot.papers[index].sourceCitation == nil {
+            snapshot.papers[index].sourceCitation = original
+        }
         var seen: Set<GraphEdge> = []
         snapshot.edges = snapshot.edges.map { edge in
             GraphEdge(source: edge.source == localID ? canonicalID : edge.source,

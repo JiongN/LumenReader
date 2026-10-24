@@ -25,10 +25,7 @@ import LumenKit
 ///
 /// ## 诚实边界
 ///
-/// - **多栏版面验不了**：本机拿不到可验证的双栏样本（把用户库里的文档渲染成位图、
-///   按列统计墨迹密度，中央剖面均匀、无栏沟 —— 全是单栏）。而 PDFKit 两个原语都不做
-///   分栏（见 `PDFLineExtractor` 的注释），所以多栏文档会把左右栏的行混进同一段。
-///   这一点如实写在 `docs/VERIFY.md`，不发明一个验不了的栏检测器。
+/// - 合成版面检查不替代真实复杂文献的阅读顺序核对，真实样本见 docs/VERIFY.md。
 /// - **本通道证明不了「译文读起来对不对」** —— 它只管分段边界。
 /// - **它不联网、不写盘、不碰用户的 PDF**（只 `PDFDocument(url:)` 只读打开）。
 @MainActor
@@ -148,14 +145,14 @@ enum ParagraphAudit {
             ("first full width line", CGRect(x: bodyLeft, y: 400, width: bodyWidth, height: lineHeight)),
             ("second full width line", CGRect(x: bodyLeft, y: 384, width: bodyWidth, height: lineHeight)),
             // 这一段只剩几个字 → 段末短行
-            ("short tail", CGRect(x: bodyLeft, y: 368, width: 120, height: lineHeight)),
+            ("short tail.", CGRect(x: bodyLeft, y: 368, width: 120, height: lineHeight)),
             ("next paragraph first line", CGRect(x: bodyLeft, y: 352, width: bodyWidth, height: lineHeight))
         ])
         // 反向对照：只把第三行改满行宽
         let withoutShort = linesOnPage(0, [
             ("first full width line", CGRect(x: bodyLeft, y: 400, width: bodyWidth, height: lineHeight)),
             ("second full width line", CGRect(x: bodyLeft, y: 384, width: bodyWidth, height: lineHeight)),
-            ("third full width line", CGRect(x: bodyLeft, y: 368, width: bodyWidth, height: lineHeight)),
+            ("short tail.", CGRect(x: bodyLeft, y: 368, width: bodyWidth, height: lineHeight)),
             ("next paragraph first line", CGRect(x: bodyLeft, y: 352, width: bodyWidth, height: lineHeight))
         ])
 
@@ -200,13 +197,17 @@ enum ParagraphAudit {
         let intact = PDFParagraphExtractor.paragraphs(
             from: linesOnPage(0, [wide] + narrow), pageSizes: [0: pageSize])
 
-        // 反向对照：窄栏块**内部真的出现一个短行**时必须照断 ——
-        // 否则「窄栏一律不拆」这种更糟的实现也能让上面那条通过。
+        // A short line only ends a paragraph when it also ends a sentence.
         let withInternalShortLine = PDFParagraphExtractor.paragraphs(
             from: linesOnPage(0, [
                 wide,
                 narrow[0],
                 narrow[1],
+                ("short.", CGRect(x: bodyLeft, y: 568, width: 100, height: lineHeight)),
+                ("abstract line four", CGRect(x: bodyLeft, y: 552, width: narrowWidth, height: lineHeight))
+            ]), pageSizes: [0: pageSize])
+        let incompleteTail = PDFParagraphExtractor.paragraphs(
+            from: linesOnPage(0, [wide, narrow[0], narrow[1],
                 ("short", CGRect(x: bodyLeft, y: 568, width: 100, height: lineHeight)),
                 ("abstract line four", CGRect(x: bodyLeft, y: 552, width: narrowWidth, height: lineHeight))
             ]), pageSizes: [0: pageSize])
@@ -225,12 +226,16 @@ enum ParagraphAudit {
               "得到 \(intact.count) 段")
         check("窄栏：那一块是 3 行（没有被逐行拆碎）", narrowBlock?.lineCount == 3,
               "得到 \(narrowBlock?.lineCount ?? -1) 行")
-        check("窄栏·反向对照：块内出现真短行时仍然断开（3 段）",
+        check("窄栏·反向对照：块内短行完整句末仍然断开（3 段）",
               withInternalShortLine.count == 3,
               "得到 \(withInternalShortLine.count) 段 —— 若不是 3，说明窄块被无条件保护了")
         check("窄栏·反向对照：断裂后新段只含 1 行",
               withInternalShortLine.last?.lineCount == 1,
               "得到 \(withInternalShortLine.last?.lineCount ?? -1) 行")
+        check("窄栏·不完整句：短末行不能拆断一句话", incompleteTail.count == 2,
+              "得到 \(incompleteTail.count) 段")
+        check("窄栏·不完整句：窄块保留全部 4 行", incompleteTail.last?.lineCount == 4,
+              "得到 \(incompleteTail.last?.lineCount ?? -1) 行")
         check("窄栏·夹具自证：该夹具确实满足旧的单条件判据（否则本组无鉴别力）",
               fixtureHasDiscriminatingPower,
               "窄块右端离整页右边界 \(Int(bodyWidth - narrowWidth))pt ≤ 阈值 \(Int(bodyWidth * (1 - options.shortLineFactor)))pt")
@@ -335,12 +340,8 @@ enum ParagraphAudit {
 
     // MARK: - 页眉 / 页脚
 
-    /// 两个条件都要满足才剔除（贴边 **且** 够短）；拿不到页尺寸就**不猜**。
-    ///
-    /// 三条断言互为对照：
-    /// - 贴边 + 短 → 剔除（这是功能本身）
-    /// - 贴边 + 满行宽 → **保留**（防「只按位置删」把正文首行一起删）
-    /// - 不传页尺寸 → 贴边短行也**保留**（防「拿一个猜的页高去删正文」）
+    /// Unknown edge text must survive; only repetition or numeric ornaments
+    /// establish furniture. Repeated headers have a separate fixture below.
     private static func assertFurniture(
         check: (String, Bool, String) -> Void,
         report: (String) -> Void
@@ -371,7 +372,7 @@ enum ParagraphAudit {
         report("页眉页脚：4 行（2 正文 + 页眉 + 页脚）→ 有页尺寸时留下 \(keptLines) 行；"
                + "不传页尺寸时留下 \(keptWithoutSizes) 行；满行宽的贴顶行留下 \(controlLines) 行")
 
-        check("页眉页脚：贴边且短的两行被剔除（只留 2 行正文）", keptLines == 2,
+        check("页眉页脚：没有重复证据的贴边短文本保留", keptLines == 4,
               "留下 \(keptLines) 行")
         check("页眉页脚：不传页尺寸时一行都不删（不猜）", keptWithoutSizes == 4,
               "留下 \(keptWithoutSizes) 行")
@@ -408,15 +409,7 @@ enum ParagraphAudit {
 
     // MARK: - 阅读顺序
 
-    /// 期刊首页「元数据墙标」剔除 + 摘要保留。
-    ///
-    /// 覆盖两类行为（这是修复下方标题摘要区被拆碎/混入元数据的能力）：
-    /// · **墙标整块剔除**：ARTICLE HISTORY / KEYWORDS / CONTACT 这类首行带大写墙标的
-    ///   元数据块，连同其内容行一起从输出里消失。
-    /// · **纯标签行剔除、内容保留**：ABSTRACT 独占一行时，只剔标签行，摘要正文
-    ///   合并成一段保留下来。
-    ///
-    /// 反向对照：正文里以小写 `abstract` 开头的普通段落不得误删（表驱动曾因此挂掉）。
+    /// 期刊首页的摘要、关键词及结构标签保留，不凭关键词删除整块原文。
     private static func assertMetadataWallLabels(
         check: (String, Bool, String) -> Void,
         report: (String) -> Void
@@ -426,17 +419,17 @@ enum ParagraphAudit {
             // 标题（应保留）
             ("When the prompting stops",
              CGRect(x: bodyLeft, y: 700, width: 400, height: lineHeight)),
-            // ABSTRACT 标签独占一行（只剔标签，摘要正文保留）
+            // ABSTRACT 标签及摘要正文均保留
             ("ABSTRACT", CGRect(x: bodyLeft, y: 660, width: 40, height: lineHeight)),
             ("Teachers are now encouraged to use generative AI",     // 摘要行1
              CGRect(x: bodyLeft, y: 648, width: 300, height: lineHeight)),
             ("for a range of administrative tasks",                   // 摘要行2
              CGRect(x: bodyLeft, y: 636, width: 300, height: lineHeight)),
-            // ARTICLE HISTORY 墙标块（整块剔除）
+            // ARTICLE HISTORY 元信息保留
             ("ARTICLE HISTORY", CGRect(x: bodyLeft + 300, y: 600, width: 70, height: lineHeight)),
             ("Received 7 April 2025", CGRect(x: bodyLeft + 300, y: 588, width: 80, height: lineHeight)),
             ("Accepted 16 July 2025", CGRect(x: bodyLeft + 300, y: 576, width: 80, height: lineHeight)),
-            // KEYWORDS 墙标块（整块剔除）
+            // KEYWORDS 元信息保留
             ("KEYWORDS", CGRect(x: bodyLeft + 300, y: 520, width: 50, height: lineHeight)),
             ("teachers; generative AI;", CGRect(x: bodyLeft + 300, y: 508, width: 90, height: lineHeight)),
             ("automation; work;",         CGRect(x: bodyLeft + 300, y: 496, width: 80, height: lineHeight)),
@@ -449,18 +442,16 @@ enum ParagraphAudit {
         let sizes = [0: pageSize]
         let paragraphs = PDFParagraphExtractor.paragraphs(from: fixture, pageSizes: sizes)
         let text = paragraphs.map({ $0.text }).joined(separator: " ◇ ")
-        report("元数据墙标：ABSTRACT 标签剔除留摘要 + ARTICLE HISTORY/KEYWORDS 整块剔除 → \(paragraphs.count) 段")
+        report("结构保留：摘要标签、ARTICLE HISTORY 与 KEYWORDS 不按关键词删除 → \(paragraphs.count) 段")
 
-        // 1. ARTICLE HISTORY / KEYWORDS 及其内容全部消失
-        check("元数据墙标：ARTICLE HISTORY 整块剔除",
-              !text.contains("ARTICLE HISTORY") && !text.contains("Received 7") && !text.contains("Accepted 16"),
+        check("结构保留：ARTICLE HISTORY 及其内容保留",
+              text.contains("ARTICLE HISTORY") && text.contains("Received 7") && text.contains("Accepted 16"),
               "结果：\(text)")
-        check("元数据墙标：KEYWORDS 整块剔除",
-              !text.contains("KEYWORDS") && !text.contains("generative AI;"),
+        check("结构保留：KEYWORDS 及其内容保留",
+              text.contains("KEYWORDS") && text.contains("generative AI;"),
               "结果：\(text)")
-        // 2. ABSTRACT 标签行被剔，但摘要正文保留且合并成一段（含两行内容）
-        check("元数据墙标：ABSTRACT 标签行被剔除",
-              !text.contains("ABSTRACT"),
+        check("结构保留：ABSTRACT 标签保留",
+              text.contains("ABSTRACT"),
               "结果：\(text)")
         check("元数据墙标：摘要正文保留且两行合并成一段",
               text.contains("Teachers are now") && text.contains("administrative tasks")
@@ -795,6 +786,8 @@ enum ParagraphAudit {
             for i in 1..<max(onPage.count, 1) {
                 let previous = onPage[i - 1]
                 let current = onPage[i]
+                // Reading the next column restarts near its top; this is not inverted order.
+                if current.bounds.minX >= previous.bounds.maxX { continue }
                 // PDF 原点在左下角：y 越大越靠上。后出的段若比前一段还靠上，
                 // 说明它的阅读顺序排晚了（译文块会插错位置）。
                 let rise = current.bounds.maxY - previous.bounds.maxY
@@ -819,7 +812,7 @@ enum ParagraphAudit {
             report("  同页轻微咬合（≤\(Int(orderTolerance))pt，判为排版常态）：\(orderOverlaps.count) 处")
             for item in orderOverlaps { report("    · \(item)") }
         }
-        check("真机：同一页内段落自上而下排列（容差 \(Int(orderTolerance))pt）",
+        check("真机：同页相交栏内段落自上而下排列（容差 \(Int(orderTolerance))pt）",
               orderViolations.isEmpty,
               orderViolations.joined(separator: "；"))
 

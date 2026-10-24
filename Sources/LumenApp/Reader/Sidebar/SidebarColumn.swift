@@ -13,6 +13,7 @@ struct SidebarColumn: View {
     @EnvironmentObject private var session: ReaderSession
 
     @State private var query: String = ""
+    @FocusState private var searchFocused: Bool
 
     var body: some View {
         // 卡顿自检：body 每次求值都记一次（不能做成 ViewModifier——见 JankAudit 注释）。
@@ -50,7 +51,10 @@ struct SidebarColumn: View {
                     ThumbnailPane()
                         .layoutProbe("sidebarPane_thumbnails")
                 case .translation:
-                    if let controller = bridge.pdfTranslationController {
+                    if bridge.selectionTranslationMode, bridge.epubTranslationController != nil {
+                        PDFTranslationPane(controller: bridge.selectedTextTranslationController, selectionOnly: true)
+                            .layoutProbe("sidebarPane_translation")
+                    } else if let controller = bridge.pdfTranslationController {
                         PDFTranslationPane(controller: controller)
                             .layoutProbe("sidebarPane_translation")
                     } else if let controller = bridge.epubTranslationController {
@@ -59,8 +63,7 @@ struct SidebarColumn: View {
                     } else {
                         SidebarEmptyState(
                             icon: "character.book.closed",
-                            title: "正在准备翻译",
-                            message: "文档载入完成后即可使用。"
+                            title: "正在准备翻译"
                         )
                         .layoutProbe("sidebarPane_translation")
                     }
@@ -89,8 +92,7 @@ struct SidebarColumn: View {
         if bridge.outline.isEmpty {
             SidebarEmptyState(
                 icon: "list.bullet.indent",
-                title: "此文档没有目录",
-                message: "PDF 未内嵌书签，或 EPUB 缺少 nav 文档。"
+                title: "此文档没有目录"
             )
         } else {
             ScrollView {
@@ -117,6 +119,7 @@ struct SidebarColumn: View {
                 TextField("在文档内查找", text: $query)
                     .textFieldStyle(.plain)
                     .font(DS.Typo.body)
+                    .focused($searchFocused)
                     .onSubmit(runSearch)
                 if !query.isEmpty {
                     Button {
@@ -155,8 +158,7 @@ struct SidebarColumn: View {
             } else if bridge.searchResults.isEmpty {
                 SidebarEmptyState(
                     icon: "magnifyingglass",
-                    title: query.isEmpty ? "输入关键词开始查找" : "没有匹配结果",
-                    message: query.isEmpty ? "回车执行查找。" : "换个词试试，查找不区分大小写。"
+                    title: query.isEmpty ? "查找正文" : "没有匹配结果"
                 )
             } else {
                 ScrollView {
@@ -177,6 +179,12 @@ struct SidebarColumn: View {
                     .padding(.bottom, DS.Space.m)
                 }
             }
+        }
+        .task(id: bridge.searchFocusRevision) {
+            // Wait for panel insertion/transition before assigning the responder.
+            try? await Task.sleep(for: .milliseconds(250))
+            guard !Task.isCancelled else { return }
+            searchFocused = true
         }
     }
 
@@ -300,9 +308,13 @@ struct AnnotationsPane: View {
     /// 正在编辑的批注。编辑态由面板统一持有而不是各行自持：
     /// 「新建」要直接进入编辑态，而新建的行要等刷新后才出现，行内的 @State 接不住。
     @State private var editingID: String?
-    /// 「扩到整行」的确认框。它要改用户的 PDF 文件，必须先说清代价再动手。
-    @State private var showingNormalizeConfirm = false
     @State private var showingCompactConfirm = false
+    @State private var showsComments = false
+
+    private var visibleItems: [AnnotationItem] {
+        items.filter { showsComments ? (!$0.note.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !$0.hasHighlight)
+                                    : $0.hasHighlight }
+    }
 
     var body: some View {
         Group {
@@ -322,18 +334,6 @@ struct AnnotationsPane: View {
         // 两条路径都会把 `annotationRevision` 加一。
         .task(id: bridge.annotationRevision) { await reload() }
         .confirmationDialog(
-            "把 \(truncatedCount) 条高亮的范围扩到整行？",
-            isPresented: $showingNormalizeConfirm,
-            titleVisibility: .visible
-        ) {
-            Button("扩到整行并写回 PDF") { normalizeRows() }
-            Button("取消", role: .cancel) {}
-        } message: {
-            Text("只加宽本应用画的高亮（把「只圈住划中的几个字」扩成整行），"
-                 + "不改动任何文字，也不碰 Preview / Acrobat 画的批注。"
-                 + "会直接写回这个 PDF 文件；文件很大时可能需要一两秒。")
-        }
-        .confirmationDialog(
             "收紧多行高亮色块？",
             isPresented: $showingCompactConfirm,
             titleVisibility: .visible
@@ -349,6 +349,7 @@ struct AnnotationsPane: View {
     // MARK: 头部（计数 + 新建）
 
     private var header: some View {
+        VStack(spacing: DS.Space.s) {
         HStack(spacing: DS.Space.xs) {
             Text("\(items.count) 条批注")
                 .font(DS.Typo.caption)
@@ -363,12 +364,19 @@ struct AnnotationsPane: View {
             .buttonStyle(.plain)
             .foregroundStyle(DS.Palette.accent)
             .help("在当前阅读位置加一条空白批注")
-            if bridge.compactAnnotationRows != nil {
-                Button("收紧高亮") { showingCompactConfirm = true }
-                    .buttonStyle(.plain)
-                    .foregroundStyle(DS.Palette.accent)
-                    .help("修正部分 PDF 中高亮吃进整段行距的问题")
-            }
+            Menu {
+                if bridge.compactAnnotationRows != nil {
+                    Button("收紧高亮行距") { showingCompactConfirm = true }
+                }
+            } label: { Image(systemName: "ellipsis") }
+                .menuStyle(.borderlessButton).frame(width: 24)
+        }
+        Picker("批注分类", selection: $showsComments) {
+            Text("高亮 · \(items.filter(\.hasHighlight).count)").tag(false)
+            Text("评论 · \(items.filter { !$0.note.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !$0.hasHighlight }.count)").tag(true)
+        }
+        .pickerStyle(.segmented)
+        .labelsHidden()
         }
         .padding(.horizontal, DS.Space.s)
         .padding(.vertical, DS.Space.s)
@@ -380,9 +388,7 @@ struct AnnotationsPane: View {
             Divider().overlay(DS.Palette.separator)
             SidebarEmptyState(
                 icon: "square.and.pencil",
-                title: "还没有批注",
-                message: "在正文里划选文字，点浮条上的「高亮」或「批注」即可标记；"
-                    + "点正文里的高亮，这里会定位到对应条目。"
+                title: "还没有批注"
             )
         }
     }
@@ -392,12 +398,16 @@ struct AnnotationsPane: View {
             header
             Divider().overlay(DS.Palette.separator)
 
-            if truncatedCount > 0 { truncationNotice }
-
             ScrollViewReader { proxy in
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: DS.Space.xs) {
-                        ForEach(items) { item in
+                        if visibleItems.isEmpty {
+                            Text(showsComments ? "还没有评论" : "还没有高亮")
+                                .font(DS.Typo.ui(size: 13))
+                                .foregroundStyle(DS.Palette.textSecondary)
+                                .padding(DS.Space.m)
+                        }
+                        ForEach(visibleItems) { item in
                             AnnotationRow(
                                 item: item,
                                 isFocused: bridge.focusedAnnotationID == item.id,
@@ -416,6 +426,10 @@ struct AnnotationsPane: View {
                 // 聚焦值会被 reset 清掉，滚动的发起只认「从 nil 变为有值」。
                 .onChange(of: bridge.annotationFocusRevision, initial: true) { _, _ in
                     guard let id = bridge.focusedAnnotationID else { return }
+                    if !visibleItems.contains(where: { $0.id == id }),
+                       let item = items.first(where: { $0.id == id }) {
+                        showsComments = !item.hasHighlight
+                    }
                     withAnimation(DS.Motion.quick) { proxy.scrollTo(id, anchor: .center) }
                 }
                 .onChange(of: items.map(\.id)) { _, _ in
@@ -432,25 +446,10 @@ struct AnnotationsPane: View {
                 return
             }
             await reload()
+            showsComments = true
             bridge.focusedAnnotationID = item.id
             editingID = item.id
         }
-    }
-
-    /// 「文件里存的还是半行」的条数。为 0 时整条提示不出现——
-    /// 修好之后它自己消失，不需要用户去猜这个入口还有没有用。
-    private var truncatedCount: Int { items.filter(\.truncated).count }
-
-    /// 把文件里的半行矩形扩到整行（会改用户的 PDF，所以先弹确认）。
-    private func normalizeRows() {
-        guard let normalize = bridge.normalizeAnnotationRows else { return }
-        let changed = normalize()
-        guard changed > 0 else {
-            state.showToast("没有需要修正的高亮", isError: true)
-            return
-        }
-        // 清单由 `annotationRevision` 触发重载（写盘成功时已自增），这里只报结果。
-        state.showToast("已把 \(changed) 条高亮扩到整行并写回 PDF")
     }
 
     private func compactRows() {
@@ -465,41 +464,14 @@ struct AnnotationsPane: View {
         let loaded = await provider()
         guard !Task.isCancelled else { return }
         items = loaded
+        if let id = bridge.annotationEditRequestID, items.contains(where: { $0.id == id }) {
+            showsComments = true
+            editingID = id
+            bridge.annotationEditRequestID = nil
+        }
         isLoading = false
     }
 
-    /// 「文件里的高亮还是半行」的提示条。
-    ///
-    /// 为什么要露出这件事：列表里的引文**已经**按整行显示（读取侧补算了），
-    /// 所以用户看不出文件里存的其实是半行——直到他用系统「预览」打开同一个 PDF。
-    /// 与其让这个差异在别处暴露，不如在这里说清并给出唯一的修正入口。
-    /// 只在真有这类批注时出现，修完自己消失。
-    private var truncationNotice: some View {
-        HStack(alignment: .top, spacing: DS.Space.xs) {
-            Image(systemName: "exclamationmark.triangle")
-                .font(DS.Typo.ui(size: 10, weight: .semibold))
-                .foregroundStyle(DS.Palette.warning)
-                .padding(.top, 1)
-            VStack(alignment: .leading, spacing: 2) {
-                Text("\(truncatedCount) 条高亮只圈住了划中的文字")
-                    .font(DS.Typo.ui(size: 10.5, weight: .medium))
-                    .foregroundStyle(DS.Palette.textPrimary)
-                Text("列表已按整行显示；文件里存的仍是半行")
-                    .font(DS.Typo.ui(size: 10))
-                    .foregroundStyle(DS.Palette.textTertiary)
-            }
-            Spacer(minLength: 0)
-            Button("扩到整行") { showingNormalizeConfirm = true }
-                .buttonStyle(.plain)
-                .font(DS.Typo.ui(size: 10.5, weight: .semibold))
-                .foregroundStyle(DS.Palette.accent)
-                .fixedSize()
-                .help("把文件里这些高亮的范围改宽到整行（会写回 PDF）")
-        }
-        .padding(.horizontal, DS.Space.s)
-        .padding(.vertical, DS.Space.xs)
-        .background(DS.Palette.accentSoft)
-    }
 }
 
 // MARK: 批注行
@@ -533,10 +505,9 @@ struct AnnotationRow: View {
                 // 只有图标差异时，用户看不出「清单里这条对应页面上哪一块颜色」，
                 // 也容易把便签误读成高亮。色块 + 文字是最省空间的消歧方式。
                 if item.hasHighlight {
-                    Circle()
-                        .fill(highlightColor)
-                        .frame(width: 9, height: 9)
-                        .overlay(Circle().strokeBorder(DS.Palette.separator, lineWidth: 0.5))
+                    Image(systemName: "highlighter")
+                        .foregroundStyle(highlightColor)
+                        .font(DS.Typo.ui(size: 14, weight: .semibold))
                         .help(item.highlightHex.map { "高亮 · \($0)" } ?? "高亮")
                         .accessibilityLabel("高亮")
                 } else {
@@ -548,7 +519,7 @@ struct AnnotationRow: View {
                         .foregroundStyle(DS.Palette.textTertiary)
                 }
                 Text(item.locator.displayLabel(chapterTitles: bridge.outline.map(\.title)))
-                    .font(DS.Typo.ui(size: 10, weight: .semibold))
+                    .font(DS.Typo.ui(size: 13, weight: .semibold))
                     .lineLimit(1)
                 Spacer(minLength: 0)
                 if isHovering && !isInEditMode {
@@ -581,11 +552,15 @@ struct AnnotationRow: View {
             // 引文（划了哪段原文）。有高亮的批注才可能有引文。
             if !item.quote.isEmpty {
                 Text(item.quote)
-                    .font(DS.Typo.ui(size: 11))
-                    .foregroundStyle(DS.Palette.textTertiary)
+                    .font(DS.Typo.ui(size: 13))
+                    .foregroundStyle(DS.Palette.textSecondary)
                     .lineLimit(3)
                     .multilineTextAlignment(.leading)
                     .fixedSize(horizontal: false, vertical: true)
+                    .padding(.leading, 10)
+                    .overlay(alignment: .leading) {
+                        RoundedRectangle(cornerRadius: 1.5).fill(highlightColor).frame(width: 3)
+                    }
             }
 
             // 批注正文 / 编辑器
@@ -628,8 +603,8 @@ struct AnnotationRow: View {
                 }
             } else if !item.note.isEmpty {
                 Text(item.note)
-                    .font(DS.Typo.ui(size: 11.5))
-                    .foregroundStyle(DS.Palette.textSecondary)
+                    .font(DS.Typo.ui(size: 13, weight: .medium))
+                    .foregroundStyle(DS.Palette.textPrimary)
                     .lineLimit(6)
                     .multilineTextAlignment(.leading)
                     .fixedSize(horizontal: false, vertical: true)
@@ -732,7 +707,6 @@ private struct HoverActionButton: View {
 struct SidebarEmptyState: View {
     let icon: String
     let title: String
-    let message: String
 
     var body: some View {
         VStack(spacing: DS.Space.s) {
@@ -742,11 +716,6 @@ struct SidebarEmptyState: View {
             Text(title)
                 .font(DS.Typo.callout)
                 .foregroundStyle(DS.Palette.textSecondary)
-            Text(message)
-                .font(DS.Typo.ui(size: 11))
-                .foregroundStyle(DS.Palette.textTertiary)
-                .multilineTextAlignment(.center)
-                .fixedSize(horizontal: false, vertical: true)
         }
         .padding(DS.Space.xl)
         .frame(maxWidth: .infinity, maxHeight: .infinity)

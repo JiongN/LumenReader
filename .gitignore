@@ -38,3 +38,7 @@ docs/verification/
 
 # 可分发的版本包、校验和与构建信息
 releases/
+
+# Python diagnostic caches
+__pycache__/
+*.pyc

@@ -162,7 +162,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        if PDFPendingSaves.whenDrained({ sender.reply(toApplicationShouldTerminate: true) }) {
+        let reply: @MainActor @Sendable () -> Void = { sender.reply(toApplicationShouldTerminate: true) }
+        if PDFPendingSaves.whenDrained({
+            if !ConversationStore.whenPersistenceDrained(reply) { reply() }
+        }) {
+            return .terminateLater
+        }
+        if ConversationStore.whenPersistenceDrained(reply) {
             return .terminateLater
         }
         return .terminateNow

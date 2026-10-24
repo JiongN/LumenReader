@@ -30,4 +30,13 @@ enum UIFontGate {
         }
         return Font.custom(family, size: size).weight(weight)
     }
+
+    static func nativeFont(size: CGFloat, weight: NSFont.Weight = .regular, monospaced: Bool = false) -> NSFont {
+        if monospaced { return .monospacedSystemFont(ofSize: size, weight: weight) }
+        guard let familyName, let base = NSFont(name: familyName, size: size) else {
+            return .systemFont(ofSize: size, weight: weight)
+        }
+        let descriptor = base.fontDescriptor.addingAttributes([.traits: [NSFontDescriptor.TraitKey.weight: weight.rawValue]])
+        return NSFont(descriptor: descriptor, size: size) ?? base
+    }
 }

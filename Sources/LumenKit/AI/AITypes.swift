@@ -1,5 +1,14 @@
 import Foundation
 
+public struct AIImage: Sendable, Equatable {
+    public var data: Data
+    public var mimeType: String
+    public var label: String
+    public init(data: Data, mimeType: String = "image/jpeg", label: String) {
+        self.data = data; self.mimeType = mimeType; self.label = label
+    }
+}
+
 // MARK: - 消息
 
 public struct AIMessage: Sendable, Equatable {
@@ -12,10 +21,12 @@ public struct AIMessage: Sendable, Equatable {
 
     public let role: Role
     public let content: String
+    public let images: [AIImage]
 
-    public init(role: Role, content: String) {
+    public init(role: Role, content: String, images: [AIImage] = []) {
         self.role = role
         self.content = content
+        self.images = images
     }
 
     public static func system(_ content: String) -> AIMessage { AIMessage(role: .system, content: content) }
@@ -32,6 +43,17 @@ public enum AIStreamEvent: Sendable, Equatable {
     case reasoning(String)
     /// 流结束
     case finished(reason: String?)
+    case usage(AIUsage)
+}
+
+public struct AIUsage: Codable, Sendable, Equatable {
+    public var input: Int?
+    public var output: Int?
+    public var cached: Int?
+
+    public init(input: Int? = nil, output: Int? = nil, cached: Int? = nil) {
+        self.input = input; self.output = output; self.cached = cached
+    }
 }
 
 // MARK: - 错误
@@ -42,22 +64,43 @@ public enum AIError: LocalizedError, Equatable {
     case invalidResponse
     case emptyResponse
     case http(status: Int, message: String)
+    case preparation(String)
+    case answerValidation(String)
     case cancelled
+    case streamTimeout(String)
+    case responseTooLarge
+    case incompleteResponse
+    case outputTruncated
+    case unsupportedOutput
 
     public var errorDescription: String? {
         switch self {
         case .missingAPIKey:
             return "尚未配置 API 密钥。请在「设置 → AI」里填入。"
-        case .invalidBaseURL(let value):
-            return "API 基址不合法：\(value)"
+        case .invalidBaseURL:
+            return "API 基址不合法。请使用不含用户名、密码、查询参数或片段的 HTTP(S) 地址。"
         case .invalidResponse:
             return "服务端返回了无法解析的响应。"
         case .emptyResponse:
             return "模型没有返回任何内容。"
         case .cancelled:
             return "已取消。"
+        case .streamTimeout(let stage):
+            return "\(stage)，已停止等待。可重试或换模型；部分回答不进入后续对话。"
+        case .responseTooLarge:
+            return "模型输出超过安全上限，已停止。请缩小范围或要求更简洁的结果。"
+        case .incompleteResponse:
+            return "连接在回答完成前关闭。部分回答已保留，但不会用于后续对话。"
+        case .outputTruncated:
+            return "服务端因长度上限截断了输出（finish_reason=length）。请提高最大输出或缩小回答范围；推理模型的思考也可能占用输出预算。"
+        case .unsupportedOutput:
+            return "当前接口未接入绘图或工具调用。思维导图请使用专用模式；图片生成暂不支持。"
         case .http(let status, let message):
             return Self.describe(status: status, message: message)
+        case .preparation(let message):
+            return "全文准备未完成：\(message)"
+        case .answerValidation(let message):
+            return message
         }
     }
 
@@ -142,6 +185,8 @@ public extension AIProvider {
             case .reasoning:
                 continue
             case .finished:
+                continue
+            case .usage:
                 continue
             }
         }

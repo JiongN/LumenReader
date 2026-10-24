@@ -44,8 +44,7 @@ public struct EPUBChapter: Sendable, Identifiable, Equatable {
 /// 解包策略：用系统 `ditto` 把 EPUB（本质是 zip）解到缓存目录，而不是自己解析 zip。
 /// 这样有两个好处——零第三方依赖；WebKit 能直接用 `loadFileURL` 加载章节 XHTML，
 /// 图片、CSS、内嵌字体这些相对资源全部由 WebKit 原生解析，不需要我们拦截资源请求。
-// Immutable document metadata can cross actors. The only mutable member is the
-// chapter text cache, whose every access is protected by cacheLock.
+// Metadata is immutable; NSCache synchronizes access to derived chapter text.
 public final class EPUBDocumentSource: DocumentSource, @unchecked Sendable {
 
     public let kind: DocumentKind = .epub
@@ -56,9 +55,12 @@ public final class EPUBDocumentSource: DocumentSource, @unchecked Sendable {
     public let metadata: DocumentMetadata
     public let outline: [OutlineNode]
 
-    /// 章节纯文本缓存。全书检索与 AI 取上下文都会反复读，缓存一次值得。
-    private var textCache: [Int: String] = [:]
-    private let cacheLock = NSLock()
+    private let textCache: NSCache<NSNumber, NSString> = {
+        let cache = NSCache<NSNumber, NSString>()
+        cache.countLimit = 8
+        cache.totalCostLimit = 16 * 1024 * 1024
+        return cache
+    }()
 
     // MARK: - 打开
 
@@ -67,11 +69,12 @@ public final class EPUBDocumentSource: DocumentSource, @unchecked Sendable {
         let task = Task.detached(priority: .userInitiated) {
             try Task.checkCancellation()
             let attributes = try FileManager.default.attributesOfItem(atPath: source.path)
-            let revision = "\(attributes[.size] ?? 0)-\(attributes[.modificationDate] ?? Date.distantPast)"
+            let modified = (attributes[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
+            let revision = "v2-\(attributes[.size] ?? 0)-\(modified)-\(attributes[.systemFileNumber] ?? 0)"
             let destination = AppPaths.epubExtractionDirectory(forPath: source.path + "|" + revision)
-            try extract(epub: source, to: destination)
+            let document = try extract(epub: source, to: destination)
             try Task.checkCancellation()
-            return try EPUBDocumentSource(rootURL: destination)
+            return document
         }
         return try await withTaskCancellationHandler {
             let result = try await task.value
@@ -85,44 +88,36 @@ public final class EPUBDocumentSource: DocumentSource, @unchecked Sendable {
     private static let extractionLock = NSLock()
 
     /// 同一进程内串行解包；以文件大小和修改时间区分缓存版本，避免覆盖仍在阅读的目录。
-    private static func extract(epub: URL, to directory: URL) throws {
-        extractionLock.lock()
+    private static func extract(epub: URL, to directory: URL) throws -> EPUBDocumentSource {
+        while !extractionLock.try() {
+            try Task.checkCancellation()
+            Thread.sleep(forTimeInterval: 0.02)
+        }
         defer { extractionLock.unlock() }
         try Task.checkCancellation()
         let container = directory.appendingPathComponent("META-INF/container.xml")
         let ready = directory.appendingPathComponent(".lumen-extracted")
         if FileManager.default.fileExists(atPath: ready.path) {
-            return
+            return try EPUBDocumentSource(rootURL: directory)
         }
 
         try EPUBArchiveSafety.validate(epub)
         let manager = FileManager.default
         try? manager.removeItem(at: directory)
         try manager.createDirectory(at: directory, withIntermediateDirectories: true)
-
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/ditto")
-        process.arguments = ["-x", "-k", epub.path, directory.path]
-
-        let errorPipe = Pipe()
-        process.standardError = errorPipe
-        process.standardOutput = FileHandle.nullDevice
-
-        try process.run()
-        let errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
-        process.waitUntilExit()
-
-        guard process.terminationStatus == 0 else {
-            let detail = String(data: errorData, encoding: .utf8)?
-                .trimmingCharacters(in: .whitespacesAndNewlines) ?? "ditto 退出码 \(process.terminationStatus)"
-            throw EPUBError.extractionFailed(detail.isEmpty ? "ditto 退出码 \(process.terminationStatus)" : detail)
-        }
+        var complete = false
+        defer { if !complete { try? manager.removeItem(at: directory) } }
+        try EPUBExtractionProcess.run(executable: URL(fileURLWithPath: "/usr/bin/ditto"),
+                                      arguments: ["-x", "-k", epub.path, directory.path])
 
         guard manager.fileExists(atPath: container.path) else {
             throw EPUBError.missingContainer
         }
-        _ = try EPUBDocumentSource(rootURL: directory)
+        let document = try EPUBDocumentSource(rootURL: directory)
+        try Task.checkCancellation()
         try Data().write(to: ready, options: .atomic)
+        complete = true
+        return document
     }
 
     /// Resolve encoded relative paths and symlinks before reading any package resource.
@@ -350,17 +345,15 @@ public final class EPUBDocumentSource: DocumentSource, @unchecked Sendable {
             indexByPath[normalizePath(chapter.href)] = chapter.index
         }
 
-        var nodes: [OutlineNode] = []
         var cursor = 0
         // 从最浅的一层开始递归，这样即使目录整体从 depth=1 起算也能正确成树
         let baseDepth = raw.map(\.depth).min() ?? 0
-        nodes = buildTree(
+        return buildTree(
             raw: raw,
             cursor: &cursor,
             depth: baseDepth,
             indexByPath: indexByPath
         )
-        return nodes
     }
 
     /// 用递归下降把「前序遍历 + 深度」的扁平列表还原成树。
@@ -405,21 +398,15 @@ public final class EPUBDocumentSource: DocumentSource, @unchecked Sendable {
     // MARK: - 文本提取
 
     private func plainText(chapterIndex: Int) -> String {
-        cacheLock.lock()
-        if let cached = textCache[chapterIndex] {
-            cacheLock.unlock()
-            return cached
-        }
-        cacheLock.unlock()
+        let key = NSNumber(value: chapterIndex)
+        if let cached = textCache.object(forKey: key) { return cached as String }
 
         guard chapterIndex >= 0, chapterIndex < chapters.count else { return "" }
         guard let html = Self.loadString(chapters[chapterIndex].fileURL) else { return "" }
 
         let text = Self.htmlToPlainText(html)
 
-        cacheLock.lock()
-        textCache[chapterIndex] = text
-        cacheLock.unlock()
+        textCache.setObject(text as NSString, forKey: key, cost: text.utf16.count * 2)
         return text
     }
 
@@ -531,9 +518,10 @@ public final class EPUBDocumentSource: DocumentSource, @unchecked Sendable {
 
     public func text(around locator: DocumentLocator, radius: Int) -> String {
         let index = locator.chapterIndex
-        guard index >= 0 else { return "" }
-        let lower = max(0, index - radius)
-        let upper = min(chapters.count - 1, index + radius)
+        guard chapters.indices.contains(index), radius >= 0 else { return "" }
+        let boundedRadius = min(radius, chapters.count)
+        let lower = max(0, index - boundedRadius)
+        let upper = min(chapters.count - 1, index + boundedRadius)
         guard lower <= upper else { return "" }
         return (lower...upper).map { plainText(chapterIndex: $0) }.joined(separator: "\n\n")
     }
@@ -544,7 +532,7 @@ public final class EPUBDocumentSource: DocumentSource, @unchecked Sendable {
 
     public func search(_ query: String, limit: Int) -> [SearchHit] {
         let needle = query.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !needle.isEmpty else { return [] }
+        guard !needle.isEmpty, limit > 0 else { return [] }
 
         var hits: [SearchHit] = []
         for index in 0..<chapters.count {

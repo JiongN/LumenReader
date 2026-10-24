@@ -5,7 +5,8 @@ let package = Package(
     name: "LumenReader",
     platforms: [.macOS(.v15)],
     products: [
-        .executable(name: "Lumen", targets: ["LumenApp"])
+        .executable(name: "Lumen", targets: ["LumenApp"]),
+        .executable(name: "LumenPDFWorker", targets: ["LumenPDFWorker"])
     ],
     targets: [
         // 核心引擎层：解析、AI、检索、OCR、TTS。不依赖 SwiftUI，可独立测试。
@@ -21,6 +22,8 @@ let package = Package(
             path: "Sources/LumenApp",
             swiftSettings: [.swiftLanguageMode(.v6)]
         ),
+        .executableTarget(name: "LumenPDFWorker", dependencies: ["LumenKit"],
+            path: "Sources/LumenPDFWorker", swiftSettings: [.swiftLanguageMode(.v6)]),
         // 引擎层回归测试。运行：swift test --disable-sandbox
         .testTarget(
             name: "LumenKitTests",

@@ -20,10 +20,12 @@ public struct OCRLine: Sendable, Equatable {
 public struct OCRPageResult: Sendable, Equatable {
     public let text: String
     public let lines: [OCRLine]
+    public let confidenceIsKnown: Bool
 
-    public init(text: String, lines: [OCRLine]) {
+    public init(text: String, lines: [OCRLine], confidenceIsKnown: Bool = true) {
         self.text = text
         self.lines = lines
+        self.confidenceIsKnown = confidenceIsKnown
     }
 
     public var isEmpty: Bool {

@@ -10,6 +10,7 @@ struct TranslationTests {
         #expect(TranslationEngineCatalog.all.map(\.id) == [
             AppleSystemTranslation.engineID,
             MicrosoftTranslationEngine.engineID,
+            OfficialTranslationEngine.engineID,
             LLMTranslation.engineID,
         ])
         #expect(TranslationEngineCatalog.engine(for: AppleSystemTranslation.engineID) == nil)

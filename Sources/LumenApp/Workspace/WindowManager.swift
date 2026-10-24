@@ -314,6 +314,12 @@ final class WindowManager: ObservableObject {
                 x: sourceFrame.origin.x + 60,
                 y: sourceFrame.origin.y - 60
             )
+            if let desktop = workspace.window?.screen?.visibleFrame {
+                frame.size.width = min(frame.width, desktop.width)
+                frame.size.height = min(frame.height, desktop.height)
+                frame.origin.x = min(max(frame.minX, desktop.minX), desktop.maxX - frame.width)
+                frame.origin.y = min(max(frame.minY, desktop.minY), desktop.maxY - frame.height)
+            }
             newWindow.setFrame(frame, display: true, animate: false)
         }
     }
@@ -327,18 +333,18 @@ final class LumenWindowController: NSWindowController, NSWindowDelegate {
 
     let workspace: AppState
     private var titleSync: AnyCancellable?
+    private var previousWindowFrame: NSRect?
 
     init(workspace: AppState) {
         self.workspace = workspace
 
-        // 新窗口默认铺满当前桌面的可用宽度；高度保留原来的 860pt 上限。
+        // 新窗口默认铺满当前桌面的可用区域。
         // 使用 visibleFrame 避开侧边 Dock，并让多显示器各按所在屏幕计算。
         let desktop = (NSScreen.main ?? NSScreen.screens.first)?.visibleFrame
             ?? NSRect(x: 0, y: 0, width: 1340, height: 860)
-        let defaultHeight = min(860, desktop.height)
 
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: desktop.width, height: defaultHeight),
+            contentRect: desktop,
             styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
             backing: .buffered,
             defer: false
@@ -377,14 +383,13 @@ final class LumenWindowController: NSWindowController, NSWindowDelegate {
         // 装上托管视图后，自动布局会按内容的最小宽高把窗口收窄到 minSize，
         // 所以默认尺寸必须在这之后再显式设一次；按窗口外框计算，确保
         // 实际左右边界与桌面可用区域一致，而非只让内容区达到桌面宽度。
-        window.setFrame(NSRect(x: desktop.minX,
-                               y: desktop.midY - defaultHeight / 2,
-                               width: desktop.width,
-                               height: defaultHeight), display: true)
+        window.setFrame(desktop, display: true)
+        WindowChrome.alignTrafficLights(window)
         if LaunchOptions.layoutReport {
             NSLog("%@", "[Lumen][window-default] desktopWidth=\(Int(desktop.width)) "
                   + "windowWidth=\(Int(window.frame.width)) "
-                  + "pass=\(abs(window.frame.width - desktop.width) < 1)")
+                  + "desktopHeight=\(Int(desktop.height)) windowHeight=\(Int(window.frame.height)) "
+                  + "pass=\(abs(window.frame.width - desktop.width) < 1 && abs(window.frame.height - desktop.height) < 1)")
         }
 
         workspace.attach(window: window)
@@ -404,7 +409,21 @@ final class LumenWindowController: NSWindowController, NSWindowDelegate {
     }
 
     func windowDidBecomeKey(_ notification: Notification) {
+        if let window { WindowChrome.alignTrafficLights(window) }
         WindowManager.shared.activate(workspace)
+    }
+
+    func windowDidResize(_ notification: Notification) {
+        if let window { WindowChrome.alignTrafficLights(window) }
+    }
+
+    func toggleFitToDesktop() {
+        guard let window else { return }
+        let bridge = workspace.activeSession?.bridge
+        bridge?.setPanelResizing?(true)
+        WindowChrome.toggleFit(window, previousFrame: &previousWindowFrame)
+        // Restore the reading anchor after SwiftUI has applied the new container size.
+        DispatchQueue.main.async { bridge?.setPanelResizing?(false) }
     }
 
     func windowWillClose(_ notification: Notification) {

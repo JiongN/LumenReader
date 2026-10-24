@@ -102,6 +102,7 @@ enum AnnotationAudit {
             body: "自检批注：这一条要锚回原文，不能退回页面便签。"
         )
         check("页面批注写入成功（返回 true）", noteOK)
+        await controller.waitForPendingSaves()
         logInventory(label: "写完页面批注后", of: controller, url: copy)
 
         // ③ 锚回：磁盘上的文件里，这一页必须有一条**高亮**挂在与锚文本同一行上。
@@ -134,6 +135,7 @@ enum AnnotationAudit {
         // ⑤ 删除：删掉一条，文件里的条数必须跟着少
         if let victim = listed.first {
             let deleted = controller.deleteAnnotation(id: victim.id)
+            await controller.waitForPendingSaves()
             let afterDelete = annotationCount(in: copy)
             NSLog("%@", "[Lumen][annotate] 删除一条后重新打开，批注数 = \(afterDelete)")
             check("删除返回成功", deleted)
@@ -151,6 +153,7 @@ enum AnnotationAudit {
             let updated = controller.updateNote(id: target.id, body: newBody)
             check("编辑批注返回成功", updated)
             if updated {
+                await controller.waitForPendingSaves()
                 let bodyNow = annotationContents(in: copy, id: target.id)
                 check("编辑后的正文写进了文件", bodyNow == newBody,
                       "文件里 = \(bodyNow.prefix(40).debugDescription)")
@@ -169,6 +172,7 @@ enum AnnotationAudit {
         // 只按时间戳生成 id 会撞车，ForEach 撞上重复 id 的行为是未定义的。
         let beforeAdd = annotationCount(in: copy)
         if controller.addPageNoteAtCurrentPosition() != nil {
+            await controller.waitForPendingSaves()
             let afterAdd = annotationCount(in: copy)
             check("新建批注写进文件", afterAdd == beforeAdd + 1, "\(beforeAdd) → \(afterAdd)")
             let all = await controller.annotationsList()
@@ -188,6 +192,7 @@ enum AnnotationAudit {
 
         // ⑫ 历史遗留的「半行」批注：读取侧补算 + 一键把文件里的矩形改宽
         await assertLegacyRowWidening(controller: controller, pageIndex: targetPage, check: check)
+        await controller.waitForPendingSaves()
 
         NSLog("%@", "[Lumen][annotate] 自检：通过 \(passed) 项，失败 \(failures.count) 项"
             + (failures.isEmpty ? " ✅" : " ❌ " + failures.joined(separator: "；")))
@@ -352,6 +357,7 @@ enum AnnotationAudit {
         }
         let band = glyphBand(of: page)
         guard let sel = page.selection(for: band),
+              let line = sel.selectionsByLine().first,
               !(sel.string ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             check("历史半行：测试页能取到真实文本行", false, "带 \(band) 上没有文字")
             return
@@ -359,7 +365,7 @@ enum AnnotationAudit {
 
         // ① 走真实入口画一条整行高亮（作者标记、颜色、时间戳都与用户操作一致）
         let beforeIDs = Set(page.annotations.map { ObjectIdentifier($0) })
-        controller.view.setCurrentSelection(sel, animate: false)
+        controller.view.setCurrentSelection(line, animate: false)
         guard controller.addHighlight(fromCurrentSelection: "自检：模拟老批注") else {
             check("历史半行：测试高亮画得上去", false, "addHighlight 返回 false")
             return
@@ -383,7 +389,7 @@ enum AnnotationAudit {
         created.quadrilateralPoints = nil
         created.bounds = fragment
 
-        // ③ 读取侧：清单给出的引文必须是**整行**，而不是存进文件的那半行
+        // ③ 局部高亮本身合法，清单忠实显示实际选中的范围。
         let storedQuote = page.selection(for: fragment)?.string ?? ""
         let fullQuote = page.selection(for: full)?.string ?? ""
         guard !storedQuote.isEmpty, !fullQuote.isEmpty else {
@@ -399,24 +405,20 @@ enum AnnotationAudit {
                   "基串 \(base)，清单 \(listed.count) 条：\(listed.prefix(6).map(\.id))")
             return
         }
-        check("历史半行：清单引文是整行（读取侧补算了）",
-              entry.quote == fullQuote,
+        check("局部高亮：清单引文与文件实际范围相同",
+              entry.quote == storedQuote,
               "实际 \(entry.quote.count) 字「\(String(entry.quote.prefix(24)))」，"
-                  + "期望整行 \(fullQuote.count) 字「\(String(fullQuote.prefix(24)))」")
-        check("历史半行：清单引文长于文件里那半行（防恒真）",
-              entry.quote.count > storedQuote.count,
+                  + "期望 \(storedQuote.count) 字「\(String(storedQuote.prefix(24)))」")
+        check("局部高亮：不会在读取时擅自扩到整行",
+              entry.quote.count < fullQuote.count,
               "清单 \(entry.quote.count) 字 / 存储矩形 \(storedQuote.count) 字")
-        check("历史半行：条目带 truncated 标记（界面据此给修正入口与条数）",
-              entry.truncated,
+        check("局部高亮：不当作损坏或截断",
+              !entry.truncated,
               "truncated=\(entry.truncated)")
 
         // ④ 一键修正：把文件里的矩形真的改宽，且条数与界面一致、可重复调用无害
-        let truncatedBefore = listed.filter(\.truncated).count
         let changed = controller.normalizeAnnotationRows()
         check("历史半行：normalizeAnnotationRows 改宽了 ≥1 条", changed >= 1, "返回 \(changed)")
-        check("历史半行：改宽条数 == 界面标记的条数（数字对得上账）",
-              changed == truncatedBefore,
-              "界面标记 \(truncatedBefore) 条 / 实际改了 \(changed) 条")
         check("历史半行：文件里的矩形真的变宽到整行",
               abs(created.bounds.minX - full.minX) < 1.0
                   && abs(created.bounds.maxX - full.maxX) < 1.0,

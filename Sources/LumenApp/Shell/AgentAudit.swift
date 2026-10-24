@@ -83,9 +83,10 @@ enum AgentAudit {
             NSLog("%@", "[Lumen][agent] \(ok ? "✅" : "❌") \(name)\(detail.isEmpty ? "" : " —— \(detail)")")
         }
 
-        let library = AgentSkill.catalog
-        NSLog("%@", "[Lumen][agent] 内置技能：\(library.count) 条"
-            + "（" + library.map(\.name).joined(separator: "、") + "）")
+        let library = AgentSkill.retiredPromptCatalog + AgentSkill.legacyCatalog.filter { legacy in
+            !AgentSkill.retiredPromptCatalog.contains { $0.id == legacy.id }
+        }
+        NSLog("%@", "[Lumen][agent] 应用技能：\(AgentSkill.catalog.map(\.name))")
 
         NSLog("%@", "[Lumen][agent] 预设 Agent：\(AgentConfig.presets.count) 个")
         for agent in AgentConfig.presets {
@@ -118,10 +119,9 @@ enum AgentAudit {
 
         // 原先是两条独立的自定义技能，现在并进了内置技能目录 ——
         // 断言名字而不只是条数：条数对了但内容是别的，从终值上看不出来。
-        check("「论证链」「术语变化」已并入内置技能目录",
-              ["论证链", "术语变化"].allSatisfy { name in
-                  AgentSkill.catalog.contains { $0.name == name }
-              })
+        check("技能目录仅包含可选的原文能力",
+              AgentSkill.catalog.map(\.id) == [AgentSkill.evidenceID]
+                  && AgentConfig.presets.allSatisfy { $0.skills.isEmpty })
 
         // 角色 + 技能是否真的进了系统提示，且没有顶掉默认约束
         guard let socratic = AgentConfig.presets.first(where: { $0.name == "苏格拉底导师" }) else {
@@ -130,7 +130,7 @@ enum AgentAudit {
         }
         let system = PromptLibrary.systemPrompt(readerPersona: "自检读者背景", agent: socratic, skills: library)
         check("系统提示里含角色设定", system.contains("善于提问的导师"))
-        check("系统提示里含苏格拉底技能", system.contains("不要直接给出结论"))
+        check("系统提示里含所选技能", system.contains("依据原文界定关键概念"))
         check("默认的防幻觉约束仍在", system.contains("原文没有提到"))
         check("读者背景仍在", system.contains("自检读者背景"))
 
@@ -157,11 +157,11 @@ enum AgentAudit {
         // 迁移断言是这个改动里最要紧的：技能全文原先存在 Agent 上，
         // 现在只有技能库里有全文。搬错一步，用户自己写的技能就会**静默**消失
         // ——系统提示变短了，界面上却看不出少了什么。
-        let roundTripAgent = AgentConfig(name: "往返", skills: ["socratic", "concepts"])
+        let roundTripAgent = AgentConfig(name: "往返", skills: ["critique", "concepts"])
         check("技能按 id 存取往返不丢",
               roundTrip(roundTripAgent).map { agent in
-                  agent.skills == ["socratic", "concepts"]
-                      && agent.promptSection(in: library).contains("不要直接给出结论")
+                  agent.skills == ["critique", "concepts"]
+                      && agent.promptSection(in: library).contains("前提、推理与结论")
               } ?? false)
 
         // 旧格式 ②：`skills` 是带全文的对象数组（2026-09-21 一度用过）。
@@ -174,15 +174,15 @@ enum AgentAudit {
                     "usesWebSearch":false,"isBuiltIn":false}]}
         """
         if let migrated = decode(AISettings.self, from: legacyFull) {
-            check("旧的对象数组技能只留 id",
-                  migrated.agents.first?.skills == ["socratic", "C1"],
+            check("旧提示词技能转入阅读指令",
+                  migrated.agents.first?.skills.isEmpty == true,
                   "实得 \(migrated.agents.first?.skills ?? [])")
             check("带全文的自建技能被并进技能库",
-                  migrated.skillLibrary.contains { $0.id == "C1" && $0.name == "因果检查" },
-                  "实得 \(migrated.skillLibrary.map(\.name))")
+                  migrated.retiredReadingSkills.contains { $0.id == "C1" && $0.name == "因果检查" },
+                  "实得 \(migrated.retiredReadingSkills.map(\.name))")
             check("并库之后它照样进系统提示",
                   migrated.agents.first?
-                      .promptSection(in: migrated.skillLibrary)
+                      .persona
                       .contains("【因果检查】区分相关关系与因果关系。") ?? false)
         } else {
             check("旧的对象数组技能能解码", false)
@@ -197,10 +197,11 @@ enum AgentAudit {
         """
         if let merged = decode(AISettings.self, from: legacyMerged) {
             check("旧的字符串技能与自定义技能并进同一条清单",
-                  merged.agents.first?.skills == ["socratic", "critique", "C2"],
+                  merged.agents.first?.skills.isEmpty == true
+                      && merged.agents.first?.persona.contains("区分相关关系与因果关系") == true,
                   "实得 \(merged.agents.first?.skills ?? [])")
             check("还原出来的技能带着名字与要求",
-                  merged.agents.first?.resolvedSkills(in: merged.skillLibrary).first?.name == "苏格拉底式")
+                  merged.agents.first?.persona.contains("递进问题") == true)
         } else {
             check("旧的字符串技能能解码", false)
         }
@@ -215,10 +216,10 @@ enum AgentAudit {
                     "usesWebSearch":false,"isBuiltIn":false}]}
         """
         if let claimed = decode(AISettings.self, from: legacySameName) {
-            check("同名的旧技能认领到内置那条，不新增重复卡",
-                  claimed.skillLibrary.filter { $0.name == "论证链" }.count == 1
-                      && claimed.agents.first?.skills == ["argumentChain"],
-                  "同名卡 \(claimed.skillLibrary.filter { $0.name == "论证链" }.count) 张，"
+            check("同名但不同要求保留用户原文",
+                  claimed.retiredReadingSkills.filter { $0.id == "X1" }.count == 1
+                      && claimed.agents.first?.persona.contains("把核心论证写成链条。") == true,
+                  "归档 \(claimed.retiredReadingSkills.filter { $0.id == "X1" }.count) 条，"
                       + "勾选 \(claimed.agents.first?.skills ?? [])")
         } else {
             check("同名旧技能能解码", false)
@@ -242,7 +243,7 @@ enum AgentAudit {
 
         // 「列文献」只在开了联网检索时才发出去；判定看 id，不看名字。
         // 改名字就失效的话，用户给技能改个名会莫名其妙地改变行为。
-        if AgentSkill.catalogEntry(id: AgentSkill.literatureID) != nil {
+        if library.contains(where: { $0.id == AgentSkill.literatureID }) {
             let searchOff = AgentConfig(name: "联网关", skills: [AgentSkill.literatureID], usesWebSearch: false)
             let searchOn = AgentConfig(name: "联网开", skills: [AgentSkill.literatureID], usesWebSearch: true)
             let marker = "联网检索结果"
@@ -327,8 +328,8 @@ enum AgentAudit {
         let emptiedAI = """
         {"providers":[],"streaming":true,"templates":[],"skillLibrary":[]}
         """
-        check("技能库被清空后不会自动补回",
-              decode(AISettings.self, from: emptiedAI)?.skillLibrary.isEmpty == true)
+        check("补入应用技能不自动启用",
+              decode(AISettings.self, from: emptiedAI)?.agents.allSatisfy { $0.skills.isEmpty } == true)
 
         let customSkill = AgentSkill(name: "因果检查", instruction: "区分相关与因果。")
         check("用户自建技能进入系统提示",
@@ -401,7 +402,8 @@ enum AgentAudit {
             skills: library,
             webContext: block
         )
-        if let last = messages.last {
+        if !messages.isEmpty {
+            let last = AIMessage.user(messages.map(\.content).joined(separator: "\n"))
             let docIndex = last.content.range(of: "【文档信息】")?.lowerBound
             let textIndex = last.content.range(of: "自检正文")?.lowerBound
             let webIndex = last.content.range(of: "联网检索到的文献")?.lowerBound

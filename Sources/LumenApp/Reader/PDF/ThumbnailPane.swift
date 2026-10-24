@@ -14,7 +14,7 @@ struct ThumbnailPane: View {
             documentID: session.document.id,
             theme: state.settingsStore.reader.theme,
             originalColors: state.settingsStore.reader.pdfOriginalColors,
-            annotationRevision: bridge.annotationRevision
+            annotationRevision: bridge.thumbnailRevision
         )
         .onAppear { bridge.viewport.isTracking = true }
         .onDisappear { bridge.viewport.isTracking = false }

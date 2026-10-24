@@ -9,23 +9,6 @@ import LumenKit
 /// 是为了让这份文件在几个月后自己还说得清「这是从哪本书、什么时候、基于哪次对话生成的」。
 enum ExportService {
 
-    /// 弹出保存面板并把摘要写成 Markdown。
-    @MainActor
-    static func exportSummary(
-        documentTitle: String,
-        metadata: DocumentMetadata,
-        summary: String,
-        transcript: [AIChatModel.Bubble]
-    ) {
-        let markdown = buildMarkdown(
-            documentTitle: documentTitle,
-            metadata: metadata,
-            summary: summary,
-            transcript: transcript
-        )
-        save(markdown, suggestedName: "\(safeFileName(documentTitle)) 摘要.md")
-    }
-
     /// 把整段对话导出成 Markdown（不带摘要，适合留档）。
     @MainActor
     static func exportTranscript(
@@ -36,7 +19,6 @@ enum ExportService {
         let markdown = buildMarkdown(
             documentTitle: documentTitle,
             metadata: metadata,
-            summary: "",
             transcript: transcript
         )
         save(markdown, suggestedName: "\(safeFileName(documentTitle)) 对话.md")
@@ -44,28 +26,35 @@ enum ExportService {
 
     // MARK: - 生成内容
 
-    private static func buildMarkdown(
+    static func buildMarkdown(
         documentTitle: String,
         metadata: DocumentMetadata,
-        summary: String,
         transcript: [AIChatModel.Bubble]
     ) -> String {
         var out: [String] = []
+        let sources = Array(Set(transcript.flatMap { bubble in
+            bubble.evidence.map(\.path) + (bubble.sourceDocPath.map { [$0] } ?? [])
+        })).sorted()
+        let title = sources.count > 1 ? "多文档对话" : sources.first.map {
+            URL(fileURLWithPath: $0).deletingPathExtension().lastPathComponent
+        } ?? documentTitle
 
-        out.append("# 《\(documentTitle)》阅读摘要")
+        out.append("# 《\(title)》对话记录")
         out.append("")
 
         var facts: [String] = []
-        if !metadata.author.isEmpty { facts.append("作者：\(metadata.author)") }
-        if metadata.unitCount > 0 { facts.append("篇幅：\(metadata.unitCount) 页/章") }
+        // Current reader metadata may belong to a different document than the conversation.
+        if sources.isEmpty {
+            if !metadata.author.isEmpty { facts.append("作者：\(metadata.author)") }
+            if metadata.unitCount > 0 { facts.append("篇幅：\(metadata.unitCount) 页/章") }
+        }
         facts.append("导出时间：\(timestamp())")
         out.append("> " + facts.joined(separator: " ｜ "))
         out.append("")
-
-        if !summary.isEmpty {
-            out.append("## 摘要")
+        if !sources.isEmpty {
+            out.append("## 材料来源")
             out.append("")
-            out.append(summary)
+            out.append(contentsOf: sources.map { "- \($0)" })
             out.append("")
         }
 
@@ -88,9 +77,26 @@ enum ExportService {
                 case .assistant:
                     out.append("**回答**")
                     out.append("")
-                    out.append(bubble.text)
+                    if !bubble.coverage.isEmpty {
+                        out.append("_材料覆盖：\(bubble.coverage)_")
+                        out.append("")
+                    }
+                    let verified = bubble.evidence.filter { bubble.text.contains($0.id) }
+                    if !verified.isEmpty {
+                        out.append("_可核对定位：" + verified.map {
+                            "\(URL(fileURLWithPath: $0.path).lastPathComponent) · \($0.label) · \($0.id)"
+                        }.joined(separator: "；") + "_")
+                        out.append("")
+                    }
+                    out.append(WholeAnswerCoverage.visibleAnswer(bubble.text))
                     out.append("")
-                    if !bubble.citations.isEmpty {
+                    if let references = bubble.answerEvidence, !references.isEmpty {
+                        for source in references {
+                            out.append("[原文\(source.number ?? 0)] \(URL(fileURLWithPath: source.path).lastPathComponent) · \(source.label)")
+                            out.append("> \((source.quote ?? "").replacingOccurrences(of: "\n", with: "\n> "))")
+                            out.append("")
+                        }
+                    } else if bubble.answerEvidence == nil && !bubble.citations.isEmpty {
                         let refs = bubble.citations.map { "`\($0.displayLabel())`" }.joined(separator: "、")
                         out.append("_引用：\(refs)_")
                         out.append("")
