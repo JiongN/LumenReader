@@ -207,6 +207,10 @@ settings/conversations/赵PDF最终哈希仍为上节基线；1058页原书也�
 
 ## 2026-10-22 00:39 CST · Codex · EPUB 译文排版
 
+## 2026-10-24 16:19 · WorkBuddy · 推送到 GitHub
+
+用户要求把最新版本上传到 git。工作树自 v1.1.0 起累积的改动已全部提交并推送：`ac227f8` 主体代码与测试（文档 AI 问答、知网题录/图谱、对照翻译、PDF 后台复制与 TextKit 修订、LumenPDFWorker 新目标）、`941c7fa` 文档同步与过期过程材料清理、`1778011` 版本升级至 1.1.1；附标签 `v1.1.1`。远端 `origin/main`（git@github.com:JiongN/LumenReader.git）与标签均已验证更新，本地与远端一致、工作树干净。提交前已扫描无密钥模式、无构建产物（dist/、releases/、docs/verification/ 均被忽略）。历史交接中“不推送、不发布”的限制以本次用户明确授权为准；未触碰用户数据、凭据或应用数据目录。
+
 本轮仅针对最新截图优化 EPUB 行距与间距。`EPUBController.translationStylesheet` 独立控制译文 1.85 行高、上 0.6em/下 1.5em 留白、内侧 0.85em，隔离出版商对齐/缩进/词距/固定高度，保留翻译字号、换段和跨栏流动。未动 PDF、会话、网络翻译流程，未清理旧源码或用户数据。
 
 新增 `EPUBTranslationLayoutTests.swift`，13 项相关回归通过（2.392 秒），实际 WebKit 覆盖 480/1120 × 15/22、长译文双栏和深色主题。初版 fixture 被生产导航白名单拒绝，仅修测试 about:blank 的代理后通过。release 79.39 秒，最终 `20261022-003335-32414`，深度严格签名通过；回退 `dist/.before-epub-spacing-20261022.app` 保留。结果与快照在 `docs/verification/epub-spacing-20261022/`。
