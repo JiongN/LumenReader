@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>LumenReader 规则重构与三项审计报告</title>
+<style>
+  :root { --ink:#1d1d1f; --sub:#6e6e73; --line:#e5e5ea; --p0:#c0392b; --p1:#b8860b; --p2:#7a7a80; --ok:#2e7d4f; }
+  * { box-sizing:border-box; }
+  body { font-family:-apple-system,"PingFang SC",sans-serif; color:var(--ink); max-width:960px; margin:40px auto; padding:0 24px; line-height:1.65; background:#fafafa; }
+  h1 { font-size:26px; letter-spacing:-0.02em; }
+  h2 { font-size:19px; margin-top:44px; border-bottom:1px solid var(--line); padding-bottom:8px; }
+  h3 { font-size:15.5px; margin-bottom:6px; }
+  .meta { color:var(--sub); font-size:13px; }
+  table { border-collapse:collapse; width:100%; font-size:13px; margin:14px 0; background:#fff; }
+  th,td { text-align:left; padding:8px 10px; border-bottom:1px solid var(--line); vertical-align:top; }
+  th { color:var(--sub); font-weight:600; font-size:12px; }
+  code { font-family:ui-monospace,Menlo,monospace; font-size:12px; background:#f0f0f2; padding:1px 5px; border-radius:4px; }
+  .tag { display:inline-block; font-size:11px; font-weight:700; padding:1px 8px; border-radius:99px; color:#fff; }
+  .p0 { background:var(--p0); } .p1 { background:var(--p1); } .p2 { background:var(--p2); }
+  .ok { background:var(--ok); }
+  .card { background:#fff; border:1px solid var(--line); border-radius:12px; padding:16px 20px; margin:14px 0; }
+  .verdict { border-left:3px solid var(--ok); padding:10px 16px; background:#fff; margin:16px 0; }
+  ul { padding-left:20px; } li { margin:4px 0; }
+</style>
+</head>
+<body>
+
+<h1>LumenReader 规则重构与三项审计报告</h1>
+<p class="meta">2026-09-17 · 项目：/Users/jn/WorkBuddy/小工具/LumenReader · 扫描范围：70 个 Swift 文件 / 21,560 行</p>
+
+<h2>一、规则入口精简（已完成）</h2>
+<p>此前项目<strong>没有 CLAUDE.md、没有 .claude/</strong>。现按「全局必读 → 模块规则 → 教训账本」三层建立：</p>
+<div class="card">
+<ul>
+  <li><code>CLAUDE.md</code>（~60 行）——只放全局必读：项目目标、6 条全局红线、顶层架构一图、核心命令。其余一律外链。</li>
+  <li><code>.claude/rules/build-and-signing.md</code> —— 构建须 <code>--disable-sandbox</code>、ad-hoc 签名身份不稳定及其后果。</li>
+  <li><code>.claude/rules/persistence-coding.md</code> —— 编解码策略必须成对相邻书写 + 防静默清空两条防御规则。</li>
+  <li><code>.claude/rules/design-ui.md</code> —— Apple 风视觉/动效/图标规则（<300ms、ease-out、降饱和、AIIcon 统一字形）。</li>
+  <li><code>.claude/rules/branding-assets.md</code> —— 图标唯一源管线（SVG → render.js → icns），禁手绘路径。</li>
+  <li><code>docs/LESSONS.md</code> —— 错误沉淀账本：现象 → 根因 → 沉淀到哪，已登记 6 条。</li>
+</ul>
+</div>
+
+<h2>二、有效纠错沉淀（已完成）</h2>
+<table>
+  <tr><th>#</th><th>错误</th><th>根因</th><th>沉淀位置</th></tr>
+  <tr><td>1</td><td>「最近打开」每次启动静默清空</td><td>iso8601 编码、解码未设策略，<code>try? ?? []</code> 吞错归零</td><td>规则 + <strong>3 个回归测试（全过）</strong> + LESSONS #1</td></tr>
+  <tr><td>2</td><td>图标书页画成蝶形结</td><td>贝塞尔控制点在端点另一侧，曲线交叉</td><td>branding 规则禁手绘路径 + 代码注释</td></tr>
+  <tr><td>3</td><td>图标光晕变硬边圆盘</td><td><code>NSGradient</code> 是线性渐变，非径向</td><td>LESSONS #3（v3 改 SVG 管线根治）</td></tr>
+  <tr><td>4</td><td>puppeteer 光栅化反复失败</td><td>浏览器缓存为空 + headless 参数版本差异</td><td>branding 规则固化 puppeteer-core + 系统 Chrome</td></tr>
+  <tr><td>5</td><td>SwiftPM 沙箱编译失败</td><td>CLT SwiftPM 沙箱不兼容</td><td>build 规则 + build.sh 内建参数</td></tr>
+  <tr><td>6</td><td>ad-hoc 签名致钥匙串反复弹窗</td><td>CDHash 每次构建都变</td><td>build 规则（只查元数据不解密）</td></tr>
+</table>
+<p class="meta">新增测试目标 <code>LumenKitTests</code>（Package.swift），<code>swift test --disable-sandbox</code> 3/3 通过。</p>
+
+<h2>三、/code-health 审计结果</h2>
+<div class="verdict"><strong>总评：整体健康度良好</strong>——强制解包几乎为零（<code>as! / try!</code> 均为 0）、无 TODO 欠账、引擎层 0 处 import SwiftUI/AppKit。但存在一条<strong>系统性缺陷链：解码失败 → 静默置空 → 自动保存覆盖原文件</strong>，RecentDocuments 的 iso8601 事故只是它第一次显形，另有 5 处仍在裸奔。</div>
+
+<h3><span class="tag p0">P0</span> 会丢用户数据 / 静默失效（6 条）</h3>
+<table>
+  <tr><th>位置</th><th>问题与用户可见后果</th><th>修复建议</th></tr>
+  <tr><td><code>Annotation.swift:52</code></td><td>EPUB 批注档案解码逐字段无容错，任一字段缺失 → 批注全部消失，且后续 flush 用空档案<strong>覆盖原文件，不可恢复</strong></td><td>逐字段 <code>try?</code> 兜底 + 解码失败备份 <code>.corrupt</code> 并禁止空档案覆盖</td></tr>
+  <tr><td><code>AIChatModel.swift:122</code></td><td>对话历史解码失败静默留空，下次 persist 把空数组写回 → 整本书 AI 对话<strong>永久丢失</strong></td><td>备份 chats.json + 「未成功加载则本会话不落盘」闸门</td></tr>
+  <tr><td><code>KeyBindings.swift:511</code></td><td>解码失败清空内存 overrides，下次改键只写一条 → 其余自定义快捷键被<strong>静默抹掉</strong></td><td>加 loadFailed 标志阻止本会话 save()</td></tr>
+  <tr><td><code>SettingsStore.swift:34</code></td><td>顶层结构级损坏 → 全量重置，AI 服务商/模型/Agent 配置丢失</td><td>失败时备份 settings.json</td></tr>
+  <tr><td><code>ReadingStateStore.swift:31</code></td><td>5 字段全必填无兜底 → 阅读位置静默归零，表现为「每次打开都回到第 1 页」</td><td>逐字段兜底 + load 失败时本会话只读</td></tr>
+  <tr><td><code>Annotation.swift:131</code></td><td>flush 写盘失败无反馈，UI 仍显示保存成功</td><td>flush 返回真实结果并回传 UI</td></tr>
+</table>
+
+<h3><span class="tag p1">P1</span> 崩溃风险 / 维护成本（6 条，摘要）</h3>
+<ul>
+  <li><code>AnnotationStore</code> 是唯一没有 <code>@MainActor</code> 的 Store，有并发写坏窗口 → 补隔离。</li>
+  <li>13 个文件 &gt;500 行（最大 <code>PDFController.swift</code> 1267 行）→ 优先拆 PDFController。</li>
+  <li><code>wireCallbacks</code> 227 行 / 内联 JS 209 行 / 命令表 133 行 → 各自拆分。</li>
+  <li><code>LaunchDiagnostics.swift:638</code> 唯一一处运行时强解 <code>contentView!</code> → guard。</li>
+</ul>
+
+<h3><span class="tag p2">P2</span> 卫生（5 条，摘要）</h3>
+<ul>
+  <li><code>commitSidebarWidth</code> / <code>ui.sidebarWidth</code> 是死代码（布局已固定 248pt）→ 删除。</li>
+  <li>Annotation 用默认 Double 时间戳、其余 Store 用 iso8601——两套约定并存是事故温床 → 统一。</li>
+  <li>除 RecentDocuments 外其余 5 个 Store <strong>零回归测试</strong> → 按现有模板补齐。</li>
+</ul>
+
+<h2>四、/ui-audit 审计结果（对照 .claude/rules/design-ui.md 与 UX 原则清单）</h2>
+<div class="verdict"><strong>总评：重构后整体达标</strong>——层级清晰（品牌 → CTA → 画廊）、留白充足、选中态用淡胶囊、缩略图徽章+光晕与规范一致。以下为发现的不一致。</div>
+
+<h3><span class="tag p1">P1</span></h3>
+<table>
+  <tr><th>位置</th><th>问题</th><th>修复建议</th></tr>
+  <tr><td><code>SettingsRootView.swift:282</code></td><td>渐变仍硬编码旧高饱和靛蓝 <code>0x4F7BFF → 0x2F5BEA</code>，违反降饱和规范，是全 app 最后一个旧色残留</td><td>改用 <code>DS.Palette.accent</code> 系 token</td></tr>
+  <tr><td><code>WelcomeView.swift:130</code></td><td>「打开文档」CTA 用 <code>.borderedProminent</code>，跟随<strong>系统</strong>强调色而非 <code>DS.Palette.accent</code>——换机器/换系统主题会偏离品牌色（截图中的按钮即比 #56639F 饱和）</td><td>显式背景 <code>DS.Palette.accent</code> 或窗口设置 tintColor</td></tr>
+</table>
+
+<h3><span class="tag p2">P2</span></h3>
+<ul>
+  <li>首页「清除记录」为 textTertiary 小字——<strong>破坏性动作</strong>对比度过低且无二次确认提示，建议加确认弹层。</li>
+  <li>AI 面板头部一行塞 5 个控件（联网/检索/Agent/收起/外观），密度高于全 app 任意位置，建议把「外观」并入设置。</li>
+  <li>阅读页底部控制条「第 1/2 页 + 缩放」与 AI 输入框两种控件同层摆放，分组感弱——建议分隔线或间距分组（近邻原则）。</li>
+  <li>无障碍基础良好（快捷键全覆盖、help 文案普遍存在），但 LeftRail 图标按钮缺 ⌘1–⌘5 快捷键提示（与 route-audit #7 同源）。</li>
+</ul>
+
+<h2>五、/route-audit 审计结果</h2>
+<div class="verdict"><strong>总评：</strong>路由表规模健康（页签 5 / 快捷键 20 / 命令面板 31+ / 菜单 25），但存在 <strong>2 条失效路径、7 条 P1</strong>。最小修复顺序：先堵失效 → 统一 help 文案 → 快捷键自检 → 诊断通道护栏。</div>
+
+<h3><span class="tag p0">P0</span> 失效路径（2 条）</h3>
+<table>
+  <tr><th>位置</th><th>问题</th><th>修复建议</th></tr>
+  <tr><td><code>ReaderBridge.swift:200</code></td><td><code>SidebarTab.title</code> 全仓库零引用——页签栏早已改版为图标栏，整套短标题渲染路径是死路由</td><td>删除 title 与过期注释</td></tr>
+  <tr><td><code>ReaderContainerView.swift:258</code></td><td><code>--sidebar-tab thumbnails</code> 不校验文档类型：EPUB 会被钉进缩略图页签 → thumbnailProvider 为 nil，渲染空网格且 goTo 发出非法 locator</td><td>guard <code>SidebarTab.available(for:).contains(tab)</code></td></tr>
+</table>
+
+<h3><span class="tag p1">P1</span> 内容漂移与规则缺口（7 条，摘要）</h3>
+<ul>
+  <li><code>ReaderContainerView.swift:502</code> help 文案<strong>硬编码 ⌘G</strong>——改绑后永久骗人；ImmersiveHUD 已有动态 <code>hint()</code> 实现，应收敛到一个 helper（现存 3 份重复）。</li>
+  <li>LeftRail 图标栏是唯一常驻入口却不显示 ⌘1–⌘5（注释宣称顺序即编号）。</li>
+  <li><code>isReservedBySystem</code> 漏了 <code>⌘W</code>——默认 <code>.closeDocument</code> 恰好绑在系统「关闭窗口」组合上。</li>
+  <li>20 个 defaultCombo 之间<strong>无启动期冲突检测</strong>（只在用户改绑时校验）→ 在 KeyBindingsAudit 加互异断言。</li>
+  <li><code>--run-action</code> 不查 <code>isEnabled</code>（EPUB 上 showThumbnails 静默无效）；未知动作名时进程仍以退出码 0 成功截图，CI 无法察觉拼写错误。</li>
+</ul>
+
+<h3><span class="tag p2">P2</span> 职责重叠与过载（9 条，摘要）</h3>
+<ul>
+  <li>「AI 智能目录」在菜单里出现两条等价项（一条带 ⌘2 一条不带）、命令面板里两条命令分属两组——均删一条。</li>
+  <li>工具栏侧栏/AI 面板 toggle 与 LumenActionRunner 各持一份实现、HUD 翻页不经 LumenAction——三条路径应统一走 <code>action.run(state)</code>。</li>
+  <li>命令面板 31+ 条无分组分隔行；命名「侧栏：X」前缀式与动宾式混排；<code>esc</code> 与 <code>⎋</code> 两种键位写法并存。</li>
+</ul>
+
+<h2>六、修复优先级建议</h2>
+<ol>
+  <li><strong>立即</strong>：P0×8——持久化「解码失败即备份 + 禁止覆盖写盘」双保险（批注与对话历史最优先）；<code>--sidebar-tab</code> 类型校验；删除 SidebarTab.title 死路由。</li>
+  <li><strong>本周</strong>：P1——help 文案统一动态化、⌘W 保留、defaultCombo 启动断言、CTA 与设置页旧色收敛、AnnotationStore 加 @MainActor。</li>
+  <li><strong>顺手</strong>：P2——死代码删除、命令面板分组、其余 Store 按模板补回归测试。</li>
+</ol>
+<p class="meta">三个技能已装好可复用：<code>~/.workbuddy/skills/code-health</code>、<code>~/.workbuddy/skills/ui-audit</code>（SkillHub/tommygeoco）、<code>~/.workbuddy/skills/route-audit</code>。</p>
+
+</body>
+</html>

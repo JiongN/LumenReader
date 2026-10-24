@@ -1,0 +1,13 @@
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg">
+  <!-- Lumen AI 图标 · 单色模板（currentColor，透明底）
+       设计：一枚细线圆环 + 缺口处一枚实心点——「轨道上的焦点」。
+       刻意避开 sparkle / 机器人 / 大脑 / 灯泡：
+       四芒星已是全行业的 AI 万能符号（Cursor、Notion、Copilot），
+       用它等于宣布「我们没有任何自己的说法」。
+       环 = 阅读的回路（读 → 想 → 回到文中），点 = 那一下「照亮」。
+       用 currentColor：在工具栏跟其他图标一样灰，选中时才染强调色。 -->
+  <g stroke="currentColor" stroke-width="54" fill="none" stroke-linecap="round">
+    <path d="M 561 227 A 290 290 0 1 0 797 462"/>
+  </g>
+  <circle cx="717" cy="307" r="105" fill="currentColor"/>
+</svg>

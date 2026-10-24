@@ -1,0 +1,8 @@
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg">
+  <!-- Lumen AI 图标 · 小尺寸紧凑版（≤32px 用）
+       线宽与光点同时加大，保证 16px 下环不糊、点不散。 -->
+  <g stroke="currentColor" stroke-width="86" fill="none" stroke-linecap="round">
+    <path d="M 561 227 A 290 290 0 1 0 797 462"/>
+  </g>
+  <circle cx="717" cy="307" r="150" fill="currentColor"/>
+</svg>

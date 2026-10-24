@@ -1,6 +1,14 @@
 # 中文文献图谱数据源可行性（2026-09-28）
 
-## 当前结论
+## 2026-10-18 实施增量
+
+已增加用户触发的网页关系读取与一键定位，不以正式 API 授权冒充网页访问能力。依据 [cnki-deepsearch 的浏览器实现](https://github.com/weileyao2005/cnki-deepsearch/blob/bce00bb8b744a8b683a1d8a628b9ed997bf0f979/cnki_mcp/browser.py)及[结构字段解析](https://github.com/weileyao2005/cnki-deepsearch/blob/bce00bb8b744a8b683a1d8a628b9ed997bf0f979/cnki_mcp/parser.py)，在独立 WebKit 当前页面观察参考、被引、相似论文三类实际响应；不移植其 Python/Playwright 运行时、不复用外部登录态，也不绕过验证。原生适配有严格来源、字段、条数、导航和取消校验，关系可交给现有画布；未读到的数据不作为空关系。图谱动作会自动定位网站实际控件，没有稳定独立图谱地址时也不拼造 URL。
+
+还核对了 [CNKI-Enhanced-MCP](https://github.com/ChengDSYJ-Studio/CNKI-Enhanced-MCP)、[SepineTam/cnki-mcp](https://github.com/SepineTam/cnki-mcp) 和 [zotero-refs](https://github.com/yimmy23/zotero-refs)。前两者侧重搜索与题录，后者将研学参考文献与 OpenAlex 图谱分开；不能仅凭“支持 CNKI”认定它们都提供完整中文被引网络。Lumen 未复制 AGPL 项目的代码。
+
+此次知网首页直接重定向人工验证码，同时 Mac 锁屏、用户不能操作，因此在线真实关系及官网图谱画面未完成验收，不能将开源 README 或本地 fixture 当作已经在线成功。离线契约、真实 WebKit 响应 fixture、自动定位/导入/取消与全量回归见 `VERIFY.md`。下方 9 月记录继续描述正式开放 API 的授权缺口，不能据此否认当前按需网页适配，也不能反过来把网页适配当作长期稳定 API。
+
+## 2026-09-28 调研结论
 
 用户确认无法取得知网、万方接口授权，因此本项目已搁置两库的直连接入；下述接口条件仅作为调研记录。当前继续使用本地 PDF 参考文献提取与 OpenAlex 匹配，中文文献覆盖取决于用户持有的 PDF 和 OpenAlex 收录情况，不能形成两库的完整被引网络。
 

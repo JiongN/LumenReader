@@ -39,7 +39,7 @@ codesign --verify --strict --deep ../../dist/Lumen.app
 
 - `Sources/`、`Tests/` 是标准 SwiftPM 工程结构，不再额外套一层“源码”目录。
 - `Resources/` 为运行资源；`branding/` 保留图标源稿，`build/` 是可再生中间图。
-- 历史计划、研究、验证移到 `docs/archive/`；当前说明集中在 docs 顶层。
+- 过期计划、过程验证和构建缓存可按用户授权清理；当前说明集中在 docs 顶层，正式规格保留于 docs/design。
 - `docs/verification/` 为本地过程证据，不纳入版本库；可在审阅后清理。
 - `./build.sh clean` 清构建缓存与当前 app；失败会非零退出，不触碰 releases 或应用数据。
 - 不把 credentials、真实 PDF、用户聊天或密钥复制进发布包。

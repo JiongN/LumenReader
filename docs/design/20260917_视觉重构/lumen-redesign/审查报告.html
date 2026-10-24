@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Lumen 重构审查报告 · Apple 风格迁移</title>
+<style>
+  :root {
+    --ink: #2F3540; --paper: #F5F2EB; --sub: #6C7280; --line: #E5E2DA;
+    --accent: #56639F;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, "PingFang SC", sans-serif;
+    color: var(--ink); background: #FAF9F6; line-height: 1.75;
+    padding: 48px 24px 96px;
+  }
+  .wrap { max-width: 960px; margin: 0 auto; }
+  h1 { font-size: 30px; font-weight: 700; letter-spacing: -0.5px; margin-bottom: 8px; }
+  .meta { color: var(--sub); font-size: 13px; margin-bottom: 40px; }
+  h2 { font-size: 21px; font-weight: 650; margin: 56px 0 8px; padding-top: 24px; border-top: 1px solid var(--line); }
+  h2 .no { color: var(--accent); font-variant-numeric: tabular-nums; margin-right: 10px; }
+  .lead { color: var(--sub); font-size: 14px; margin-bottom: 20px; max-width: 720px; }
+  h3 { font-size: 15px; font-weight: 600; margin: 24px 0 8px; }
+  p { margin-bottom: 12px; max-width: 760px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; margin: 16px 0 24px; background: #fff; border-radius: 10px; overflow: hidden; }
+  th, td { text-align: left; padding: 10px 14px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { background: var(--paper); font-weight: 600; white-space: nowrap; }
+  td code, p code { font-family: "SF Mono", Menlo, monospace; font-size: 12px; background: var(--paper); padding: 1px 6px; border-radius: 4px; }
+  tr:last-child td { border-bottom: none; }
+  .shots { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin: 16px 0 8px; }
+  figure { background: #fff; border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
+  figure img { width: 100%; display: block; }
+  figcaption { font-size: 12px; color: var(--sub); padding: 8px 14px; border-top: 1px solid var(--line); }
+  figcaption b { color: var(--ink); margin-right: 8px; }
+  .cardrow { display: flex; gap: 20px; flex-wrap: wrap; margin: 16px 0; }
+  .card { background: #fff; border: 1px solid var(--line); border-radius: 12px; padding: 18px; flex: 1 1 260px; }
+  .card img { width: 128px; display: block; margin: 0 auto 12px; }
+  .card img.small { width: 96px; }
+  .card h4 { font-size: 13px; text-align: center; font-weight: 600; }
+  .card p { font-size: 12px; color: var(--sub); text-align: center; margin: 4px 0 0; }
+  ul, ol { padding-left: 20px; margin-bottom: 14px; max-width: 760px; }
+  li { margin-bottom: 6px; }
+  .tag { display: inline-block; font-size: 11px; font-weight: 600; padding: 1px 8px; border-radius: 99px; margin-right: 6px; }
+  .t-old { background: #F3E3E1; color: #A04A3F; }
+  .t-new { background: #E3ECe3; color: #3E6B4F; }
+  .principle { background: var(--paper); border-radius: 12px; padding: 20px 24px; margin: 16px 0; }
+  .principle b { color: var(--accent); }
+  .note { font-size: 12px; color: var(--sub); }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>Lumen 视觉重构审查报告</h1>
+<div class="meta">Apple 风格迁移 · 2026-09-17 · 项目：/Users/jn/WorkBuddy/小工具/LumenReader · 全部改动已构建验证（swift build ✅，截图自检 ✅）</div>
+
+<h2><span class="no">01</span>同类产品调研：沉浸感从哪来</h2>
+<p class="lead">先回答核心问题——UPDF、PaperRss 这类产品做了什么，才让「读 PDF」变成「沉浸」。</p>
+
+<h3>UPDF（AI PDF 阅读器，Superace）</h3>
+<ul>
+  <li><b>内容占比 ≈ 85%</b>：除两侧与顶部精简工具栏外全部让给页面。沉浸感的第一来源不是「加了什么」，而是<b>删掉了多少 chrome</b>。</li>
+  <li><b>改 PDF 的显示效果本身</b>：单页 / 单页连续 / 双页 / 双页连续四种版式，外加护眼、深色、彩色背景（薄荷绿、星空蓝）等多种页面底色——沉浸是「背景退后、内容向前」。</li>
+  <li>AI 入口收在右上角一枚图标（Copilot），阅读时不常驻、不打断。</li>
+</ul>
+
+<h3>PaperRss（macOS 纸感 RSS 阅读器，开源）</h3>
+<ul>
+  <li>口号即设计纲要：<b>「Reading First, AI Second」「让阅读回归纯粹与沉浸」</b>。</li>
+  <li>纸感三栏：衬线字体承担正文、稳定三栏导航、明暗主题；列表 / 杂志多视图流体切换。</li>
+  <li>AI 的存在方式是<b>「没有 sticky 的聊天机器人或 LUI」</b>：按需摘要（按 V 键）、划词翻译 / 解释 / 提问、可整体关闭。AI 永远是被叫来的，不是站在旁边的。</li>
+</ul>
+
+<h3>旁证（FeatherReader 设计文档、iA Writer 等）</h3>
+<ul>
+  <li>FeatherReader：<b>「Paper &amp; Ink」</b>——暖白纸底、暖近黑墨色、发丝级边框、安静的阴影；衬线是「内容的声音」，系统无衬线是「应用的声音」，后者永远让位。</li>
+  <li>iA Writer：品牌即克制，单色、网格、留白本身就是识别度。</li>
+</ul>
+
+<div class="principle">
+  <b>提炼为 Lumen 的四条设计原则：</b><br>
+  P1 <b>内容占比优先</b>——UI 的每一分视觉重量都是向阅读借的债；<br>
+  P2 <b>纸与墨的单色系</b>——低饱和、细线、留白，彩色只留一枚强调色用于「指路」；<br>
+  P3 <b>AI 克制且同形</b>——无 sticky 入口轰炸，全应用一个 AI 字形，按需出现；<br>
+  P4 <b>细节只为「恰到好处」</b>——动效 &lt; 300ms、ease-out、只动 transform/opacity、可中断。
+</div>
+
+<h2><span class="no">02</span>首页 → 画廊</h2>
+<p class="lead">旧首页的主角是软件自己（大图标 + 大标题 + 列表行）；新首页把主角交给内容：真实 PDF 封面墙，点一下回到上次读到的位置。</p>
+
+<div class="shots">
+  <figure><img src="assets/before-welcome.png" alt="Before 首页"><figcaption><b>Before</b>饱和渐变自画图标、34pt 大标题、最近打开是「图标 + 文字」的列表行（且因解码 bug 从未显示过）</figcaption></figure>
+  <figure><img src="assets/after-welcome.png" alt="After 首页"><figcaption><b>After</b>64pt 纸底墨线小标 + 画廊网格：真实 PDF 第 1 页封面、一行标题、3pt 进度细线，点击即续读</figcaption></figure>
+</div>
+
+<table>
+  <tr><th>Before</th><th>After</th><th>Why</th></tr>
+  <tr><td>84pt 渐变自画图标 + 34pt 圆体大标题，hero 占首屏一半</td><td>64pt 纸底墨线小标 + 一行 22pt 标题</td><td>P1：画廊首页的主角是封面墙，品牌区只需「知道这是谁」</td></tr>
+  <tr><td>最近打开 = 34pt 类型图标 + 文件名的列表行</td><td>自适应封面网格（172–232pt），异步渲染 PDF 第 1 页真封面 + 3pt 进度细线</td><td>封面是「一本书」的最快识别单元；进度线比百分比文字更快被扫到</td></tr>
+  <tr><td>「打开文档」与「继续阅读」两枚并排按钮</td><td>只留「打开文档」；最近卡片本身即续读入口</td><td>画廊化后「继续阅读」按钮是冗余入口，点卡片与点按钮等价</td></tr>
+  <tr><td>EPUB / 未渲染占位 = 彩色类型图标</td><td>类型底色 + 文件首字（低饱和双色）</td><td>占位也是封面系统的一部分，不引入第三种视觉语言</td></tr>
+</table>
+<p class="note">实现：Sources/LumenApp/Welcome/WelcomeView.swift 整体重写；CoverStore 串行队列渲染封面（与缩略图同一套「只为可见者渲染」纪律）；悬停 <code>scale 1.02</code> + 阴影浮起，hover 动效 120ms ease-out。</p>
+
+<h2><span class="no">03</span>缩略图侧栏：滚动联动</h2>
+<p class="lead">按参考截图重做当前页指示：徽章 + 光晕。双向联动（点缩略图跳页 / 滚动 PDF 自动居中联动）原本就有，本轮解决「联动时好不好看、快滚时跟不跟手」。</p>
+
+<div class="shots">
+  <figure><img src="assets/before-reader.png" alt="Before 阅读页"><figcaption><b>Before</b>当前页 = 2pt 描边 + 1.015 缩放；页码是裸数字变色；选中页签是实心高亮块</figcaption></figure>
+  <figure><img src="assets/after-reader.png" alt="After 阅读页"><figcaption><b>After</b>当前页 = 描边 + 外圈光晕 + 实心徽章页码；选中态一眼可辨且更安静</figcaption></figure>
+</div>
+
+<table>
+  <tr><th>Before</th><th>After</th><th>Why</th></tr>
+  <tr><td>当前页仅 <code>strokeBorder 2pt</code> + <code>scaleEffect 1.015</code></td><td>描边 + <code>accentSoft</code> 外圈光晕（外扩 5pt）+ 页码实心徽章胶囊</td><td>2pt 线在整栏缩略图里扫视易漏；光晕把「选中」从线升格为面，徽章承载滚动联动时唯一要看的信息（对齐参考截图）</td></tr>
+  <tr><td>联动滚动一律 <code>withAnimation(quick)</code></td><td>跳幅 ≤2 页带动画；&gt;2 页（快滚 / 跳页）<code>disablesAnimations</code> 直接吸附</td><td>快滚 50 页 = 50 段互相打断的弹簧，侧栏看起来在「追」；大幅位移时吸附比动画更跟手</td></tr>
+  <tr><td>页码随选中变色</td><td>当前页白字实心胶囊，其余页裸数字</td><td>视觉重量全部让给当前页，一处强对比好过两处中等对比</td></tr>
+</table>
+<p class="note">实现：ThumbnailPane.swift；渲染管线（串行队列 + 可见性双检）未动——那部分本来就是对的呢。</p>
+
+<h2><span class="no">04</span>阅读界面整体：降饱和与减重</h2>
+
+<table>
+  <tr><th>Before</th><th>After</th><th>Why</th></tr>
+  <tr><td>强调色 <code>#2F5BEA</code>（高饱和靛蓝）</td><td><code>#56639F</code> / 深色 <code>#8E9BD1</code>（低饱和蓝紫灰）</td><td>P2：阅读器里 UI 的颜色是内容的竞争对手，强调色只需指路。选中胶囊、进度线、光晕、按钮全局生效</td></tr>
+  <tr><td>LeftRail 选中 = 实心强调色块 + 白图标 + 0.9 描边</td><td><code>accentSoft</code> 淡胶囊 + 强调色图标，去掉描边</td><td>实心块在常驻图标栏里是持续存在的「高亮补丁」，阅读时一直拉扯注意力；Apple 侧栏惯例即淡胶囊 + 彩色图标</td></tr>
+  <tr><td>AI 入口三处三种 SF Symbol（<code>sparkles</code> / <code>sparkles.rectangle.stack(.fill)</code>）</td><td>全部收敛为自绘环点字形（见 05），AI 面板头部改为不放图标</td><td>P3：同形才有识别度；面板头部与 chips 并排的图标是「重复自我介绍」</td></tr>
+</table>
+
+<h2><span class="no">05</span>图标 v1 → v3：设计迭代与取舍</h2>
+<p class="lead">同一轮里图标经历了三个版本。每个版本的废弃 / 保留理由如下——最终语言：<b>细线、极简几何、单色、留白</b>，与 PaperRss 一脉的纸感 UI 同源。</p>
+
+<h3>迭代一（v1，已废弃）：实心渐变书页 + 光晕</h3>
+<div class="cardrow">
+  <div class="card"><img src="assets/lumen-icon-dark-1024.png" class="small" alt="v1"><h4>v1 · 石板蓝渐变 + 实心书页</h4><p>首版交付：Big Sur 底板、对角渐变、暖纸色实心书页与光点</p></div>
+</div>
+<ul>
+  <li>✓ 成功处：「书 + 一点光」的意象准确，构图成立；<b>书页 + 升光的剪影被保留至今</b>。</li>
+  <li>✗ 问题：渐变与实心块是「重」的语言，与全局纸感 UI 相抵触；光晕的径向渐变在 Dock 小尺寸下变灰雾。</li>
+</ul>
+
+<h3>迭代二（v2，已废弃）：sparkle 双星 AI + 同语系微调</h3>
+<ul>
+  <li>AI 图标曾用低饱和双四芒星（参考截图里的通用 AI 星形）。</li>
+  <li>✗ 废弃理由：四芒星已是全行业 AI 万能符号（Cursor / Notion / Copilot），用它等于宣布没有自己的说法；且星形细腰在 14pt 工具栏尺寸下糊成一团。</li>
+  <li>这轮同时确立：主图标的问题不在「画得对不对」，而在「语言重不重」——由此触发 v3。</li>
+</ul>
+
+<h3>迭代三（v3，最终）：细线单色「灯下读书」+ 环点 AI</h3>
+<div class="cardrow">
+  <div class="card"><img src="assets/lumen-icon-1024.png" alt="v3 浅色"><h4>主图标 · 浅色（默认）</h4><p>纸底 <code>#F5F2EB</code> · 墨线 <code>#2F3540</code> · 16/1024 细线 · 无渐变无投影</p></div>
+  <div class="card"><img src="assets/lumen-icon-dark-1024.png" alt="v3 深色"><h4>主图标 · 深色</h4><p>墨底 <code>#262B33</code> · 纸线 <code>#EAE4D6</code>，同一线稿交换纸墨</p></div>
+  <div class="card"><img src="assets/lumen-icon-compact-64.png" class="small" alt="紧凑版"><h4>紧凑版（≤64px）</h4><p>线宽 ×2、光点 ×1.5、弧线拉直——16px 依然清晰</p></div>
+  <div class="card"><img src="assets/LumenAI-icon-512.png" class="small" alt="AI 环点"><h4>AI · 环点字形</h4><p>细环 + 缺口处实心点；currentColor 单色，选中才染强调色</p></div>
+</div>
+
+<table>
+  <tr><th>决策</th><th>取舍</th></tr>
+  <tr><td>主图标保留「书 + 一点光」意象，改为纯描边线稿</td><td>得到：与 UI 同语言、任意尺寸不糊、单色可打印；<b>放弃</b>：渐变的「精致感」与光影纵深——用留白补回来</td></tr>
+  <tr><td>AI 图标 = 细环 + 缺口实心点（「轨道上的焦点」）</td><td>语义：环 = 阅读回路，点 = 照亮。避开 sparkle / 机器人 / 大脑 / 灯泡全部俗套；<b>取舍</b>：信息量低——但工具栏 14pt 下「低信息量」恰恰是可读性</td></tr>
+  <tr><td>尺寸分级：≥128px 用母版，≤64px 用紧凑版</td><td>16/1024 的细线在 16px 下不足 1px；小尺寸加粗是 Apple 图标管线的常规做法。已生成完整 iconset + icns</td></tr>
+  <tr><td>AI 面板头部不放 AI 图标</td><td>评估过「保留 vs 移除」：工具栏 + 侧栏页签已两处同形指认，面板内第三处是重复。移除后更符合 PaperRss 式克制，故移除</td></tr>
+  <tr><td>SVG 为唯一源文件（branding/*.svg）+ 无头 Chrome 光栅化（branding/render.js）</td><td>改一处 SVG 即可全量重出 PNG / icns；深浅色 / 模板色 / 紧凑版全部由同一源派生</td></tr>
+</table>
+<p class="note">交付文件（assets/ 目录）：lumen-icon-light.svg / lumen-icon-dark.svg / lumen-icon-light-compact.svg / lumen-ai-template.svg（currentColor 单色模板）/ lumen-ai-template-compact.svg + 各尺寸 PNG。App 内字形（BrandGlyph / AIIcon）与 SVG 逐点对应，深浅色自动切换。</p>
+
+<h2><span class="no">06</span>顺手修掉的存量 Bug</h2>
+<table>
+  <tr><th>位置</th><th>问题</th><th>修复</th></tr>
+  <tr><td><code>RecentDocuments.load()</code></td><td>编码用 <code>.iso8601</code> 写日期，解码却用默认 <code>JSONDecoder</code>（按时间戳读 Double）→ 整体解码失败被 <code>try?</code> 吞掉，<b>「最近打开」每次启动都静默清空</b>（这也是旧首页从未显示过记录的根因）</td><td>补 <code>decoder.dateDecodingStrategy = .iso8601</code>，与编码策略成对</td></tr>
+</table>
+
+<h2><span class="no">07</span>动效纪律自查</h2>
+<table>
+  <tr><th>检查项</th><th>结论</th></tr>
+  <tr><td>动机</td><td>画廊入场浮起（低频落地页 ✓）、悬停浮起（低频 ✓）、缩略图选中切换（状态指示 ✓）、快滚吸附（避免动画互相打断 ✓）</td></tr>
+  <tr><td>缓动 / 时长</td><td>全部沿用既有 <code>DS.Motion</code> 令牌（quick 0.22s spring / hover 0.12s / content 0.18s），无新增 easing；无 ease-in</td></tr>
+  <tr><td>属性</td><td>只动 transform / opacity（scale、offset、shadow、opacity），未动宽高与边距</td></tr>
+  <tr><td>可中断 / 无障碍</td><td>用 transition / spring 而非 keyframes；动效门（MotionGate）与减弱动态全局开关继续生效</td></tr>
+</table>
+
+<h2><span class="no">08</span>改动文件清单</h2>
+<table>
+  <tr><th>文件</th><th>改动</th></tr>
+  <tr><td>Sources/LumenApp/Welcome/WelcomeView.swift</td><td>重写为画廊首页（CoverStore 封面渲染 + GalleryCard + BrandGlyph v3）</td></tr>
+  <tr><td>Sources/LumenApp/Reader/PDF/ThumbnailPane.swift</td><td>当前页光晕 + 页码徽章 + 联动滚动分档</td></tr>
+  <tr><td>Sources/LumenApp/Reader/Sidebar/LeftRail.swift</td><td>Apple 式淡胶囊选中态 + AI 页签环点字形</td></tr>
+  <tr><td>Sources/LumenApp/Design/DesignTokens.swift</td><td>强调色降饱和（light #56639F / dark #8E9BD1）</td></tr>
+  <tr><td>Sources/LumenApp/Design/AIIcon.swift</td><td>新建：OrbitRing + AIIcon v3（替换 sparkle 系列）</td></tr>
+  <tr><td>Sources/LumenApp/RootView.swift</td><td>工具栏 AI 开关换环点字形</td></tr>
+  <tr><td>Sources/LumenApp/AI/AIPanelView.swift</td><td>面板头部移除 AI 图标</td></tr>
+  <tr><td>Sources/LumenKit/Store/RecentDocuments.swift</td><td>修复 iso8601 解码 bug</td></tr>
+  <tr><td>branding/（新增 5 个 SVG + render.js）</td><td>图标唯一源 + 光栅化管线</td></tr>
+  <tr><td>Resources/AppIcon.icns（新增）</td><td>应用图标（build.sh 自动打包，Info.plist 已有声明无需改）</td></tr>
+</table>
+
+<p class="note" style="margin-top:40px">验证方式：swift build 通过；用项目自带 --capture 自检通道对旧 / 新版本各截「欢迎页 + 阅读页（缩略图侧栏展开）」实况截图（即本报告 Before / After 图）；图标另出 1024 / 512 / 64 / 32 多尺寸核对小尺寸可读性。</p>
+
+</div>
+</body>
+</html>
