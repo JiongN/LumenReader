@@ -51,7 +51,7 @@ final class GlobalShortcutRouter {
 
         for action in LumenAction.allCases {
             guard let combo = services.keyBindings.combo(for: action),
-                  combo == pressed else { continue }
+                  combo.matches(pressed) else { continue }
             // 编辑正文时保留光标操作，但面板与 zoom 的显式快捷键仍可使用。
             if isEditing && ![LumenAction.toggleSidebar, .toggleAIPanel, .toggleImmersive, .showSearch].contains(action) {
                 return event

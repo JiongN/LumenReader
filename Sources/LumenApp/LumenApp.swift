@@ -404,6 +404,7 @@ struct LumenCommands: Commands {
             item(.showSearch)
             item(.showAnnotations)
             item(.showThumbnails)
+            item(.showTranslation)
             item(.showLiteratureGraph)
 
             Divider()

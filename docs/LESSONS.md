@@ -219,3 +219,9 @@
 - **沉淀**：`Sources/LumenApp/Reader/PDF/PDFRenderTuning.swift`（三旋钮 + 开关 + 结论）、
   `PDFRenderAudit.swift`（钉死渲染状态供截图）、`tools/image_diff.swift`（逐像素对比）、
   `JankAudit` 的 `--jank-scroll-delta/-burst/-zoom` 与「驱动强度」自证行；读数表见 `docs/VERIFY.md` 第七节。
+
+## #16 快捷键契约要按物理键与路由动作双重核对（2026-10-25）
+
+- **现象与原因**：默认「放大」存成 `+` + ⌘，而 `NSEvent.charactersIgnoringModifiers` 在常见按法下给 `=`（⌘=）或带 shift 的 `+`（⇧⌘=），结构相等比较两种都命中不了。同时侧栏实际已有翻译页签、README 写了 ⌘1–⌘6，但 `LumenAction` 没有对应动作：EPUB 里按 ⌘5 命中禁用的「页面」并被路由吞掉。`keybindings.json` 损坏时 `try?` 返回空表却保留原文件，下一次改键又会把唯一原件覆盖成默认配置，和 LESSONS #7 是同一形状。
+- **修法**：`KeyCombo.matches(_:)` 明确表达 `=` 与 Shift 产物 `+` 的等价关系，全局路由与冲突检测共用；新增 `.showTranslation` 动作并默认 ⌘6；快捷键载入改走 `PersistFile.decodeOrBackup`。回归测试覆盖物理按法、等价冲突、⌘6 唯一性和坏文件备份后不被覆盖。
+- **通法**：改快捷键默认值时必须问两个问题——「真实 `NSEvent` 会给出哪个字符和修饰键」以及「文档/UI 承诺的每个入口是否都有可路由动作」。不能只用存储结构相等或菜单文案自证。

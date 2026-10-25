@@ -74,7 +74,7 @@ extension LumenAction {
         case .copyFullText:
             return hasDocument && state.bridge.extractFullText != nil
         case .toggleSidebar, .toggleAIPanel, .toggleImmersive, .showOutline,
-             .showSmartOutline, .showSearch, .showAnnotations, .showLiteratureGraph:
+             .showSmartOutline, .showSearch, .showAnnotations, .showTranslation, .showLiteratureGraph:
             return hasDocument
         case .showThumbnails:
             return state.document?.kind == .pdf
@@ -112,6 +112,7 @@ extension LumenAction {
         case .showSearch:     state.revealSidebar(tab: .search)
         case .showAnnotations: state.revealSidebar(tab: .annotations)
         case .showThumbnails: state.revealSidebar(tab: .thumbnails)
+        case .showTranslation: state.revealSidebar(tab: .translation)
         case .showLiteratureGraph:
             if let session = state.activeSession {
                 if !session.showsLiteratureGraph {

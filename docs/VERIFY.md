@@ -1,5 +1,11 @@
 # 验证手册
 
+## 对抗性代码体检与快捷键修复（2026-10-25）
+
+- 范围为静态对抗审查加全量 SwiftPM 回归，不涉及 PDF 热路径渲染、窗口布局或发布产物；真实触控板验收不适用也不宣称通过。详见 [本轮记录](verification/adversarial-20261025/README.md)。
+- 修复三处：路由默认 ⌘+ 在美式键盘实际按出 ⌘= / ⇧⌘= 时失配；侧栏「翻译」页签缺少 `LumenAction`，README 承诺的 ⌘6 无路由；`keybindings.json` 损坏后原文件会被下一次保存覆盖。前两项合并进 `KeyCombo.matches` 的等价匹配与冲突检测，后一项改走 `PersistFile.decodeOrBackup`。
+- 新增 `KeyBindingRegressionTests` 4 项，覆盖 ⌘+ 两种物理按法、等价冲突、⌘6 唯一性和损坏配置备份后不被覆盖。全量 `swift test --disable-sandbox --no-parallel --jobs 2` 为 **425 项通过、3 项真实素材测试跳过**（49.548 秒）；本轮改动前的基线为 421 项通过。
+
 ## EPUB 译文间距（2026-10-22）
 
 - 本地构建 `20261022-003335-32414`，译文行高 1.85，原译文配对留白、换段与字距独立，保留字号设置。仅改 EPUB 样式，不改 PDF/AI/翻译请求流程。

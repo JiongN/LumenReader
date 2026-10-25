@@ -473,6 +473,7 @@ struct CommandPaletteOverlay: View {
         case .showSearch:     return "magnifyingglass"
         case .showAnnotations: return "square.and.pencil"
         case .showThumbnails: return "square.grid.2x2"
+        case .showTranslation: return "character.book.closed"
         case .showLiteratureGraph: return "point.3.connected.trianglepath.dotted"
         case .fontIncrease:   return "textformat.size.larger"
         case .fontDecrease:   return "textformat.size.smaller"

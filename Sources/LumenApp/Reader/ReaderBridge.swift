@@ -295,7 +295,7 @@ enum SidebarTab: String, CaseIterable, Identifiable {
 
     var id: String { rawValue }
 
-    /// 当前文档可用的页签，顺序即 ⌘1–⌘5 的编号。
+    /// 当前文档可用的页签；PDF 的前六个对应 ⌘1–⌘6，图谱暂不设默认快捷键。
     ///
     /// 抽成函数而不是留在视图里：`LeftRail`（图标栏）与 `SidebarColumn`（内容面板）
     /// 都要它，各写一份的话新增页签时漏改一处，表现是「图标栏有五个、菜单里只有四个」。

@@ -162,6 +162,25 @@ public struct KeyCombo: Codable, Sendable, Equatable, Hashable {
         return KeyCombo(key: normalized, modifiers: modifiers)
     }
 
+    /// 路由匹配时兼容美式键盘上「=」与其 Shift 产物「+」。
+    ///
+    /// 默认放大保存为 ⌘+，但 ⌘= 的 `charactersIgnoringModifiers` 是 "="，
+    /// ⇧⌘= 则是 "+" 且多一个 shift。若只做结构相等比较，两种常见按法都无法命中。
+    /// 冲突检测也使用同一规则，避免另一个动作绑定到等价的 ⌘=。
+    public func matches(_ pressed: KeyCombo) -> Bool {
+        if self == pressed { return true }
+        if key == "+", pressed.key == "=" {
+            return modifiers == pressed.modifiers
+        }
+        if key == "+", pressed.key == "+" {
+            return modifiers == pressed.modifiers.subtracting([.shift])
+        }
+        if key == "=", pressed.key == "+" {
+            return modifiers == pressed.modifiers.subtracting([.shift])
+        }
+        return false
+    }
+
     /// 系统保留的组合，不允许用户占用。
     ///
     /// 这些键一旦被应用吃掉，用户就找不回退出、隐藏、切窗口这些基本操作，
@@ -264,6 +283,7 @@ public enum LumenAction: String, CaseIterable, Codable, Sendable, Identifiable {
     case showSearch
     case showAnnotations
     case showThumbnails
+    case showTranslation
     case showLiteratureGraph
 
     // 排版
@@ -294,6 +314,7 @@ public enum LumenAction: String, CaseIterable, Codable, Sendable, Identifiable {
         case .showSearch:     return "侧栏：搜索"
         case .showAnnotations: return "侧栏：批注"
         case .showThumbnails: return "侧栏：页面缩略图"
+        case .showTranslation: return "侧栏：翻译"
         case .showLiteratureGraph: return "文献图谱"
         case .fontIncrease:   return "放大字号"
         case .fontDecrease:   return "缩小字号"
@@ -308,7 +329,7 @@ public enum LumenAction: String, CaseIterable, Codable, Sendable, Identifiable {
         case .toggleSidebar, .toggleAIPanel, .toggleImmersive, .commandPalette:
             return .panel
         case .nextUnit, .previousUnit, .goToPage, .showOutline, .showSmartOutline, .showSearch,
-             .showAnnotations, .showThumbnails, .showLiteratureGraph:
+             .showAnnotations, .showThumbnails, .showTranslation, .showLiteratureGraph:
             return .reading
         case .fontIncrease, .fontDecrease:
             return .typography
@@ -339,9 +360,8 @@ public enum LumenAction: String, CaseIterable, Codable, Sendable, Identifiable {
         case .nextUnit:       return KeyCombo(key: KeyCombo.SpecialKey.rightArrow, modifiers: [.command, .option])
         case .previousUnit:   return KeyCombo(key: KeyCombo.SpecialKey.leftArrow, modifiers: [.command, .option])
         case .goToPage:       return KeyCombo(key: "g", modifiers: [.command])
-        // 四个侧栏页签按**界面里的排列顺序**编号。之前是 目录⌘1 / 搜索⌘2 / 页面⌘3，
-        // 插入智能目录后若沿用旧号，⌘2 指的会是排在第三位的搜索——顺序对不上，
-        // 用户按错了只会觉得快捷键是坏的。这里跟着排列改成 1/2/3/4。
+        // 侧栏页签按界面里的 PDF 排列顺序编号。EPUB 没有「页面」，但编号仍保持固定：
+        // 用户记住的是 ⌘1–⌘6 的动作，而不是同一动作在不同格式里漂移。
         case .showOutline:    return KeyCombo(key: "1", modifiers: [.command])
         case .showSmartOutline: return KeyCombo(key: "2", modifiers: [.command])
         case .showSearch:     return KeyCombo(key: "3", modifiers: [.command])
@@ -350,6 +370,7 @@ public enum LumenAction: String, CaseIterable, Codable, Sendable, Identifiable {
         // 用户按一次就能建立映射；乱序编号要求他先记住哪一号对应哪一个。
         case .showAnnotations: return KeyCombo(key: "4", modifiers: [.command])
         case .showThumbnails: return KeyCombo(key: "5", modifiers: [.command])
+        case .showTranslation: return KeyCombo(key: "6", modifiers: [.command])
         case .showLiteratureGraph: return KeyCombo(key: "", modifiers: [])
 
         case .fontIncrease:   return KeyCombo(key: "+", modifiers: [.command])
@@ -385,6 +406,7 @@ public enum LumenAction: String, CaseIterable, Codable, Sendable, Identifiable {
         case .showSearch:     return "search find 搜索 查找"
         case .showAnnotations: return "annotation highlight note 批注 高亮 笔记"
         case .showThumbnails: return "thumbnail page grid 缩略图 页面"
+        case .showTranslation: return "translation translate 翻译 段落 译文"
         case .showLiteratureGraph: return "literature graph citation network 文献 图谱 引用"
         case .fontIncrease:   return "font bigger 字号 放大"
         case .fontDecrease:   return "font smaller 字号 缩小"
@@ -440,7 +462,8 @@ public final class KeyBindingStore: ObservableObject {
     /// 与别的动作撞车时返回那个动作，没撞返回 nil。
     public func conflictingAction(for combo: KeyCombo, excluding action: LumenAction) -> LumenAction? {
         LumenAction.allCases.first { other in
-            other != action && self.combo(for: other) == combo
+            guard other != action, let bound = self.combo(for: other) else { return false }
+            return bound.matches(combo) || combo.matches(bound)
         }
     }
 
@@ -518,9 +541,13 @@ public final class KeyBindingStore: ObservableObject {
     /// - Returns: (有效的绑定表, 是否发生过改动)。改动过就要写回，见 `init`。
     private static func load(from url: URL) -> ([String: KeyCombo], Bool) {
         guard let data = try? Data(contentsOf: url), !data.isEmpty else { return ([:], false) }
-        guard let decoded = try? JSONDecoder().decode([String: KeyCombo].self, from: data) else {
-            // 解不出来就当没改过，不要把整个文件删掉——用户可能是手改坏了，
-            // 保留原文件他才好对照着修。
+        guard let decoded = PersistFile.decodeOrBackup(
+            data: data,
+            type: [String: KeyCombo].self,
+            fileURL: url,
+            reason: "keybindings.json"
+        ) else {
+            // 坏文件先改名备份；之后改键只写新文件，不会把唯一原件覆盖成默认配置。
             return ([:], false)
         }
         // 过滤掉已经不存在的动作名（改版删过动作时留下的残迹）

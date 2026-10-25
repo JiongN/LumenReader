@@ -135,11 +135,15 @@ enum KeyBindingsAudit {
         check("过滤掉不存在的动作名", tolerant.overrides.keys.contains("aDeletedAction") == false)
         check("同时保留有效项", tolerant.combo(for: subject) == KeyCombo(key: "u", modifiers: [.command]))
 
-        // 12. 坏文件不应崩、也不应把文件删掉
+        // 12. 坏文件不应崩，也不能在下一次保存时覆盖唯一原件
         try? "这不是 JSON".data(using: .utf8)?.write(to: temp)
         let broken = KeyBindingStore(fileURL: temp)
         check("坏文件退回空表而不是崩溃", broken.overrides.isEmpty)
-        check("坏文件保持原样（便于用户对照修复）", FileManager.default.fileExists(atPath: temp.path))
+        let corruptBackups = try? FileManager.default.contentsOfDirectory(
+            at: temp.deletingLastPathComponent(), includingPropertiesForKeys: nil
+        ).filter { $0.lastPathComponent.hasPrefix(temp.lastPathComponent + ".corrupt-") }
+        check("坏文件改名备份（便于用户对照修复）", corruptBackups?.isEmpty == false)
+        check("原路径不再指向坏文件", !FileManager.default.fileExists(atPath: temp.path))
 
         // 13. 全角 → 半角 归一化：**表驱动**逐项实跑，别只验一个。
         //     这是用户 keybindings.json 里 `】` 能生效的前提。
