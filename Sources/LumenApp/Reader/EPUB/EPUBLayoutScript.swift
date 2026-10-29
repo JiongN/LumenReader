@@ -34,8 +34,8 @@ enum EPUBLayoutScript {
       const root = document.documentElement;
       const paged = () => root.classList.contains('lumen-paged');
       const maxX = () => Math.max(0, root.scrollWidth - innerWidth);
-      const remember = () => {
-        if (restoring) return;
+      const remember = (force = false) => {
+        if (restoring && force !== true) return;
         const x = Math.min(innerWidth / 2, 60), y = 40;
         let candidate = document.elementFromPoint(x, y);
         if (!candidate || candidate === root || candidate === document.body) {
@@ -87,7 +87,16 @@ enum EPUBLayoutScript {
         window.scrollTo(Math.max(0, Math.min(maxX(), target)), 0);
         return true;
       }
-      window.__lumenLayout = { apply, remember, turn, paged };
+      // Translation rows change document height after a TOC jump. Keep the
+      // visible source element stable across each batch, including loading rows.
+      const preservePosition = change => {
+        remember(true);
+        const result = change();
+        restore();
+        return result;
+      };
+      const rememberNavigation = () => remember(true);
+      window.__lumenLayout = { apply, remember, rememberNavigation, preservePosition, turn, paged };
       window.addEventListener('scroll', remember, {passive: true});
       window.addEventListener('resize', () => {
         cancelAnimationFrame(resizeFrame);

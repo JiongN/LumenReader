@@ -666,7 +666,7 @@ struct ReaderContainerView: View {
     /// 自检：跑一遍智能目录的两步链路，并把结果落成可核对的日志。
     ///
     /// 为什么必须走完整流程而不是只验解析器：解析器在单元测试里能造输入，但
-    /// 「每页开头取出来的到底是什么」「模型看到之后给出的是不是真的落在这本书的页数范围内」
+    /// 「原文标题候选是什么」「模型所选 ID 是否绑定正确的物理页」
     /// 「点击条目之后画面到底滚没滚」这三件事，只有真的跑一遍才知道。
     private func runSmartOutlineAudit() async {
         let path = document.url.standardizedFileURL.path
@@ -733,7 +733,7 @@ struct ReaderContainerView: View {
             abs($0.unitIndex - current) < abs($1.unitIndex - current)
         }) {
             NSLog("%@", "[Lumen][outline] 跳转前：\(bridge.positionLabel)（当前单元 \(current)）")
-            let landed = state.jump(toUnit: target.unitIndex)
+            let landed = state.jump(toOutlineEntry: target)
             try? await Task.sleep(nanoseconds: 1_200_000_000)
             NSLog("%@", "[Lumen][outline] 点「\(target.title)」（目标单元 \(target.unitIndex + 1)）"
                 + "→ 解析为 0-based \(landed.map(String.init) ?? "nil")"
@@ -989,7 +989,11 @@ private struct ExistingHighlightBar: View {
                     .menuStyle(.borderlessButton)
                     .frame(width: 70)
             }
-            Button("查看批注") { state.revealSidebar(tab: .annotations) }
+            Button("新建批注") {
+                bridge.annotationEditRequestID = id
+                bridge.focusAnnotation(id)
+                state.revealSidebar(tab: .annotations)
+            }
             Button { bridge.selectedAnnotationID = nil } label: {
                 Image(systemName: "xmark")
             }

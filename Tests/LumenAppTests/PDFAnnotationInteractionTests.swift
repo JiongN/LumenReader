@@ -28,7 +28,11 @@ struct PDFAnnotationInteractionTests {
         let rightClick = try #require(NSEvent.mouseEvent(with: .rightMouseDown,
             location: NSPoint(x: 80, y: 200), modifierFlags: [], timestamp: 0,
             windowNumber: 0, context: nil, eventNumber: 0, clickCount: 1, pressure: 0))
-        #expect(view.menu(for: rightClick) != nil)
+        let menu = try #require(view.menu(for: rightClick))
+        #expect(Array(menu.items.prefix(3).map(\.title)) == ["高亮", "新建批注", "评论／便签"])
+        #expect(menu.items[0].action == nil)
+        #expect(menu.items[1].action == nil)
+        #expect(menu.items[2].action != nil)
         #expect(view.currentSelection == nil)
         #expect(!view.isUserSelection)
         #expect(!view.isBuildingContextMenu)
@@ -40,7 +44,9 @@ struct PDFAnnotationInteractionTests {
         view.keyDown(with: keyboard)
         #expect(view.isUserSelection)
         let intentionalText = try #require(view.currentSelection?.string)
-        #expect(view.menu(for: rightClick) != nil)
+        let selectedMenu = try #require(view.menu(for: rightClick))
+        #expect(selectedMenu.items[0].action != nil)
+        #expect(selectedMenu.items[1].action != nil)
         #expect(view.currentSelection?.string == intentionalText)
         #expect(view.isUserSelection)
         controller.clearInteraction()
@@ -78,12 +84,16 @@ struct PDFAnnotationInteractionTests {
         #expect(page.annotations.first { $0.lumenTypeName == "Highlight" }?.contents == "selected comment")
         #expect(page.annotations.filter { $0.lumenTypeName == "Text" }.isEmpty)
         controller.view.setCurrentSelection(selection, animate: false)
-        #expect(controller.addContextAnnotation(pageIndex: 0, selection: nil, body: "page note"))
+        #expect(!controller.addContextAnnotation(pageIndex: 0, selection: nil, body: "no implicit note"))
+        let highlightID = try #require(await controller.annotationsList().first?.id)
+        #expect(controller.performContextAction(.annotation, pageIndex: 0, selection: nil, annotationID: highlightID, body: "updated comment\nsecond line"))
+        #expect(controller.performContextAction(.pageNote, pageIndex: 0, selection: selection, body: "page note"))
         #expect(page.annotations.filter { $0.lumenTypeName == "Highlight" }.count == 1)
         #expect(page.annotations.first { $0.lumenTypeName == "Text" }?.contents == "page note")
         try await waitForSave(controller)
         let reopened = try #require(PDFDocument(url: url))
         #expect(reopened.page(at: 0)?.annotations.filter { PDFController.isListableAnnotation($0) }.count == 2)
+        #expect(reopened.page(at: 0)?.annotations.first { $0.lumenTypeName == "Highlight" }?.contents == "updated comment\nsecond line")
     }
 
     nonisolated private static func isWorkerThread() -> Bool { !Thread.isMainThread }

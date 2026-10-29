@@ -580,6 +580,9 @@ struct PDFReaderView: View {
                 }
             }
             else if let bridge {
+                if message == "批注已保存" || message == "已保存到原文件" {
+                    LiteratureSyncService.shared.annotationSaved(documentURL: thumbnailURL)
+                }
                 if message == "OCR 文字已写入原 PDF", let controller {
                     bridge.isScannedDocument = controller.detectScannedDocument()
                 }
@@ -642,19 +645,13 @@ struct PDFReaderView: View {
             return ok
         }
         // 批注面板「新建」→ 当前页一条空白便签，返回条目让面板直接进入编辑
-        bridge.addNoteAtCurrentPosition = { [weak controller, weak bridge] in
+        bridge.addNoteAtCurrentPosition = { [weak controller] in
             guard let controller else { return nil }
-            if bridge?.selectionFromDrag == true, bridge?.selection?.isUsable == true {
-                let existingIDs = Set(await controller.annotationsList().map(\.id))
-                guard controller.addHighlight(fromCurrentSelection: "") else { return nil }
-                bridge?.selection = nil
-                return await controller.annotationsList().first { !existingIDs.contains($0.id) }
-            }
             return controller.addPageNoteAtCurrentPosition()
         }
-        controller.view.onNewAnnotationRequested = { [weak controller, weak bridge] pageIndex, selection, body in
+        controller.view.onContextAnnotationRequested = { [weak controller, weak bridge] action, pageIndex, selection, id, body in
             guard let controller, let bridge else { return false }
-            let ok = controller.addContextAnnotation(pageIndex: pageIndex, selection: selection, body: body)
+            let ok = controller.performContextAction(action, pageIndex: pageIndex, selection: selection, annotationID: id, body: body)
             if ok {
                 bridge.annotationRevision += 1
                 bridge.selectedAnnotationID = nil
@@ -699,13 +696,15 @@ struct PDFReaderView: View {
             return await controller.extractFullText(allowOCR: allowOCR, progress: progress)
         }
 
-        // 智能目录：只要每页**开头**那一小截。取满了再送过去是浪费——
-        // 章节标题几乎都在页首，而全文喂进去既慢又贵，还会让模型在细节里迷路。
-        bridge.unitSnippetProvider = {
-            guard let snapshot = try? await PDFDocumentContextCache.shared.snapshot(path: documentPath), !Task.isCancelled else { return [] }
-            return (0..<snapshot.context.unitCount).map { index in
-                (index: index, text: snapshot.paragraphs.filter { $0.pageIndex == index }.map(\.text).joined(separator: "\n\n"))
-            }
+        bridge.outlineSourceProvider = { [weak controller] in
+            let cached = controller?.ocrRecognizedPages.reduce(into: [Int: String]()) { values, index in
+                values[index] = controller?.cachedOCRText(index)
+            } ?? [:]
+            let url = URL(fileURLWithPath: documentPath)
+            let worker = Task.detached(priority: .userInitiated) { try PDFSmartOutlineSource.read(url: url, cachedOCR: cached) }
+            return try await withTaskCancellationHandler {
+                try await worker.value
+            } onCancel: { worker.cancel() }
         }
 
         bridge.sectionTextProvider = { start, end in

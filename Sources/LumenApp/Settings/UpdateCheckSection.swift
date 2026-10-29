@@ -29,24 +29,9 @@ enum AppVersionInfo {
 
 // MARK: - 更新检查视图
 
-/// 设置 → 关于 里的「检查更新」区块。
-///
-/// 交互：点「检查更新」→ 请求 GitHub Releases `latest` → 按结果展示
-/// 「有新版本 / 已是最新 / 仓库暂无发布 / 检查失败（断网等）」。
-/// 有更新时给出「去下载」按钮（打开浏览器，跳到 Release 页或 ZIP 直链）。
+/// Shared by Settings and the app-menu update window.
 struct UpdateCheckSection: View {
-
-    /// 检查状态机。
-    enum Phase: Equatable {
-        case idle
-        case checking
-        case available(UpdateInfo)
-        case upToDate
-        case noRelease
-        case failed(String)
-    }
-
-    @State private var phase: Phase = .idle
+    @ObservedObject private var updater = AppUpdater.shared
 
     var body: some View {
         VStack(alignment: .leading, spacing: DS.Space.m) {
@@ -54,51 +39,40 @@ struct UpdateCheckSection: View {
                 Text("更新")
                     .font(DS.Typo.headline)
                 Spacer()
-                if phase != .checking {
-                    Button("检查更新", action: check)
-                        .disabled(phase == .checking)
-                } else {
+                if updater.busy {
                     ProgressView()
                         .controlSize(.small)
-                    Text("检查中…")
-                        .font(DS.Typo.caption)
-                        .foregroundStyle(DS.Palette.textSecondary)
+                } else {
+                    Button("检查更新") { updater.check() }
                 }
             }
-
+            Toggle("自动检查更新", isOn: $updater.automatic)
             statusText
-
-            // 有新版本时给出下载入口与说明
-            if case .available(let info) = phase {
+            if case .available(let info) = updater.phase {
                 HStack(spacing: DS.Space.s) {
-                    Button {
-                        open(info.downloadURL ?? info.htmlURL)
-                    } label: {
-                        Label(
-                            info.downloadURL != nil ? "下载 \(info.tagName)" : "前往 Release 页",
-                            systemImage: "arrow.down.circle"
-                        )
+                    if info.installAsset != nil {
+                        Button("下载并重启更新") { updater.install(info) }
+                            .buttonStyle(.borderedProminent)
                     }
-                    .buttonStyle(.borderedProminent)
-
-                    if !info.releaseNotes.isEmpty {
-                        DisclosureGroup("更新说明") {
-                            Text(info.releaseNotes)
-                                .font(DS.Typo.callout)
-                                .foregroundStyle(DS.Palette.textSecondary)
-                                .textSelection(.enabled)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                        }
-                        .font(DS.Typo.caption)
+                    Link("发布说明", destination: URL(string: "https://github.com/JiongN/LumenReader/releases")!)
+                }
+                if info.installAsset == nil {
+                    Text("该版本尚无可校验的安装包，请从发布页安装。")
+                        .font(DS.Typo.caption).foregroundStyle(DS.Palette.textSecondary)
+                }
+                if !info.releaseNotes.isEmpty {
+                    DisclosureGroup("更新说明") {
+                        Text(info.releaseNotes).textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
                     }
+                    .font(DS.Typo.callout)
                 }
             }
-
-            Text("更新检查通过 GitHub Releases 进行，不收集任何数据。"
-                 + "没有 Developer ID 公证，请从我们发布的下载页更新，勿信任来路不明的副本。")
-                .font(DS.Typo.ui(size: 10))
-                .foregroundStyle(DS.Palette.textTertiary)
-                .fixedSize(horizontal: false, vertical: true)
+            if updater.phase == .preparing {
+                Button("取消下载") { updater.cancel() }
+            }
+            Text("每天检查 GitHub 正式版；更新前核验校验值与签名，保存完成后重启。")
+                .font(DS.Typo.caption).foregroundStyle(DS.Palette.textSecondary)
         }
         .padding(DS.Space.l)
         .background(
@@ -109,18 +83,22 @@ struct UpdateCheckSection: View {
 
     @ViewBuilder
     private var statusText: some View {
-        switch phase {
+        switch updater.phase {
         case .idle:
-            Text("尚未检查。点击「检查更新」获取最新版本。")
+            Text("当前版本：\(AppVersionInfo.display)")
                 .font(DS.Typo.callout)
                 .foregroundStyle(DS.Palette.textSecondary)
         case .checking:
-            EmptyView()
+            Text("正在检查…")
+        case .preparing:
+            Text("正在下载并校验更新，完成后将重启…")
+        case .restarting:
+            Text("正在等待批注与会话保存，随后安装更新…")
         case .available(let info):
             Text("发现新版本 \(info.tagName)（当前 \(AppVersionInfo.display)）。")
                 .font(DS.Typo.callout)
                 .foregroundStyle(DS.Palette.success)
-        case .upToDate:
+        case .current:
             Text("已是最新版本（\(AppVersionInfo.display)）。")
                 .font(DS.Typo.callout)
                 .foregroundStyle(DS.Palette.success)
@@ -129,37 +107,10 @@ struct UpdateCheckSection: View {
                 .font(DS.Typo.callout)
                 .foregroundStyle(DS.Palette.textSecondary)
         case .failed(let reason):
-            Text("检查失败：\(reason)")
+            Text("更新未完成：\(reason)")
                 .font(DS.Typo.callout)
                 .foregroundStyle(DS.Palette.danger)
         }
     }
 
-    @MainActor
-    private func check() {
-        guard phase != .checking else { return }
-        guard let current = AppVersionInfo.semver else {
-            phase = .failed("无法读取本地版本号")
-            return
-        }
-        phase = .checking
-        Task { @MainActor in
-            let outcome = await UpdateChecker.check(
-                repository: UpdateChecker.defaultRepository,
-                currentVersion: current
-            )
-            switch outcome {
-            case .upToDate: phase = .upToDate
-            case .updateAvailable(let info): phase = .available(info)
-            case .noRelease: phase = .noRelease
-            case .failed(let reason): phase = .failed(reason)
-            }
-        }
-    }
-
-    private func open(_ urlString: String) {
-        if let url = URL(string: urlString) {
-            NSWorkspace.shared.open(url)
-        }
-    }
 }

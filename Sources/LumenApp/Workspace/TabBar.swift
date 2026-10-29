@@ -40,6 +40,7 @@ struct TabBar: View {
             .padding(.leading, DS.Space.xs)
 
             GeometryReader { proxy in
+              ScrollViewReader { scroll in
               ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: DS.Space.xs) {
                     ForEach(state.sessions) { session in
@@ -51,14 +52,15 @@ struct TabBar: View {
                             onDetach: { state.detach(session) },
                             onCloseOthers: { state.closeOthers(keeping: session) }
                         )
+                        .id(session.id.uuidString)
                     }
 
                     // 主页标签排在最后：和浏览器「在末尾开新标签」的手感一致。
                     if state.homeTabIsActive {
                         HomeTabItem(onClose: { state.closeHomeTab() })
+                            .id("home")
                     }
 
-                    addButton
                     TitlebarDragArea()
                         .frame(minWidth: 24, maxWidth: .infinity, maxHeight: .infinity)
                 }
@@ -66,7 +68,20 @@ struct TabBar: View {
                 .frame(minWidth: proxy.size.width, alignment: .leading)
                 .frame(height: Self.height)
               }
+              .onChange(of: state.activeSessionID) { _, id in
+                  if let id { scroll.scrollTo(id.uuidString) }
+              }
+              .onChange(of: state.homeTabIsActive) { _, active in
+                  if active { scroll.scrollTo("home", anchor: .trailing) }
+              }
+              .onChange(of: proxy.size.width) { _, _ in
+                  scroll.scrollTo(state.homeTabIsActive ? "home" : state.activeSessionID?.uuidString ?? "", anchor: .center)
+              }
+              }
             }
+            .clipped()
+
+            addButton.padding(.horizontal, DS.Space.xs)
 
             Divider()
 
@@ -283,6 +298,10 @@ private struct TabItem: View {
         }
         .contextMenu { menu }
         .help(session.document.url.path)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("标签页：\(session.title)")
+        .accessibilityAddTraits(isActive ? [.isButton, .isSelected] : .isButton)
+        .accessibilityAction { onActivate() }
     }
 
     @ViewBuilder

@@ -7,7 +7,7 @@ import Foundation
 /// PDF 的批注本体写在 PDF 文件里（PDFKit annotation），这个结构只是列表投影；
 /// EPUB 没有可以写回的「原文件」，批注本体就存在本应用的数据目录里，
 /// 由 `AnnotationStore` 持有——两种格式在这个结构上汇合成同一种列表交互。
-public struct AnnotationItem: Identifiable, Sendable, Equatable {
+public struct AnnotationItem: Identifiable, Sendable, Equatable, Codable {
     /// 稳定 id。PDF 用「页号 + 批注原点 + 类型」（同基串的第 k 条再追加 `#k`）——
     /// 刻意不含时间戳，原因见 `PDFController.entryID` 的注释；EPUB 用生成时的 UUID。
     public var id: String
@@ -60,12 +60,6 @@ public struct AnnotationItem: Identifiable, Sendable, Equatable {
 struct AnnotationArchive: Codable {
     var items: [StoredAnnotation] = []
 
-    /// 旧数据容错升级入口
-    static func load(from url: URL) -> AnnotationArchive {
-        guard let data = try? Data(contentsOf: url), !data.isEmpty else { return AnnotationArchive() }
-        return PersistFile.decodeOrBackup(data: data, type: AnnotationArchive.self,
-            fileURL: url, reason: "EPUB annotations.json") ?? AnnotationArchive()
-    }
 }
 
 /// 存储形态（与展示形态分开：展示形态引用 DocumentLocator，存储用 storageKey）。
@@ -83,10 +77,24 @@ struct StoredAnnotation: Codable, Equatable {
 public final class AnnotationStore {
     public let fileURL: URL
     private var archive: AnnotationArchive
+    private var expectedData: Data?
+    private var canWrite = true
 
     public init(documentPath: String) {
         self.fileURL = AppPaths.annotationsFile(forPath: documentPath)
-        self.archive = AnnotationArchive.load(from: fileURL)
+        self.archive = AnnotationArchive()
+        if FileManager.default.fileExists(atPath: fileURL.path) {
+            do {
+                let data = try Data(contentsOf: fileURL)
+                archive = PersistFile.decodeOrBackup(data: data, type: AnnotationArchive.self,
+                    fileURL: fileURL, reason: "EPUB annotations.json") ?? AnnotationArchive()
+                // A corrupt file may have been moved aside by recovery.
+                expectedData = FileManager.default.fileExists(atPath: fileURL.path) ? data : nil
+            } catch {
+                canWrite = false
+                NSLog("%@", "[Lumen][annotations] 无法读取批注，已禁止覆盖：\(error.localizedDescription)")
+            }
+        }
     }
 
     public var items: [AnnotationItem] {
@@ -123,7 +131,10 @@ public final class AnnotationStore {
             createdAt: item.createdAt,
             highlightHex: item.highlightHex
         ))
-        flush()
+        guard flush() else {
+            archive.items.removeLast()
+            return false
+        }
         return true
     }
 
@@ -131,8 +142,12 @@ public final class AnnotationStore {
     @discardableResult
     public func updateNote(id: String, note: String) -> Bool {
         guard let index = archive.items.firstIndex(where: { $0.id == id }) else { return false }
+        let previous = archive.items[index].note
         archive.items[index].note = note
-        flush()
+        guard flush() else {
+            archive.items[index].note = previous
+            return false
+        }
         return true
     }
 
@@ -151,16 +166,34 @@ public final class AnnotationStore {
 
     @discardableResult
     public func remove(id: String) -> Bool {
-        let before = archive.items.count
+        let previous = archive.items
         archive.items.removeAll { $0.id == id }
-        guard archive.items.count != before else { return false }
-        flush()
+        guard archive.items.count != previous.count else { return false }
+        guard flush() else {
+            archive.items = previous
+            return false
+        }
         return true
     }
 
     @discardableResult
     public func flush() -> Bool {
-        guard let data = try? JSONEncoder().encode(archive) else { return false }
-        return PersistFile.write(data, to: fileURL, label: "annotations.json")
+        guard canWrite, let data = try? JSONEncoder().encode(archive) else { return false }
+        let coordinator = NSFileCoordinator()
+        var coordinationError: NSError?
+        var saved = false
+        coordinator.coordinate(writingItemAt: fileURL, options: .forReplacing, error: &coordinationError) { url in
+            do {
+                let current = FileManager.default.fileExists(atPath: url.path) ? try Data(contentsOf: url) : nil
+                guard current == expectedData else {
+                    NSLog("%@", "[Lumen][annotations] 批注已被其他窗口或进程修改，未覆盖。")
+                    return
+                }
+                saved = PersistFile.write(data, to: url, label: "annotations.json")
+            } catch { NSLog("%@", "[Lumen][annotations] 写入前检查失败：\(error.localizedDescription)") }
+        }
+        guard coordinationError == nil, saved else { return false }
+        expectedData = data
+        return true
     }
 }

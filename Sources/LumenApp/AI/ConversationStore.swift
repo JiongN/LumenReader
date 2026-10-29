@@ -179,7 +179,7 @@ final class ConversationStore: ObservableObject {
     private static func loadFile() -> ConversationFile? {
         ConversationFileWriter.shared.flush()
         let url = AppPaths.conversationHistoryFile
-        guard let data = try? Data(contentsOf: url) else { return nil }
+        guard let data = PersistFile.readJSONData(from: url, reason: "conversations.json") else { return nil }
         return PersistFile.decodeOrBackup(
             data: data,
             type: ConversationFile.self,

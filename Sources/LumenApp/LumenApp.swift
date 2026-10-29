@@ -105,6 +105,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // 显式创建第一个阅读器窗口（欢迎页或 --open 指定的文档）。
         // 必须在截图自检注册之前：窗口是同步创建的，不再依赖 SwiftUI 场景的异步装配。
         WindowManager.shared.startup()
+        LiteratureSyncService.shared.start()
+        AppUpdater.shared.scheduleBackgroundCheck()
 
         // 字号快捷键与边界自检（纯函数 + 格式分发 + 行为回读 + md5 自证）。
         // 放在建窗之后：需要 services（其 SettingsStore 已因 isAuditRun 开 suppressSave）。
@@ -153,7 +155,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// 外部「打开文件」事件（访达打开方式 / 拖到 Dock 图标 / `open -a`）：
     /// 全部进当前窗口的新标签，而不是让系统再开一个窗口。
     func application(_ application: NSApplication, open urls: [URL]) {
-        WindowManager.shared.openExternally(urls: urls)
+        let files = urls.filter(\.isFileURL)
+        if !files.isEmpty { WindowManager.shared.openExternally(urls: files) }
+        for url in urls where url.scheme?.lowercased() == "lumen" {
+            WindowManager.shared.openLiteratureLink(url)
+        }
     }
 
     /// 阅读器不是常驻后台工具，关掉最后一个窗口就应当退出。
@@ -280,6 +286,9 @@ struct LumenCommands: Commands {
     private var state: AppState? { windows.activeWorkspace }
 
     var body: some Commands {
+        CommandGroup(after: .appInfo) {
+            Button("检查更新…") { AppUpdater.shared.showAndCheck() }
+        }
         // 文件
         CommandGroup(replacing: .newItem) {
             item(.openDocument)
@@ -415,7 +424,7 @@ struct LumenCommands: Commands {
                 state?.generateSmartOutline()
             }
             .disabled(state?.document == nil
-                || state?.bridge.unitSnippetProvider == nil
+                || state?.bridge.outlineSourceProvider == nil
                 || state?.smartOutline.phase.isWorking == true)
 
             Button("查看 AI 智能目录") { state?.revealSidebar(tab: .smartOutline) }

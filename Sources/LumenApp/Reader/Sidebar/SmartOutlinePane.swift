@@ -3,7 +3,7 @@ import LumenKit
 
 /// 侧栏的「智能目录」页。
 ///
-/// 两步走的界面：先生成骨架（一次请求），摘要按需生成（点哪条算哪条）。
+/// 两步走的界面：先核对骨架，摘要按需生成（点哪条算哪条）。
 /// 界面上刻意把这两种动作**做成两个不同的控件**——「摘要」按钮是明摆着要花钱的，
 /// 折叠箭头是免费的本地展开。把付费动作藏在「展开」里，用户点着点着账单就上去了。
 struct SmartOutlinePane: View {
@@ -15,6 +15,7 @@ struct SmartOutlinePane: View {
     /// 已展开摘要的条目 id。放视图里而不是模型里：
     /// 「展开」是一次性的界面状态，退出再进来收起来是合理的，不值得持久化。
     @State private var expanded: Set<String> = []
+    @State private var selectedEntryID: String?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -23,6 +24,7 @@ struct SmartOutlinePane: View {
             content
         }
         .onChange(of: model.outline) { _, newValue in
+            if !(newValue?.entries.contains { $0.id == selectedEntryID } ?? false) { selectedEntryID = nil }
             guard let newValue else {
                 expanded = []
                 return
@@ -30,6 +32,11 @@ struct SmartOutlinePane: View {
             // 重新生成后旧的高亮态没有意义了，避免出现「展开着一条已经不在的条目」
             expanded = expanded.filter { id in
                 newValue.entries.contains(where: { $0.id == id })
+            }
+        }
+        .onChange(of: bridge.currentUnitIndex) { _, unit in
+            if let entry = model.outline?.entries.first(where: { $0.id == selectedEntryID }), entry.unitIndex != unit {
+                selectedEntryID = nil
             }
         }
         .onChange(of: model.pendingReveal) { _, _ in
@@ -72,7 +79,7 @@ struct SmartOutlinePane: View {
             }
             .buttonStyle(.plain)
             .disabled(model.phase.isWorking)
-            .help("让 AI 读一遍文档，推断出章节结构")
+            .help("从原文标题生成目录并核对位置")
 
             Spacer(minLength: 0)
 
@@ -213,7 +220,9 @@ struct SmartOutlinePane: View {
                             isExpanded: expanded.contains(entry.id),
                             isSummarizing: model.summarizing.contains(entry.id),
                             isActive: entry.id == activeEntryID(outline),
-                            onJump: { state.jump(toUnit: entry.unitIndex) },
+                            onJump: {
+                                if state.jump(toOutlineEntry: entry) != nil { selectedEntryID = entry.id }
+                            },
                             onRequestSummary: { requestSummary(for: entry) },
                             onCancelSummary: {
                                 model.cancelSummary(id: entry.id)
@@ -254,9 +263,7 @@ struct SmartOutlinePane: View {
     /// 当前阅读位置落在哪一条上：取「起点不晚于当前位置」的最后一条。
     /// 不用 `==` 匹配是因为目录条目的粒度（章）常常大于当前单元（页）。
     private func activeEntryID(_ outline: SmartOutline) -> String? {
-        outline.entries
-            .last { $0.unitIndex <= bridge.currentUnitIndex }?
-            .id
+        SmartOutlineModel.activeEntryID(in: outline, unit: bridge.currentUnitIndex, selectedID: selectedEntryID)
     }
 
     // MARK: - 摘要
@@ -315,11 +322,16 @@ private struct SmartOutlineRow: View {
                             .fixedSize(horizontal: false, vertical: true)
 
                         Spacer(minLength: 0)
+                        Text("\(entry.unitIndex + 1)")
+                            .font(DS.Typo.ui(size: 10))
+                            .monospacedDigit()
+                            .foregroundStyle(DS.Palette.textTertiary)
                     }
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                .help("跳到这一节")
+                .help(entry.title + " · 第 \(entry.unitIndex + 1) 页/章")
+                .accessibilityAddTraits(isActive ? .isSelected : [])
 
                 summaryControl
             }

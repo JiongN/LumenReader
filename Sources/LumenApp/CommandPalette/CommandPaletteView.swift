@@ -385,7 +385,7 @@ struct CommandPaletteOverlay: View {
             title: state.smartOutline.outline == nil ? "生成 AI 智能目录" : "重新生成 AI 智能目录",
             icon: "sparkles.rectangle.stack", group: "AI",
             isEnabled: state.document != nil
-                && bridge.unitSnippetProvider != nil
+                && bridge.outlineSourceProvider != nil
                 && !state.smartOutline.phase.isWorking,
             keywords: "smart outline ai 智能目录 结构 章节 生成"
         ) { state.generateSmartOutline() })

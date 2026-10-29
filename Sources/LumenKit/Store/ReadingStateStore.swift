@@ -31,7 +31,7 @@ public final class ReadingStateStore: ObservableObject {
     }
 
     private static func load(from url: URL) -> ReadingState? {
-        guard let data = try? Data(contentsOf: url) else { return nil }
+        guard let data = PersistFile.readJSONData(from: url, reason: "reading-state.json") else { return nil }
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
         // 解码失败 → 备份原文件 + NSLog + 返回 nil（调用方保持默认值，不写空值回去）。

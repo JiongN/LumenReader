@@ -29,7 +29,7 @@ public final class SettingsStore: ObservableObject {
     // MARK: - 持久化
 
     private static func load(from url: URL) -> AppSettings {
-        guard let data = try? Data(contentsOf: url), !data.isEmpty else { return AppSettings() }
+        guard let data = PersistFile.readJSONData(from: url, reason: "settings.json") else { return AppSettings() }
         let decoder = JSONDecoder()
         // 整份文件解不出来（JSON 语法坏 / 顶层类型不对）→ 备份原文件 + NSLog，退回默认。
         // 原文件已被改名，之后的防抖保存写的是新文件，不会把用户配置盖成一份默认值。

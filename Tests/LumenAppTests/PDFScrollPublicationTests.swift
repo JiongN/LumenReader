@@ -46,6 +46,19 @@ struct PDFScrollPublicationTests {
         return (controller, state, url)
     }
 
+    @Test func explicitJumpUpdatesThumbnailSelectionWithoutBoundsNotifications() async throws {
+        let (controller, state, url) = try fixture()
+        defer { controller.unload(); try? FileManager.default.removeItem(at: url) }
+        controller.view.documentView?.enclosingScrollView?.contentView.postsBoundsChangedNotifications = false
+        controller.go(to: 2)
+        try await Task.sleep(nanoseconds: 350_000_000)
+        #expect(controller.currentPageIndex == 2)
+        #expect(state.snapshot.centerPage == 2)
+        controller.go(to: 0)
+        try await Task.sleep(nanoseconds: 350_000_000)
+        #expect(state.snapshot.centerPage == 0)
+    }
+
     @Test func continuousNotificationsDoNotPublishUntilIdle() async throws {
         let (controller, state, url) = try fixture()
         defer { controller.unload(); try? FileManager.default.removeItem(at: url) }

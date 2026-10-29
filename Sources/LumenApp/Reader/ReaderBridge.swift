@@ -74,7 +74,11 @@ final class ReaderBridge: ObservableObject {
     /// 批注变更计数。侧栏批注页签按它刷新——
     /// 批注存在两种后端里（PDF 写文件、EPUB 存数据目录），没有统一的「已变更」事件，
     /// 用一个自增计数把两条路径汇合成同一种刷新信号。
-    @Published var annotationRevision: Int = 0
+    @Published var annotationRevision: Int = 0 {
+        didSet { onAnnotationRevisionChanged?() }
+    }
+    /// EPUB storage reports only completed saves through this callback.
+    var onAnnotationRevisionChanged: (() -> Void)?
     @Published var thumbnailRevision: Int = 0
 
     /// 当前被「聚焦」的批注（正文里点中的、或刚新建的）。
@@ -154,13 +158,8 @@ final class ReaderBridge: ObservableObject {
     var zoomToFit: (() -> Void)?
     /// 取当前视图的上下文文本，供 AI 使用
     var currentContextProvider: (() -> (String, DocumentLocator))?
-    /// 取**每个单元开头的短文本**，供 AI 智能目录推断结构。
-    ///
-    /// 与 `slicesProvider` 分开而不是复用它，是因为两者的取样方式正好相反：
-    /// 切片要「每段尽可能多的正文」好用来总结内容，而识别结构只需要每页开头那一小截
-    /// （标题、编号都在页首）。复用的话，一本 300 页的书要把全文都读出来才能给出
-    /// 首页那点信息，白等好几秒。
-    var unitSnippetProvider: (() async -> [(index: Int, text: String)])?
+    /// 原页/章节绑定的标题候选；模型只能选择 ID，不能生成标题或页码。
+    var outlineSourceProvider: (() async throws -> SmartOutlineSource)?
     /// 取某个单元区间（含首尾）的正文，供生成单节摘要。
     /// 区间由调用方决定：一条目录项覆盖到「下一条目录项之前」，桥本身不需要知道目录。
     var sectionTextProvider: ((_ startUnit: Int, _ endUnit: Int) async -> String)?
@@ -212,6 +211,7 @@ final class ReaderBridge: ObservableObject {
 
     /// 载入新文档时重置全部状态，避免上一本的残留串台。
     func reset() {
+        onAnnotationRevisionChanged = nil
         selection = nil
         selectionFromDrag = false
         selectionTranslationMode = false
@@ -259,7 +259,7 @@ final class ReaderBridge: ObservableObject {
         ocrTextProvider = nil
         requestOCR = nil
         extractFullText = nil
-        unitSnippetProvider = nil
+        outlineSourceProvider = nil
         sectionTextProvider = nil
         addHighlight = nil
         addHighlightWithColor = nil
@@ -292,6 +292,7 @@ enum SidebarTab: String, CaseIterable, Identifiable {
     case thumbnails
     case translation
     case literatureGraph
+    case notes
 
     var id: String { rawValue }
 
@@ -315,6 +316,7 @@ enum SidebarTab: String, CaseIterable, Identifiable {
         case .annotations:  return "批注"
         case .thumbnails:   return "页面"
         case .translation:  return "翻译"
+        case .notes: return "笔记"
         case .literatureGraph: return "图谱"
         }
     }
@@ -328,6 +330,7 @@ enum SidebarTab: String, CaseIterable, Identifiable {
         case .annotations:  return "批注与高亮"
         case .thumbnails:   return "页面缩略图"
         case .translation:  return "段落翻译"
+        case .notes: return "文献笔记"
         case .literatureGraph: return "文献图谱"
         }
     }
@@ -340,6 +343,7 @@ enum SidebarTab: String, CaseIterable, Identifiable {
         case .annotations:  return "square.and.pencil"
         case .thumbnails:   return "square.grid.2x2"
         case .translation:  return "character.book.closed"
+        case .notes: return "note.text"
         case .literatureGraph: return "point.3.connected.trianglepath.dotted"
         }
     }

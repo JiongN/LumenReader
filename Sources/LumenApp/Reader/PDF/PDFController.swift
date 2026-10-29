@@ -770,6 +770,9 @@ final class PDFController: NSObject, ObservableObject {
         view.go(to: page)
         suppressCallbacks = false
         publishPosition()
+        // PDFKit may omit a clip-bounds notification for a programmatic jump.
+        // Publish settled geometry as well so thumbnail selection follows it.
+        scheduleViewport()
     }
 
     func go(to locator: DocumentLocator) {
@@ -789,13 +792,26 @@ final class PDFController: NSObject, ObservableObject {
             bounds = selected.bounds(for: page)
         }
         clearInteraction()
-        view.go(to: page)
-        guard !bounds.isEmpty, !bounds.isInfinite, !bounds.isNull else { publishPosition(); return }
-        view.layoutDocumentView()
-        view.go(to: bounds.insetBy(dx: -18, dy: -32), on: page)
+        guard !bounds.isEmpty, !bounds.isInfinite, !bounds.isNull,
+              bounds.origin.x.isFinite, bounds.origin.y.isFinite,
+              bounds.width.isFinite, bounds.height.isFinite else { go(to: fragment.pageIndex); return }
+        // A page jump followed by layoutDocumentView and a second rectangle jump
+        // needlessly relayouts the whole book. PDFKit can reveal this page region
+        // directly, and an already visible paragraph does not need to scroll.
+        suppressCallbacks = true
+        // In paged mode PDFKit cannot convert/reveal a page that is not in its
+        // current spread. Only that mode needs the initial page change.
+        if readingFlowMode == .paged, !view.visiblePages.contains(where: { $0 === page }) {
+            view.go(to: page)
+        }
+        let visibleBounds = view.convert(bounds, from: page)
+        if !view.visibleRect.insetBy(dx: 4, dy: 4).contains(visibleBounds) {
+            view.go(to: bounds.insetBy(dx: -18, dy: -32), on: page)
+        }
         if let selection = page.selection(for: bounds), !(selection.string ?? "").isEmpty {
             view.setCurrentSelection(selection, animate: false)
         }
+        suppressCallbacks = false
         publishPosition()
     }
 
@@ -1292,15 +1308,26 @@ final class PDFController: NSObject, ObservableObject {
         return saveToFile(changedLumenPages: pages)
     }
 
-    /// Commit the explicit context-menu selection; PDFKit's nearest-word
-    /// selection after a blank click must not turn a page note into a highlight.
+    /// An annotation requires an explicit passage; no implicit page-note fallback.
     @discardableResult
     func addContextAnnotation(pageIndex: Int, selection: PDFSelection?, body: String) -> Bool {
-        if let selection, !(selection.string ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            view.setCurrentSelection(selection, animate: false)
-            return addHighlight(fromCurrentSelection: body)
+        guard let selection, !(selection.string ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return false }
+        view.setCurrentSelection(selection, animate: false)
+        return addHighlight(fromCurrentSelection: body)
+    }
+
+    @discardableResult
+    func performContextAction(_ action: PDFContextAnnotationAction, pageIndex: Int,
+                              selection: PDFSelection?, annotationID: String? = nil, body: String = "") -> Bool {
+        switch action {
+        case .highlight:
+            return addContextAnnotation(pageIndex: pageIndex, selection: selection, body: "")
+        case .annotation:
+            if let annotationID { return updateNote(id: annotationID, body: body) }
+            return addContextAnnotation(pageIndex: pageIndex, selection: selection, body: body)
+        case .pageNote:
+            return addNote(pageIndex: pageIndex, anchorText: "", body: body)
         }
-        return addNote(pageIndex: pageIndex, anchorText: "", body: body)
     }
 
     private func addMarkup(selection: PDFSelection, note: String, color: NSColor) -> Bool {
@@ -1341,6 +1368,7 @@ final class PDFController: NSObject, ObservableObject {
         let origin = Self.freeNoteIconOrigin(on: page, existing: page.annotations)
         let iconBounds = CGRect(x: origin.x, y: origin.y, width: 24, height: 24)
         let annotation = PDFAnnotation(bounds: iconBounds, forType: .text, withProperties: nil)
+        annotation.setValue(UUID().uuidString, forAnnotationKey: PDFAnnotationGeometry.identityKey)
         annotation.contents = body
         annotation.userName = Self.annotationAuthor
         annotation.modificationDate = stamp
@@ -1757,6 +1785,7 @@ final class PDFController: NSObject, ObservableObject {
         let origin = Self.freeNoteIconOrigin(on: page, existing: page.annotations)
         let iconBounds = CGRect(x: origin.x, y: origin.y, width: 24, height: 24)
         let annotation = PDFAnnotation(bounds: iconBounds, forType: .text, withProperties: nil)
+        annotation.setValue(UUID().uuidString, forAnnotationKey: PDFAnnotationGeometry.identityKey)
         annotation.contents = ""
         annotation.userName = Self.annotationAuthor
         annotation.modificationDate = stamp
@@ -1977,6 +2006,10 @@ enum PDFContextMenuItem: Equatable {
     case ocr(OCRMenuDescriptor)
 }
 
+enum PDFContextAnnotationAction: Equatable {
+    case highlight, annotation, pageNote
+}
+
 /// OCR 菜单项此刻的状态。
 enum OCRMenuDescriptor: Equatable {
     /// 空闲：还没识别过这一页
@@ -2072,7 +2105,7 @@ final class AnnotatedPDFView: PDFView {
     /// 用闭包而不是让 `PDFController` 直接引用 `AppState`：保持
     /// PDFView → controller → 视图层 这条现有分层，controller 不做任何 UI 决策。
     var onOCRRequested: (() -> Void)?
-    var onNewAnnotationRequested: ((Int, PDFSelection?, String) -> Bool)?
+    var onContextAnnotationRequested: ((PDFContextAnnotationAction, Int, PDFSelection?, String?, String) -> Bool)?
     private var contextSelection: PDFSelection?
     private(set) var isBuildingContextMenu = false
     private var selectionFromKeyboard = false
@@ -2238,6 +2271,19 @@ final class AnnotatedPDFView: PDFView {
         hitAnnotation = hit?.annotation
         var annotationItemCount = 0
 
+        let hasSelection = !(contextSelection?.string?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
+        let hasMarkup = hit?.annotation.lumenIsMarkup == true
+        for (title, selector, enabled) in [
+            ("高亮", #selector(highlightContextSelection(_:)), hasSelection),
+            ("新建批注", #selector(createContextAnnotation(_:)), hasSelection || hasMarkup),
+            ("评论／便签", #selector(createContextPageNote(_:)), true)
+        ] {
+            let entry = NSMenuItem(title: title, action: enabled ? selector : nil, keyEquivalent: "")
+            entry.target = enabled ? self : nil
+            base.insertItem(entry, at: annotationItemCount)
+            annotationItemCount += 1
+        }
+
         for item in plan {
             switch item {
             case .deleteAnnotation:
@@ -2262,10 +2308,6 @@ final class AnnotatedPDFView: PDFView {
                 annotationItemCount += 1
 
             case .ocr(let descriptor):
-                let create = NSMenuItem(title: "新建批注", action: #selector(createContextAnnotation(_:)), keyEquivalent: "")
-                create.target = self
-                base.insertItem(create, at: annotationItemCount)
-                annotationItemCount += 1
                 if annotationItemCount > 0, base.numberOfItems > annotationItemCount {
                     base.insertItem(.separator(), at: annotationItemCount)
                 }
@@ -2294,15 +2336,27 @@ final class AnnotatedPDFView: PDFView {
     }
 
     @objc private func createContextAnnotation(_ sender: NSMenuItem) {
+        showContextEditor(.annotation)
+    }
+    @objc private func createContextPageNote(_ sender: NSMenuItem) {
+        showContextEditor(.pageNote)
+    }
+    @objc private func highlightContextSelection(_ sender: NSMenuItem) {
+        _ = onContextAnnotationRequested?(.highlight, contextPageIndex, contextSelection, nil, "")
+    }
+    private func showContextEditor(_ action: PDFContextAnnotationAction) {
         annotationEditor?.close()
         let popover = NSPopover()
         popover.behavior = .transient
         let selection = contextSelection
         let pageIndex = contextPageIndex
+        let existing = action == .annotation && hitAnnotation?.lumenIsMarkup == true ? hitAnnotation : nil
+        let id = existing.flatMap { controller?.annotationID(for: $0) }
+        guard action == .pageNote || id != nil || !(selection?.string ?? "").isEmpty else { return }
         popover.contentViewController = NSHostingController(rootView: PDFContextAnnotationEditor(
-            hasSelection: !(selection?.string?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true),
+            isPageNote: action == .pageNote, initialText: existing?.contents ?? "",
             save: { [weak self, weak popover] body in
-                if self?.onNewAnnotationRequested?(pageIndex, selection, body) == true { popover?.close() }
+                if self?.onContextAnnotationRequested?(action, pageIndex, selection, id, body) == true { popover?.close() }
             }, cancel: { [weak popover] in popover?.close() }))
         annotationEditor = popover
         popover.show(relativeTo: CGRect(origin: contextLocation, size: CGSize(width: 1, height: 1)),
@@ -2344,23 +2398,26 @@ final class AnnotatedPDFView: PDFView {
 
 
 private struct PDFContextAnnotationEditor: View {
-    let hasSelection: Bool
+    let isPageNote: Bool
     let save: (String) -> Void
     let cancel: () -> Void
     @State private var bodyText = ""
     @FocusState private var focused: Bool
+    init(isPageNote: Bool, initialText: String, save: @escaping (String) -> Void, cancel: @escaping () -> Void) {
+        self.isPageNote = isPageNote; self.save = save; self.cancel = cancel
+        _bodyText = State(initialValue: initialText)
+    }
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text(hasSelection ? "高亮并添加批注" : "新建便签").font(.headline)
-            TextField("写下你的批注…", text: $bodyText, axis: .vertical)
-                .textFieldStyle(.plain).lineLimit(3...8).focused($focused)
-                .frame(width: 300, alignment: .leading)
+            Text(isPageNote ? "新建评论／便签" : "新建批注").font(.headline)
+            TextEditor(text: $bodyText).focused($focused)
+                .frame(width: 300, height: 130, alignment: .leading)
+                .accessibilityLabel(isPageNote ? "便签正文" : "批注正文")
             HStack {
                 Spacer()
                 Button("取消", action: cancel)
-                Button("保存批注") { save(bodyText) }
+                Button(isPageNote ? "保存便签" : "保存批注") { save(bodyText) }
                     .buttonStyle(.borderedProminent).tint(DS.Palette.accent)
-                    .disabled(bodyText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
         }.padding(16).onAppear { focused = true }
     }

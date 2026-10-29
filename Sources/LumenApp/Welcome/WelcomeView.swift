@@ -130,6 +130,7 @@ struct WelcomeView: View {
             .buttonStyle(.borderedProminent)
             .controlSize(.large)
             .tint(DS.Palette.accent)
+            .foregroundStyle(ThemePalette.shared.theme.onAccent)
             .keyboardShortcut("o", modifiers: .command)
 
             Text("或将 PDF / EPUB 文件拖入此窗口")

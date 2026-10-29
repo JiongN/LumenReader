@@ -65,6 +65,24 @@ public enum PersistFile {
 
     // MARK: - 解码：失败即备份
 
+    /// Missing JSON is a normal first run. An unreadable existing file must not
+    /// become defaults that the next save can silently write over.
+    public static func readJSONData(from url: URL, reason: String) -> Data? {
+        guard FileManager.default.fileExists(atPath: url.path) else { return nil }
+        do {
+            let data = try Data(contentsOf: url)
+            guard !data.isEmpty else {
+                backupCorrupt(url, reason: reason + "（空文件）")
+                return nil
+            }
+            return data
+        } catch {
+            markWriteBlocked(url)
+            NSLog("%@", "[Lumen][persist] 无法读取 \(reason)，已禁止覆盖：\(error.localizedDescription)")
+            return nil
+        }
+    }
+
     /// 解码；成功返回值，失败把原文件改名备份（并 NSLog）并返回 `nil`。
     ///
     /// - Parameters:
@@ -134,10 +152,12 @@ public enum PersistFile {
     @discardableResult
     public static func write(_ data: Data, to fileURL: URL, label: String) -> Bool {
         guard !isWriteBlocked(fileURL) else {
-            NSLog("%@", "[Lumen][persist] 拒绝覆盖备份失败的原文件：\(fileURL.lastPathComponent)（\(label)）")
+            NSLog("%@", "[Lumen][persist] 拒绝覆盖无法安全读取或备份的原文件：\(fileURL.lastPathComponent)（\(label)）")
             return false
         }
         do {
+            if FileManager.default.fileExists(atPath: fileURL.path),
+               !FileManager.default.isWritableFile(atPath: fileURL.path) { throw CocoaError(.fileWriteNoPermission) }
             try data.write(to: fileURL, options: .atomic)
             return true
         } catch {

@@ -75,7 +75,7 @@ public final class RecentDocuments: ObservableObject {
     }
 
     private func load() {
-        guard let data = try? Data(contentsOf: fileURL) else { return }
+        guard let data = PersistFile.readJSONData(from: fileURL, reason: "recent.json") else { return }
         let decoder = JSONDecoder()
         // 必须与 persist 的编码策略成对（iso8601 字符串）。
         // 此前漏了这一行：解码默认按时间戳读 Double，遇到 "2026-09-17T…"

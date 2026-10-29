@@ -1,7 +1,7 @@
 import AppKit
 import SwiftUI
 
-/// Selectable text: a simple click locates the source; selecting or copying never does.
+/// A completed single click locates the source without delaying native selection.
 struct TranslationText: NSViewRepresentable {
     var text: String
     var size: CGFloat
@@ -23,7 +23,6 @@ struct TranslationText: NSViewRepresentable {
 
 final class TranslationTextView: NSTextView {
     var locate: (() -> Void)?
-    private var pendingClick: DispatchWorkItem?
     private var measuredWidth: CGFloat = -1
     private var measuredHeight: CGFloat = 1
     private var renderedText = ""
@@ -61,7 +60,6 @@ final class TranslationTextView: NSTextView {
     func update(text: String, size: CGFloat, color: NSColor) {
         let nextFont = UIFontGate.nativeFont(size: size)
         guard renderedText != text || renderedFont != nextFont || renderedColor != color else { return }
-        if renderedText != text { pendingClick?.cancel() }
         let selection = selectedRange()
         let paragraph = NSMutableParagraphStyle()
         paragraph.lineBreakMode = .byWordWrapping
@@ -90,27 +88,23 @@ final class TranslationTextView: NSTextView {
     }
 
     override func mouseDown(with event: NSEvent) {
-        pendingClick?.cancel()
         let start = event.locationInWindow
         super.mouseDown(with: event)
         // Use the event's coordinates, not the global pointer (which may be on another window).
         let current = NSApp.currentEvent
         let end = current?.window === window ? current?.locationInWindow ?? start : start
-        guard Self.isNavigationClick(clickCount: event.clickCount, selectedLength: selectedRange().length,
-                                     distance: hypot(end.x - start.x, end.y - start.y),
-                                     modifiers: event.modifierFlags) else { return }
-        // Wait for the system double-click interval so word selection doesn't navigate.
-        let work = DispatchWorkItem { [weak self] in
-            guard let self, self.selectedRange().length == 0, self.window != nil else { return }
-            self.locate?()
-        }
-        pendingClick = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + NSEvent.doubleClickInterval, execute: work)
+        completeClick(clickCount: event.clickCount, distance: hypot(end.x - start.x, end.y - start.y),
+                      modifiers: event.modifierFlags)
     }
 
-    override func rightMouseDown(with event: NSEvent) {
-        pendingClick?.cancel()
-        super.rightMouseDown(with: event)
+    func completeClick(clickCount: Int, distance: CGFloat, modifiers: NSEvent.ModifierFlags) {
+        guard window != nil,
+              Self.isNavigationClick(clickCount: clickCount, selectedLength: selectedRange().length,
+                                     distance: distance, modifiers: modifiers) else { return }
+        // The first click may locate the paragraph; a second click still selects
+        // the word in this NSTextView. Never steal its first responder or defer a
+        // navigation that could fire after the user has switched tabs.
+        locate?()
     }
 
     static func isNavigationClick(clickCount: Int, selectedLength: Int, distance: CGFloat,

@@ -67,6 +67,8 @@ struct SidebarColumn: View {
                         )
                         .layoutProbe("sidebarPane_translation")
                     }
+                case .notes:
+                    LiteratureNotesPane().layoutProbe("sidebarPane_notes")
                 case .literatureGraph:
                     LiteratureGraphSidebarView(model: session.literatureGraph)
                         .layoutProbe("sidebarPane_literatureGraph")
@@ -302,6 +304,7 @@ struct AnnotationsPane: View {
 
     @EnvironmentObject private var bridge: ReaderBridge
     @EnvironmentObject private var state: AppState
+    @StateObject private var literatureSync = LiteratureSyncService.shared
 
     @State private var items: [AnnotationItem] = []
     @State private var isLoading = false
@@ -312,11 +315,24 @@ struct AnnotationsPane: View {
     @State private var showsComments = false
 
     private var visibleItems: [AnnotationItem] {
-        items.filter { showsComments ? (!$0.note.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !$0.hasHighlight)
+        items.filter { showsComments ? (!$0.note.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !$0.hasHighlight || $0.id == editingID)
                                     : $0.hasHighlight }
     }
 
     var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+        if literatureSync.enabled, let url = state.document?.url {
+            HStack {
+                Button("同步文献页") { Task { await literatureSync.adoptAndSync(documentURL: url) } }
+                if literatureSync.record(for: url.path) != nil {
+                    Button("打开笔记") { literatureSync.openNote(for: url.path) }
+                }
+                Spacer(minLength: 0)
+            }.font(.caption)
+            if let status = literatureSync.statuses[url.standardizedFileURL.path] {
+                Text(status).font(.caption).foregroundStyle(.secondary).lineLimit(2)
+            }
+        }
         Group {
             if isLoading && items.isEmpty {
                 VStack(spacing: DS.Space.s) {
@@ -330,9 +346,13 @@ struct AnnotationsPane: View {
                 list
             }
         }
+        }
         // 按批注变更计数刷新：无论批注是写进 PDF 还是写进数据目录，
         // 两条路径都会把 `annotationRevision` 加一。
         .task(id: bridge.annotationRevision) { await reload() }
+        .onChange(of: bridge.annotationEditRequestID) { _, id in
+            if id != nil { Task { await reload() } }
+        }
         .confirmationDialog(
             "收紧多行高亮色块？",
             isPresented: $showingCompactConfirm,
@@ -358,12 +378,12 @@ struct AnnotationsPane: View {
             Button {
                 addNote()
             } label: {
-                Label("新建批注", systemImage: "plus")
+                Label("新建便签", systemImage: "plus")
                     .font(DS.Typo.ui(size: 11, weight: .medium))
             }
             .buttonStyle(.plain)
             .foregroundStyle(DS.Palette.accent)
-            .help("在当前阅读位置加一条空白批注")
+            .help("在当前阅读位置添加独立的评论／便签")
             Menu {
                 if bridge.compactAnnotationRows != nil {
                     Button("收紧高亮行距") { showingCompactConfirm = true }
@@ -510,6 +530,9 @@ struct AnnotationRow: View {
                         .font(DS.Typo.ui(size: 14, weight: .semibold))
                         .help(item.highlightHex.map { "高亮 · \($0)" } ?? "高亮")
                         .accessibilityLabel("高亮")
+                    Text(item.note.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "高亮" : "批注")
+                        .font(DS.Typo.ui(size: 9.5, weight: .semibold))
+                        .foregroundStyle(DS.Palette.textTertiary)
                 } else {
                     Image(systemName: "note.text")
                         .font(DS.Typo.ui(size: 9.5, weight: .semibold))
@@ -622,6 +645,9 @@ struct AnnotationRow: View {
                 .strokeBorder(isFocused ? DS.Palette.accent.opacity(0.55) : .clear, lineWidth: 1)
         )
         .contentShape(RoundedRectangle(cornerRadius: DS.Radius.s, style: .continuous))
+        .onChange(of: isInEditMode, initial: true) { _, editing in
+            if editing { draft = item.note }
+        }
         .onTapGesture {
             // 点击卡片 = 正文里定位到这一处（翻页 + 滚到位置 + 划线类选中原文）
             bridge.focusAnnotation(item.id)

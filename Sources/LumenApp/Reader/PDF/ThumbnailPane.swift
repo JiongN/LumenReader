@@ -36,12 +36,10 @@ private struct ThumbnailPaneBody: View {
     let originalColors: Bool
     let annotationRevision: Int
 
-    @State private var currentPage = 0
-
     var body: some View {
         ThumbnailGrid(
             pageAspects: viewport.pageAspects,
-            currentPage: currentPage,
+            currentPage: viewport.snapshot.centerPage,
             scrollSettledRevision: viewport.scrollSettledRevision,
             unitCount: bridge.unitCount,
             documentID: documentID,
@@ -54,8 +52,6 @@ private struct ThumbnailPaneBody: View {
         // 关键：`Equatable` 子视图。父级每帧重算并不贵（只是构造一个值），
         // 真正的开销是子视图的 body；输入不变时这里直接跳过。
         .equatable()
-        .onChange(of: viewport.snapshot.centerPage) { _, page in currentPage = page }
-        .onAppear { currentPage = viewport.snapshot.centerPage }
     }
 }
 

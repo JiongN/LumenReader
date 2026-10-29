@@ -138,6 +138,7 @@ struct LeftRail: View {
 /// 项目里已经为这个坑把视口 snapshot 抽成 `Equatable` 子视图了。
 /// 观察点收在这一层：这里只有 5 枚按钮，重绘代价可以忽略。
 struct SidebarRail: View {
+    @ObservedObject private var literatureSync = LiteratureSyncService.shared
 
     @EnvironmentObject private var bridge: ReaderBridge
 
@@ -152,7 +153,7 @@ struct SidebarRail: View {
         // `--sidebar-tab-report` 靠它证明「图标栏确实跟着 bridge 重绘了」。
         let _ = Jank.tick(.sidebarRailBody)
         LeftRail(
-            tabs: tabs,
+            tabs: literatureSync.enabled ? tabs + [.notes] : tabs,
             activeTab: bridge.sidebarTab,
             isExpanded: isExpanded,
             layoutScale: layoutScale,

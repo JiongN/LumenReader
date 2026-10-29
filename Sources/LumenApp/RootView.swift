@@ -9,7 +9,6 @@ struct RootView: View {
     @StateObject private var state: AppState
     @ObservedObject private var settings: SettingsStore
 
-    @Environment(\.colorScheme) private var systemColorScheme
     /// 打开「设置」窗口。用官方的环境动作，不去 sendAction 那些私有 selector——
     /// 私有 selector 的名字在 macOS 14 前后变过一次，且失败时静默无返回，很难查。
     @Environment(\.openSettings) private var openSettings
@@ -19,14 +18,10 @@ struct RootView: View {
         _settings = ObservedObject(wrappedValue: state.settingsStore)
     }
 
-    private var systemIsDark: Bool { systemColorScheme == .dark }
-
-    /// 窗口最终该用深色还是浅色。
-    ///
-    /// 打开文档后由阅读主题统辖（选了「深夜」就整屏暗下来），欢迎页跟随系统深浅色。
-    private var effectiveIsDark: Bool {
-        state.document == nil ? systemIsDark : settings.reader.theme.isDark
-    }
+    // Native controls and custom colors must use the same appearance, including
+    // the home tab. Mixing a dark system appearance with a light reading palette
+    // produces dark icon plates and incorrectly colored prominent buttons.
+    private var effectiveIsDark: Bool { settings.reader.theme.isDark }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -58,8 +53,6 @@ struct RootView: View {
         // 标题栏透明（fullSizeContentView）后，让整棵树延伸到窗口最顶，标签栏才能与
         // 红黄绿交通灯落在同一行（Obsidian 式）。交通灯悬浮在最左，TabBar 已预留空位。
         .ignoresSafeArea(edges: .top)
-        // 欢迎页 ↔ 阅读器之间交叉淡入。
-        .animation(DS.Motion.content, value: state.document?.id)
         // 主题过渡**只挂在这块垫色上**（见 ThemeBackdrop 注释）。
         .background(ThemeBackdrop(
             isWelcome: state.document == nil,
@@ -102,7 +95,7 @@ struct RootView: View {
             if !recoveryWarnings.isEmpty {
                 state.presentAlert(
                     title: "数据恢复未完成",
-                    message: "以下文件损坏且备份失败，本次运行已暂停向原路径写入，防止覆盖原件：\n"
+                    message: "以下文件无法读取或恢复，本次运行已暂停向原路径写入，防止覆盖原件：\n"
                         + recoveryWarnings.joined(separator: "\n")
                         + "\n请检查文件权限或可用空间，再重新启动 Lumen 重试。当前运行中的相关改动可能无法保存。"
                 )
@@ -173,12 +166,17 @@ struct RootView: View {
     /// 主区域：有标签时是「全部已挂载标签的叠层」，否则是欢迎页。
     @ViewBuilder
     private var content: some View {
-        if state.activeSession != nil {
-            sessionStack
-                .transition(.opacity)
-        } else {
-            WelcomeView()
-                .transition(.opacity)
+        ZStack {
+            // Home is an overlay, not a second owner of the resident reader tree.
+            // Removing the stack here used to destroy both retained PDF/WebViews
+            // every time '+' was clicked, then parse them again on return.
+            if !state.sessions.isEmpty {
+                sessionStack
+                    .opacity(state.activeSession == nil ? 0 : 1)
+                    .allowsHitTesting(state.activeSession != nil)
+                    .accessibilityHidden(state.activeSession == nil)
+            }
+            if state.activeSession == nil { WelcomeView() }
         }
     }
 
@@ -200,7 +198,6 @@ struct RootView: View {
                 }
             }
         }
-        .animation(DS.Motion.quick, value: state.activeSessionID)
     }
 
     /// 把窗口内容区改成指定尺寸（自检用）。

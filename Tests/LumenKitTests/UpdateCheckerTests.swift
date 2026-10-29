@@ -38,6 +38,12 @@ struct AppVersionTests {
 
 @Suite("更新判断（纯函数）")
 struct UpdateJudgementTests {
+    @Test func invalidRepositoryIsRejectedBeforeNetworkingOrURLConstruction() async {
+        for repository in ["", "owner/repo?token=value", "owner/repo/path", "owner/@repo", "https://github.com/owner/repo"] {
+            let outcome = await UpdateChecker.check(repository: repository, currentVersion: .init(major: 1, minor: 0, patch: 0))
+            guard case .failed = outcome else { Issue.record("Invalid repository accepted: \(repository)"); continue }
+        }
+    }
     @Test func newerOnlyStrictlyGreater() {
         let local = AppVersion(major: 1, minor: 0, patch: 0)
         #expect(UpdateChecker.isNewer(current: local, latest: AppVersion(major: 1, minor: 0, patch: 1)) == true)

@@ -540,7 +540,7 @@ public final class KeyBindingStore: ObservableObject {
     ///
     /// - Returns: (有效的绑定表, 是否发生过改动)。改动过就要写回，见 `init`。
     private static func load(from url: URL) -> ([String: KeyCombo], Bool) {
-        guard let data = try? Data(contentsOf: url), !data.isEmpty else { return ([:], false) }
+        guard let data = PersistFile.readJSONData(from: url, reason: "keybindings.json") else { return ([:], false) }
         guard let decoded = PersistFile.decodeOrBackup(
             data: data,
             type: [String: KeyCombo].self,

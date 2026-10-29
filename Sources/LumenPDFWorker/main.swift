@@ -5,6 +5,18 @@ import LumenKit
 
 // The helper writes only a temporary PDF. Original-file coordination and commit
 // remain in the parent process alongside OCR and external-change protection.
+if CommandLine.arguments.count == 4, CommandLine.arguments[1] == "--snapshot" {
+    do {
+        let input = URL(fileURLWithPath: CommandLine.arguments[2])
+        let output = URL(fileURLWithPath: CommandLine.arguments[3])
+        guard input.path != output.path, !FileManager.default.fileExists(atPath: output.path) else { exit(65) }
+        let items = try PDFAnnotationSnapshot.read(url: input)
+        let bytes = try JSONEncoder().encode(items)
+        guard bytes.count <= 32 * 1024 * 1024 else { exit(65) }
+        try bytes.write(to: output, options: .withoutOverwriting)
+        exit(0)
+    } catch { exit(74) }
+}
 do {
     guard CommandLine.arguments.count == 2 else { exit(64) }
     let file = URL(fileURLWithPath: CommandLine.arguments[1])

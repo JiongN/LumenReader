@@ -445,14 +445,14 @@ final class AppState: ObservableObject {
 
     /// 跳到第 `index` 个单元（0-based；PDF 是页、EPUB 是章）。
     @discardableResult
-    func jump(toUnit index: Int) -> Int? {
+    func jump(toUnit index: Int, epubAnchor: String = "") -> Int? {
         let total = bridge.unitCount
         guard total > 0 else { return nil }
 
         // 越界钳到边界：用户输 9999 的意图是「跳到末尾」，报错再让他重输是把一件事拆成两件
         let clamped = min(max(index, 0), total - 1)
         let locator: DocumentLocator = document?.kind == .epub
-            ? .epub(chapterIndex: clamped, anchor: "", charOffset: 0)
+            ? .epub(chapterIndex: clamped, anchor: epubAnchor, charOffset: 0)
             : .pdf(page: clamped, charOffset: 0)
 
         if let session = activeSession, session.showsLiteratureGraph {
@@ -494,6 +494,12 @@ final class AppState: ObservableObject {
     }
 
     // MARK: 智能目录
+
+    @discardableResult
+    func jump(toOutlineEntry entry: SmartOutlineEntry) -> Int? {
+        guard smartOutline.validateSource(), entry.unitIndex >= 0, entry.unitIndex < bridge.unitCount else { return nil }
+        return jump(toUnit: entry.unitIndex, epubAnchor: entry.anchor ?? "")
+    }
 
     /// 目录条目叫「第几页」还是「第几章」，由桥上报的文档类型决定。
     var unitName: String {

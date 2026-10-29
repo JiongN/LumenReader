@@ -32,7 +32,7 @@ final class LiteratureGraphModel: ObservableObject {
         self.file = storageURL ?? AppPaths.documentDirectory(forPath: document.id).appendingPathComponent("literature-graph.json")
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
-        if let data = try? Data(contentsOf: file),
+        if let data = PersistFile.readJSONData(from: file, reason: "literature-graph.json"),
            let saved = PersistFile.decodeOrBackup(data: data, type: LiteratureGraphSnapshot.self, fileURL: file, decoder: decoder, reason: "literature-graph.json") {
             snapshot = saved
         } else { snapshot = LiteratureGraphSnapshot() }

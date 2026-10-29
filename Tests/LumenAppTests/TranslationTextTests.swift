@@ -27,4 +27,32 @@ struct TranslationTextTests {
         #expect(view.measuredSize(width: 280).height > narrow.height)
         #expect(view.isSelectable && !view.isEditable)
     }
+
+    @Test func completedClickLocatesSynchronouslyWithoutStealingSelectionFocus() {
+        _ = NSApplication.shared
+        let view = TranslationTextView()
+        let window = NSWindow(contentRect: .init(x: 0, y: 0, width: 300, height: 200),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = view
+        defer { window.close() }
+        view.update(text: "Click to reveal. Double click to select a word.", size: 16, color: .textColor)
+        window.makeFirstResponder(view)
+        var calls = 0
+        view.locate = { calls += 1 }
+        view.completeClick(clickCount: 1, distance: 0, modifiers: [])
+        #expect(calls == 1)
+        #expect(window.firstResponder === view)
+        view.setSelectedRange(.init(location: 0, length: 5))
+        view.completeClick(clickCount: 2, distance: 0, modifiers: [])
+        #expect(calls == 1)
+        #expect(view.selectedRange().length == 5)
+        view.setSelectedRange(.init(location: 0, length: 0))
+        view.completeClick(clickCount: 1, distance: 20, modifiers: [])
+        view.completeClick(clickCount: 1, distance: 0, modifiers: .command)
+        #expect(calls == 1)
+        window.contentView = nil
+        view.completeClick(clickCount: 1, distance: 0, modifiers: [])
+        #expect(calls == 1)
+    }
 }

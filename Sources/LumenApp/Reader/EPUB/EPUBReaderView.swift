@@ -373,6 +373,10 @@ struct EPUBReaderView: View {
     /// 代价要说清楚：换设备/换阅读器看不到这些批注（界面上的说明也这么写）。
     private func wireAnnotations(controller: EPUBController) {
         let store = AnnotationStore(documentPath: document.url.standardizedFileURL.path)
+        let syncURL = document.url
+        bridge.onAnnotationRevisionChanged = {
+            LiteratureSyncService.shared.annotationSaved(documentURL: syncURL)
+        }
 
         // 章节加载完成时按章取批注，交给 JS 画高亮
         controller.highlightsProvider = { chapter in
@@ -552,13 +556,21 @@ struct EPUBReaderView: View {
             }
         }
 
-        bridge.unitSnippetProvider = {
-            source.chapters.map { chapter in
-                (index: chapter.index, text: source.text(
-                    around: .epub(chapterIndex: chapter.index, anchor: "", charOffset: 0),
-                    radius: 0
-                ))
+        bridge.outlineSourceProvider = {
+            var candidates: [SmartOutlineCandidate] = []
+            func append(_ nodes: [OutlineNode], depth: Int) {
+                for node in nodes {
+                    guard case .epub(let chapter, let anchor, _) = node.locator else { continue }
+                    candidates.append(.init(id: "epub-\(candidates.count)", title: node.title,
+                        unitIndex: chapter, depth: depth, anchor: anchor))
+                    append(node.children, depth: depth + 1)
+                }
             }
+            append(source.outline, depth: 0)
+            if candidates.isEmpty {
+                candidates = source.chapters.map { .init(id: "epub-\($0.index)", title: $0.displayTitle, unitIndex: $0.index, depth: 0) }
+            }
+            return SmartOutlineSource(candidates: candidates, unitCount: source.chapters.count)
         }
 
         bridge.sectionTextProvider = { start, end in

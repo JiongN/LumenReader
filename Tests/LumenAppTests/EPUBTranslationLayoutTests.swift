@@ -55,9 +55,11 @@ struct EPUBTranslationLayoutTests {
                   return { size: parseFloat(s.fontSize), line: parseFloat(s.lineHeight),
                     indent: s.textIndent, align: s.textAlign, letters: s.letterSpacing, words: s.wordSpacing,
                     whitespace: s.whiteSpace, breakInside: s.breakInside, weight: s.fontWeight,
+                    hanging: s.hangingPunctuation,
                     originalAlign: getComputedStyle(original).textAlign,
                     gapAbove: r.top - a.bottom, gapBelow: b.top - r.bottom,
                     noClip: box.scrollWidth <= box.clientWidth + 1 && box.scrollHeight <= box.clientHeight + 1,
+                    dimensions: [box.scrollWidth, box.clientWidth, box.scrollHeight, box.clientHeight],
                     inBounds: r.left >= 0 && r.right <= innerWidth + 1,
                     content: box.textContent };
                 })()
@@ -70,6 +72,7 @@ struct EPUBTranslationLayoutTests {
                 #expect(result["words"] as? String == "0px" || result["words"] as? String == "normal")
                 #expect(result["whitespace"] as? String == "pre-line")
                 #expect(result["weight"] as? String == "400")
+                #expect(result["hanging"] as? String == "none")
                 #expect(result["breakInside"] as? String == "auto")
                 #expect(result["originalAlign"] as? String == "justify")
                 let gapAbove = try #require(result["gapAbove"] as? Double)
@@ -77,7 +80,7 @@ struct EPUBTranslationLayoutTests {
                 #expect(gapAbove >= size * 0.6 - 1)
                 #expect(gapBelow >= size * 1.5 - 1)
                 #expect(gapBelow > gapAbove)
-                #expect(result["noClip"] as? Bool == true)
+                #expect(result["noClip"] as? Bool == true, "width=\(width) size=\(size) dimensions=\(String(describing: result["dimensions"]))")
                 #expect(result["inBounds"] as? Bool == true)
                 #expect(result["content"] as? String == translation)
                 #expect(try await controller.prepareParagraphs() == originals)
@@ -132,4 +135,38 @@ struct EPUBTranslationLayoutTests {
         #expect(result["color"] as? String == "rgb(213, 216, 214)")
         #expect(abs((result["line"] as? Double ?? 0) - 40.7) < 0.1)
     }
+    @Test func translatedParagraphsBeforeAnchorDoNotMoveReadingPosition() async throws {
+        let controller = EPUBController(theme: .paper, reader: ReaderSettings())
+        let view = controller.webView
+        view.navigationDelegate = nil
+        view.frame = CGRect(x: 0, y: 0, width: 1000, height: 760)
+        let window = NSWindow(contentRect: view.frame, styleMask: [.titled], backing: .buffered, defer: false)
+        window.contentView = view; window.isReleasedWhenClosed = false
+        defer { view.stopLoading(); window.close() }
+        let before = (0..<18).map { "<p>Earlier paragraph \($0). " + String(repeating: "Original text. ", count: 20) + "</p>" }.joined()
+        let after = String(repeating: "<p>Later text for scroll space.</p>", count: 35)
+        view.loadHTMLString("<html><body>\(before)<h2 id='chapter'>CHAPTER I</h2><p>The subject of this Essay.</p>\(after)</body></html>", baseURL: nil)
+        var ready = false
+        for _ in 0..<150 {
+            try await Task.sleep(for: .milliseconds(20))
+            if (try? await view.evaluateJavaScript("!!window.__lumen && document.readyState === 'complete'")) as? Bool == true { ready = true; break }
+        }
+        try #require(ready)
+        _ = try await controller.prepareParagraphs()
+        _ = try await view.evaluateJavaScript("window.__lumen.scrollToAnchor('chapter')")
+        try await Task.sleep(for: .milliseconds(80))
+        let originalTop = try #require(try await view.evaluateJavaScript("document.getElementById('chapter').getBoundingClientRect().top") as? Double)
+        #expect(abs(originalTop) < 2)
+        _ = try await view.evaluateJavaScript("window.__lumen.markLoading([0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17])")
+        let loadingTop = try #require(try await view.evaluateJavaScript("document.getElementById('chapter').getBoundingClientRect().top") as? Double)
+        #expect(abs(loadingTop - originalTop) < 2)
+        for index in 0..<18 {
+            controller.setTranslation(index: index, text: String(repeating: "译文插入后应保留当前章节的位置。", count: 10), state: .done)
+        }
+        controller.flushPendingTranslations()
+        try await Task.sleep(for: .milliseconds(80))
+        let translatedTop = try #require(try await view.evaluateJavaScript("document.getElementById('chapter').getBoundingClientRect().top") as? Double)
+        #expect(abs(translatedTop - originalTop) < 2)
+    }
+
 }

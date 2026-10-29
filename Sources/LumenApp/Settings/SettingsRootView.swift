@@ -9,6 +9,7 @@ enum SettingsTab: String, CaseIterable {
     case reading
     case ai
     case interface
+    case literatureNotes
     case shortcuts
     case about
 
@@ -43,6 +44,10 @@ struct SettingsRootView: View {
                 .tag(SettingsTab.interface)
                 .environmentObject(state)
                 .environmentObject(settings)
+
+            LiteratureNotesSettingsPane()
+                .tabItem { Label("文献笔记", systemImage: "text.book.closed") }
+                .tag(SettingsTab.literatureNotes)
 
             ShortcutsSettingsPane()
                 .tabItem { Label("快捷键", systemImage: "command") }

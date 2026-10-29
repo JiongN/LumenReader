@@ -103,6 +103,7 @@ public enum DS {
         public static let success = Color.dual(light: NSColor(hex: 0x1DA05A), dark: NSColor(hex: 0x37D07A))
         public static let warning = Color.dual(light: NSColor(hex: 0xC77700), dark: NSColor(hex: 0xF0A93B))
         public static let danger  = Color.dual(light: NSColor(hex: 0xD22B2B), dark: NSColor(hex: 0xFF6B6B))
+        public static let rating = Color.dual(light: NSColor(hex: 0xB18200), dark: NSColor(hex: 0xF2CB55))
     }
 
     // MARK: 排版
@@ -134,6 +135,7 @@ public enum DS {
         public static var title: Font { ui(size: 22, weight: .semibold) }
         public static var headline: Font { ui(size: 15, weight: .semibold) }
         public static var body: Font { ui(size: 13.5) }
+        public static var nativeBody: NSFont { UIFontGate.nativeFont(size: 14.5) }
         public static var callout: Font { ui(size: 12.5) }
         public static var caption: Font { ui(size: 11, weight: .medium) }
         public static var mono: Font { ui(size: 12, design: .monospaced) }

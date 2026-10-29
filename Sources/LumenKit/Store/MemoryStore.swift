@@ -155,7 +155,7 @@ public final class MemoryStore: ObservableObject {
     // MARK: - 持久化
 
     private static func load(from url: URL) -> [MemoryEntry] {
-        guard let data = try? Data(contentsOf: url), !data.isEmpty else { return [] }
+        guard let data = PersistFile.readJSONData(from: url, reason: "memory.json") else { return [] }
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
         // 先用新格式解；解失败再试「纯字符串数组」这种更早的写法，尽量不丢用户的记忆

@@ -19,6 +19,15 @@ public struct ReadingTheme: Sendable, Equatable {
     public var text: Color { Color(hex: textHex) }
     public var secondaryText: Color { Color(hex: secondaryTextHex) }
     public var accent: Color { Color(hex: accentHex) }
+    public var onAccent: Color { Color(hex: onAccentHex) }
+    public var onAccentHex: UInt32 {
+        let channels = [16, 8, 0].map { shift -> Double in
+            let value = Double((accentHex >> shift) & 0xFF) / 255
+            return value <= 0.04045 ? value / 12.92 : pow((value + 0.055) / 1.055, 2.4)
+        }
+        let luminance = channels[0] * 0.2126 + channels[1] * 0.7152 + channels[2] * 0.0722
+        return (luminance + 0.05) / 0.05 > 1.05 / (luminance + 0.05) ? 0x000000 : 0xFFFFFF
+    }
 
     /// 选区高亮：浅色主题用低透明度强调色，深色主题需要提高透明度才看得见。
     public var selection: Color { Color(hex: accentHex, alpha: isDark ? 0.30 : 0.20) }

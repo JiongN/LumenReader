@@ -9,6 +9,9 @@ import LumenKit
 /// 中间有取样、请求、逐节摘要三个阶段，界面得能跟着变。
 @MainActor
 final class SmartOutlineModel: ObservableObject {
+    typealias Completion = @MainActor ([AIMessage], AIProviderConfig) async throws -> String
+    private let completion: Completion?
+    init(complete: Completion? = nil) { completion = complete }
 
     // MARK: 阶段
 
@@ -50,6 +53,7 @@ final class SmartOutlineModel: ObservableObject {
     private var generationTask: Task<Void, Never>?
     /// 逐条摘要任务，按条目 id 索引，这样每一条都能单独中止。
     private var summaryTasks: [String: Task<Void, Never>] = [:]
+    private var summaryTokens: [String: UUID] = [:]
 
     // MARK: - 绑定文档
 
@@ -84,7 +88,7 @@ final class SmartOutlineModel: ObservableObject {
 
     /// 生成目录骨架。
     ///
-    /// 只做两件事：取每单元开头的短文本、让模型认出结构。**不生成摘要**——
+    /// 从原文绑定的候选中选择结构。**不生成摘要**——
     /// 一本 300 页的书若要求「目录 + 每节摘要」一次输出，长度会直接顶到 max_tokens，
     /// 中途任何一处失败都得整本重来。摘要等用户真的点开某一节再算。
     func generate(
@@ -104,55 +108,54 @@ final class SmartOutlineModel: ObservableObject {
                 : "「\(config.name)」还没有填写 API 密钥。请在「设置 → AI」里补上。")
             return
         }
-        guard let snippetsProvider = bridge.unitSnippetProvider else {
+        guard let sourceProvider = bridge.outlineSourceProvider, let path = documentPath,
+              let version = Self.cacheVersion(path: path) else {
             phase = .failed("当前文档还不支持提取内容。")
             return
         }
 
+        cancelAllWork()
         phase = .working("正在读取文档…")
 
         generationTask = Task { [weak self] in
             guard let self else { return }
 
-            let snippets = await snippetsProvider()
-            guard !Task.isCancelled else { return }
-
-            let digest = SmartOutlineDigest.make(snippets: snippets, unitName: self.unitName)
-            guard !digest.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-                self.phase = .failed(
-                    snippets.isEmpty
-                        ? "这份文档没有可用的文本层。如果是扫描件，先在阅读区对它做一次识别。"
-                        : "没能从文档里取到可用于推断结构的内容。"
-                )
-                return
-            }
-
-            self.phase = .working("正在请求 \(config.selectedModel)…")
-
-            let messages = PromptLibrary.smartOutlineMessages(
-                metadata: metadata,
-                digest: digest,
-                unitName: self.unitName
-            )
-
             do {
-                let provider = OpenAICompatibleProvider(
-                    config: config,
-                    apiKey: AICredentialStore.read(account: config.keychainAccount) ?? ""
-                )
-                let raw = try await provider.completeText(messages: messages)
-                guard !Task.isCancelled else { return }
-
-                // 生成时就把单元数钉下来：缓存的有效性判定全靠它，
-                // 留着 0 的话下次打开会被判成「文档变了」而白白丢掉一份好目录。
-                let count = self.effectiveUnitCount(bridge: bridge)
-                if self.unitCount == 0, bridge.unitCount > 0 { self.unitCount = bridge.unitCount }
-
-                let entries = try SmartOutlineParser.parse(raw, unitCount: count)
+                let source = try await sourceProvider()
+                try Task.checkCancellation()
+                guard source.missingUnits.isEmpty else {
+                    throw NSError(domain: "SmartOutline", code: 1, userInfo: [NSLocalizedDescriptionKey:
+                        "有 \(source.missingUnits.count) 页未取得正文，请先完成文字识别后再生成目录。"])
+                }
+                guard source.unitCount > 0, !source.candidates.isEmpty else {
+                    throw NSError(domain: "SmartOutline", code: 2, userInfo: [NSLocalizedDescriptionKey:
+                        "没有找到可核验的章节标题。不会按正文主题虚构目录。"])
+                }
+                let candidates = source.candidates.filter { $0.unitIndex >= 0 && $0.unitIndex < source.unitCount }
+                let batches = SmartOutlineHeadings.batches(candidates, tokenLimit: ContextBudget.inputLimit(config) - 1400,
+                    maxCandidates: max(1, config.maxTokens / 20))
+                var entries: [SmartOutlineEntry] = []
+                for (index, batch) in batches.enumerated() {
+                    try Task.checkCancellation()
+                    self.phase = .working("正在核对标题 \(index + 1)/\(batches.count)…")
+                    let messages = PromptLibrary.smartOutlineMessages(metadata: metadata, candidates: batch, unitName: self.unitName)
+                    guard messages.reduce(0, { $0 + ContextBudget.estimatedTokens($1.content) }) <= ContextBudget.inputLimit(config) else {
+                        throw NSError(domain: "SmartOutline", code: 4, userInfo: [NSLocalizedDescriptionKey: "当前模型的输入预算不足以核对标题，请提高上下文预算。"])
+                    }
+                    let raw = try await self.complete(messages: messages, config: config)
+                    try Task.checkCancellation()
+                    entries += try SmartOutlineHeadings.selectedEntries(raw, candidates: batch)
+                }
+                guard !entries.isEmpty else { throw SmartOutlineParser.ParseError.noUsableEntries }
+                guard Self.cacheVersion(path: path) == version else {
+                    throw NSError(domain: "SmartOutline", code: 3, userInfo: [NSLocalizedDescriptionKey: "文件已发生变化，请重新生成目录。"])
+                }
+                self.unitCount = source.unitCount
                 self.outline = SmartOutline(
                     entries: entries,
                     modelName: config.selectedModel,
-                    sourceUnitCount: self.unitCount > 0 ? self.unitCount : count
+                    sourceUnitCount: source.unitCount,
+                    sourceVersion: version
                 )
                 self.phase = .idle
                 self.persist()
@@ -173,6 +176,7 @@ final class SmartOutlineModel: ObservableObject {
         config: AIProviderConfig?
     ) {
         guard let current = outline else { return }
+        guard validateSource() else { return }
         guard !summarizing.contains(entry.id) else { return }
         guard let index = current.entries.firstIndex(where: { $0.id == entry.id }) else { return }
 
@@ -200,13 +204,15 @@ final class SmartOutlineModel: ObservableObject {
         let end = max(start, (nextStart ?? unitCount) - 1)
 
         summarizing.insert(entry.id)
+        let token = UUID()
+        summaryTokens[entry.id] = token
 
         summaryTasks[entry.id] = Task { [weak self] in
             guard let self else { return }
 
             // 不管从哪条路径退出，条目都得从「正在生成」里摘掉——
             // 漏掉任何一个分支，那条行上的转圈就会永远转下去。
-            defer { self.finishSummarizing(entry.id) }
+            defer { self.finishSummarizing(entry.id, token: token) }
 
             let text = await sectionProvider(start, end)
             guard !Task.isCancelled else { return }
@@ -226,12 +232,8 @@ final class SmartOutlineModel: ObservableObject {
             )
 
             do {
-                let provider = OpenAICompatibleProvider(
-                    config: config,
-                    apiKey: AICredentialStore.read(account: config.keychainAccount) ?? ""
-                )
-                let summary = try await provider.completeText(messages: messages)
-                guard !Task.isCancelled else { return }
+                let summary = try await self.complete(messages: messages, config: config)
+                guard !Task.isCancelled, self.validateSource() else { return }
 
                 let cleaned = Self.cleanSummary(summary)
                 if cleaned.isEmpty {
@@ -257,8 +259,10 @@ final class SmartOutlineModel: ObservableObject {
         finishSummarizing(id)
     }
 
-    private func finishSummarizing(_ id: String) {
+    private func finishSummarizing(_ id: String, token: UUID? = nil) {
+        if let token, summaryTokens[id] != token { return }
         summaryTasks.removeValue(forKey: id)
+        summaryTokens.removeValue(forKey: id)
         summarizing.remove(id)
     }
 
@@ -276,6 +280,7 @@ final class SmartOutlineModel: ObservableObject {
         generationTask = nil
         for (_, task) in summaryTasks { task.cancel() }
         summaryTasks = [:]
+        summaryTokens = [:]
         summarizing = []
         pendingReveal = []
         if phase.isWorking { phase = .idle }
@@ -283,6 +288,24 @@ final class SmartOutlineModel: ObservableObject {
 
     func clearFailure() {
         if case .failed = phase { phase = .idle }
+    }
+
+    func validateSource() -> Bool {
+        guard let documentPath, let outline else { return false }
+        guard outline.sourceVersion == Self.cacheVersion(path: documentPath) else {
+            cancelAllWork()
+            self.outline = nil
+            phase = .failed("文件已发生变化，请重新生成目录。")
+            return false
+        }
+        return true
+    }
+
+    static func activeEntryID(in outline: SmartOutline, unit: Int, selectedID: String?) -> String? {
+        if let selected = outline.entries.first(where: { $0.id == selectedID && $0.unitIndex == unit }) {
+            return selected.id
+        }
+        return outline.entries.last { $0.unitIndex <= unit }?.id
     }
 
     /// 取走「该自动展开」的条目；取过一次之后不再返回。
@@ -307,6 +330,11 @@ final class SmartOutlineModel: ObservableObject {
         let url = AppPaths.smartOutlineFile(forPath: documentPath)
         guard let data = try? Data(contentsOf: url),
               let cached = try? JSONDecoder().decode(SmartOutline.self, from: data) else { return }
+        guard cached.sourceVersion == Self.cacheVersion(path: documentPath), cached.sourceVersion != nil,
+              cached.isValid(forUnitCount: cached.sourceUnitCount) else {
+            phase = .failed("旧目录尚未核对原文位置，请重新生成。")
+            return
+        }
         outline = cached
         // 先按缓存里的单元数记下来：等阅读视图报上真实单元数后再校正一次。
         unitCount = cached.sourceUnitCount
@@ -325,15 +353,15 @@ final class SmartOutlineModel: ObservableObject {
 
     // MARK: - 工具
 
-    /// 解析时的上界。
-    ///
-    /// 优先用桥上报的真实单元数（最权威）；桥还没报上来时退回缓存的单元数，
-    /// 再不济就退回 `Int.max`——**宁可多信模型也不要把合法条目误判成越界丢掉**，
-    /// 因为「条目少了」用户看不出来，「条目被吞了」他也没法判断，但前者至少不出错。
-    private func effectiveUnitCount(bridge: ReaderBridge) -> Int {
-        if bridge.unitCount > 0 { return bridge.unitCount }
-        if unitCount > 0 { return unitCount }
-        return Int.max
+    private static func cacheVersion(path: String) -> String? {
+        (try? DocumentSourceVersion.current(path: path)).map { "outline-headings-3:" + $0 }
+    }
+
+    private func complete(messages: [AIMessage], config: AIProviderConfig) async throws -> String {
+        if let completion { return try await completion(messages, config) }
+        let provider = OpenAICompatibleProvider(config: config,
+            apiKey: AICredentialStore.read(account: config.keychainAccount) ?? "")
+        return try await provider.completeText(messages: messages)
     }
 
     /// 摘要是要贴在侧栏里给眼睛看的，模型却很爱在前后加一句「好的，以下是摘要：」。

@@ -39,6 +39,7 @@ final class TranscriptScrollController {
     private var queued = false
     private var applyingScroll = false
     private var layoutChangePending = false
+    private var layoutRevision: UInt = 0
     private var previousBounds: CGRect?
     private var previousDocumentHeight: CGFloat?
 
@@ -64,6 +65,7 @@ final class TranscriptScrollController {
             observers.append(NotificationCenter.default.addObserver(forName: name, object: object, queue: .main) { [weak self] _ in
                 MainActor.assumeIsolated {
                     self?.layoutChangePending = true
+                    self?.layoutRevision &+= 1
                     self?.schedule()
                 }
             })
@@ -101,6 +103,7 @@ final class TranscriptScrollController {
         previousBounds = nil
         previousDocumentHeight = nil
         layoutChangePending = false
+        layoutRevision &+= 1
     }
 
     func pause() { followsTail = false }
@@ -125,6 +128,7 @@ final class TranscriptScrollController {
            oldBounds.size == current.size, current.minY < oldBounds.minY - 2 {
             pause()
         }
+        if layoutChangePending { schedule() }
         if !followsTail { resumeIfAtBottom() }
     }
 
@@ -139,7 +143,20 @@ final class TranscriptScrollController {
     }
 
     func reconcile() {
-        defer { layoutChangePending = false }
+        defer {
+            if layoutChangePending {
+                let revision = layoutRevision
+                // SwiftUI can correct the clip origin after the document-frame
+                // callback. Keep this layout transaction open until two quiet
+                // main-queue turns; real wheel/drag input still pauses immediately.
+                DispatchQueue.main.async { [weak self] in
+                    DispatchQueue.main.async { [weak self] in
+                        guard let self, self.layoutRevision == revision else { return }
+                        self.layoutChangePending = false
+                    }
+                }
+            }
+        }
         guard let scroll, let document = scroll.documentView else { return }
         let clip = scroll.contentView
         let bounds = document.bounds

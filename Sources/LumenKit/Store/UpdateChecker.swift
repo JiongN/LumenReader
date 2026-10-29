@@ -71,13 +71,17 @@ public struct UpdateInfo: Sendable, Equatable {
     public var downloadURL: String?
     /// Release 说明（markdown 原文）。
     public var releaseNotes: String
+    /// Only a repository-scoped ZIP with a verified SHA-256 value can be installed.
+    public var installAsset: UpdateAsset?
 
-    public init(version: AppVersion, tagName: String, htmlURL: String, downloadURL: String?, releaseNotes: String) {
+    public init(version: AppVersion, tagName: String, htmlURL: String, downloadURL: String?, releaseNotes: String,
+                installAsset: UpdateAsset? = nil) {
         self.version = version
         self.tagName = tagName
         self.htmlURL = htmlURL
         self.downloadURL = downloadURL
         self.releaseNotes = releaseNotes
+        self.installAsset = installAsset
     }
 }
 
@@ -85,13 +89,8 @@ public struct UpdateInfo: Sendable, Equatable {
 
 /// 免密钥、走 GitHub Releases API 的更新检查。
 ///
-/// 为什么不用 Sparkle：本项目是零依赖 + 纯 SwiftPM + 无 Xcode 的工程，
-/// Sparkle 需要引入额外 framework、维护 appcast 与更新签名；
-/// 对一个「自签 + 免会员、体积优先」的免费工具它属于过度工程。GitHub API 已
-/// 免费提供 `releases/latest`，App 里用一个 URLSession 请求就能拿到来版号与直链。
-///
-/// 为什么要写清这个取舍：这是一条**服务端有能力、但本地刻意不做**的路径，
-/// 不写明白，未来的人会以为「漏了自动更新」而再引一遍 Sparkle。
+/// GitHub provides release metadata and asset digests. Installation separately
+/// verifies the archive, bundle identity, version and existing signing certificate.
 public enum UpdateChecker {
 
     /// 分发的 GitHub 仓库。repo 名要带 owner（`JiongN/LumenReader`）。
@@ -132,11 +131,12 @@ public enum UpdateChecker {
         currentVersion: AppVersion,
         timeout: TimeInterval = 8
     ) async -> Outcome {
-        guard let url = URL(string: "https://api.github.com/repos/\(repository)/releases/latest") else {
+        guard repository.range(of: #"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"#, options: .regularExpression) != nil,
+              let url = URL(string: "https://api.github.com/repos/\(repository)/releases/latest") else {
             return .failed("仓库名非法")
         }
 
-        var request = URLRequest(url: url)
+        var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData)
         request.timeoutInterval = timeout
         request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
         request.setValue("Lumen/1.0", forHTTPHeaderField: "User-Agent")
@@ -146,7 +146,8 @@ public enum UpdateChecker {
         do {
             (data, response) = try await URLSession.shared.data(for: request)
         } catch {
-            return .failed("网络请求失败：\(error.localizedDescription)")
+            guard !Task.isCancelled else { return .failed("更新检查已取消") }
+            return await publicRelease(repository: repository, current: currentVersion, timeout: timeout)
         }
 
         guard let http = response as? HTTPURLResponse else {
@@ -158,14 +159,15 @@ public enum UpdateChecker {
             return .noRelease
         }
         guard (200..<300).contains(http.statusCode) else {
-            return .failed("GitHub 返回状态码 \(http.statusCode)")
+            return await publicRelease(repository: repository, current: currentVersion, timeout: timeout)
         }
 
-        return parse(data: data, current: currentVersion)
+        return parse(data: data, current: currentVersion, repository: repository)
     }
 
     /// 解析 GitHub release JSON 并与本地版本比较。可测：喂一段 JSON 字节即可。
-    public static func parse(data: Data, current currentVersion: AppVersion) -> Outcome {
+    public static func parse(data: Data, current currentVersion: AppVersion,
+                             repository: String = defaultRepository) -> Outcome {
         let decoder = JSONDecoder()
         guard let release = try? decoder.decode(GitHubRelease.self, from: data) else {
             return .failed("无法解析 GitHub 返回的数据")
@@ -181,7 +183,17 @@ public enum UpdateChecker {
             return .upToDate
         }
 
-        let download = release.assets
+        let expectedName = "Lumen-\(release.tagName)-macOS.zip"
+        let asset = release.assets.first { $0.name == expectedName }
+        let installAsset = asset.flatMap { item -> UpdateAsset? in
+            guard let size = item.size, size > 0, size <= UpdateAsset.maximumBytes,
+                  let digest = item.digest, UpdateAsset.validDigest(digest),
+                  let url = URL(string: item.browserDownloadURL),
+                  UpdateAsset.trustedURL(url, repository: repository, tag: release.tagName, name: expectedName)
+            else { return nil }
+            return UpdateAsset(url: url, size: size, digest: digest)
+        }
+        let download = asset?.browserDownloadURL ?? release.assets
             .map(\.browserDownloadURL)
             .filter { $0.hasSuffix(".zip") || $0.hasSuffix(".dmg") }
             .first
@@ -190,7 +202,8 @@ public enum UpdateChecker {
             tagName: release.tagName,
             htmlURL: release.htmlURL,
             downloadURL: download,
-            releaseNotes: release.body ?? ""
+            releaseNotes: release.body ?? "",
+            installAsset: installAsset
         )
         return .updateAvailable(info)
     }
@@ -210,9 +223,13 @@ private struct GitHubRelease: Decodable {
 
     struct Asset: Decodable {
         let browserDownloadURL: String
+        let name: String?
+        let size: Int64?
+        let digest: String?
 
         enum CodingKeys: String, CodingKey {
             case browserDownloadURL = "browser_download_url"
+            case name, size, digest
         }
     }
 

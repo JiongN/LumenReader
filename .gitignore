@@ -42,3 +42,11 @@ releases/
 # Python diagnostic caches
 __pycache__/
 *.pyc
+
+# 本地宣传素材与制作工程，不随阅读器源码发布
+小红书首发/
+小红书第二篇/
+
+# 本机交接含运行状态与私人路径，原文件留在本机
+/HANDOFF.md
+/交接/

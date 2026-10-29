@@ -97,6 +97,7 @@ mkdir -p "$STAGE/Contents/MacOS" "$STAGE/Contents/Resources"
 
 cp "$BIN" "$STAGE/Contents/MacOS/$APP_NAME"
 cp ".build/$CONFIG/LumenPDFWorker" "$STAGE/Contents/MacOS/LumenPDFWorker"
+cp ".build/$CONFIG/LumenUpdateWorker" "$STAGE/Contents/MacOS/LumenUpdateWorker"
 cp "$ROOT/Resources/Info.plist" "$STAGE/Contents/Info.plist"
 cp "$ROOT/Resources/ThirdPartyNotices.txt" "$STAGE/Contents/Resources/ThirdPartyNotices.txt"
 
@@ -123,6 +124,7 @@ if security find-identity -v -p codesigning 2>/dev/null | grep -q '"Lumen Dev"';
     SIGN_IDENTITY="Lumen Dev"
 fi
 codesign --force --sign "$SIGN_IDENTITY" --timestamp=none "$STAGE/Contents/MacOS/LumenPDFWorker" >/dev/null 2>&1
+codesign --force --sign "$SIGN_IDENTITY" --timestamp=none "$STAGE/Contents/MacOS/LumenUpdateWorker" >/dev/null 2>&1
 codesign --force --sign "$SIGN_IDENTITY" --timestamp=none "$STAGE" >/dev/null 2>&1
 
 # ── 证伪演练钩子 ──────────────────────────────────────────────

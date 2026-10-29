@@ -12,6 +12,37 @@ import Testing
 @Suite("PersistFile：损坏文件的后备与留痕")
 struct PersistFileTests {
 
+    @Test func readOnlyFilesCannotBeReplacedThroughAtomicRename() throws {
+        let root = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let file = root.appendingPathComponent("readonly.json")
+        let original = Data("{\"keep\":true}".utf8)
+        try original.write(to: file)
+        try FileManager.default.setAttributes([.posixPermissions: 0o444], ofItemAtPath: file.path)
+        #expect(!PersistFile.write(Data("{}".utf8), to: file, label: "fixture"))
+        #expect(try Data(contentsOf: file) == original)
+    }
+
+    @Test func unreadableJSONCannotBeOverwrittenByDefaultsAndEmptyJSONIsBackedUp() throws {
+        let root = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: root); _ = PersistFile.takeRecoveryWarnings() }
+        let file = root.appendingPathComponent("state.json")
+        let bytes = Data("{\"important\":\"keep\"}".utf8)
+        try bytes.write(to: file)
+        try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: file.path)
+        #expect(PersistFile.readJSONData(from: file, reason: "fixture") == nil)
+        #expect(!PersistFile.write(Data("{}".utf8), to: file, label: "fixture"))
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
+        #expect(try Data(contentsOf: file) == bytes)
+        let empty = root.appendingPathComponent("empty.json")
+        try Data().write(to: empty)
+        #expect(PersistFile.readJSONData(from: empty, reason: "fixture") == nil)
+        let backups = try FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)
+            .filter { $0.lastPathComponent.hasPrefix("empty.json.corrupt-") }
+        #expect(backups.count == 1)
+        #expect(try Data(contentsOf: #require(backups.first)).isEmpty)
+    }
+
     private func makeTempDir() throws -> URL {
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("lumen-persistfile-\(UUID().uuidString)")

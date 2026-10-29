@@ -94,6 +94,32 @@ struct TranscriptViewportTests {
         #expect(!follower.followsTail)
     }
 
+    @Test func deferredLayoutCorrectionAfterReconcileKeepsFollowing() async throws {
+        let scroll = NSScrollView(frame: .init(x: 0, y: 0, width: 337, height: 600))
+        let document = FlippedDocument(frame: .init(x: 0, y: 0, width: 337, height: 2_000))
+        scroll.documentView = document
+        let follower = TranscriptScrollController()
+        follower.attach(to: scroll)
+        defer { follower.detach() }
+        follower.setTail(UUID())
+        follower.reconcile()
+        try await Task.sleep(for: .milliseconds(30))
+        document.setFrameSize(.init(width: 337, height: 1_800))
+        NotificationCenter.default.post(name: NSView.frameDidChangeNotification, object: document)
+        follower.reconcile()
+        // SwiftUI may correct the clip origin after its document frame callback
+        // and our first reconciliation, without any reader input.
+        scroll.contentView.scroll(to: .init(x: 0, y: 1_100))
+        #expect(follower.followsTail)
+        try await Task.sleep(for: .milliseconds(30))
+        #expect(scroll.contentView.bounds.maxY == document.bounds.maxY)
+        // Actual input pauses before changing bounds, including during layout.
+        // Do not assume two queued AppKit turns finished within a wall-clock sleep.
+        follower.pause()
+        scroll.contentView.scroll(to: .init(x: 0, y: 300))
+        #expect(!follower.followsTail)
+    }
+
     @Test(.enabled(if: ProcessInfo.processInfo.environment["LUMEN_RUN_NATIVE_LAYOUT_TESTS"] == "1"), arguments: [15.0, 24.0])
     func consecutiveAnswersKeepARealRowInTheViewport(fontSize: Double) async throws {
         _ = NSApplication.shared

@@ -142,6 +142,7 @@ final class EPUBController: NSObject, ObservableObject {
             root.classList.toggle('lumen-dark', \(darkClass));
           }
           apply();
+          \(EPUBHighlightScript.source)
           if (!document.head) {
             document.addEventListener('DOMContentLoaded', apply, { once: true });
           }
@@ -162,7 +163,11 @@ final class EPUBController: NSObject, ObservableObject {
             scrollToAnchor: function (anchor) {
               if (!anchor) { window.scrollTo(0, 0); return true; }
               var el = document.getElementById(anchor) || document.querySelector('[name="' + anchor + '"]');
-              if (el) { el.scrollIntoView({ block: 'start' }); return true; }
+              if (el) {
+                el.scrollIntoView({ block: 'start' });
+                if (window.__lumenLayout) window.__lumenLayout.rememberNavigation();
+                return true;
+              }
               return false;
             },
             scrollTop: function () { window.scrollTo(0, 0); },
@@ -172,61 +177,7 @@ final class EPUBController: NSObject, ObservableObject {
             // 之后偏移量全部失效，而引文还在。找不到引文就不画——宁可少一个高亮，
             // 也不要在错误的位置划出一条线，那会让读者以为批注挂错了地方。
             highlight: function (id, quote, hex) {
-              if (!quote) { return false; }
-              var norm = function (s) { return (s || '').replace(/\\s+/g, ' ').trim(); };
-              var target = norm(quote);
-              if (!target) { return false; }
-
-              var walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, {
-                acceptNode: function (node) {
-                  if (!node.nodeValue || !node.nodeValue.trim()) { return NodeFilter.FILTER_REJECT; }
-                  var parent = node.parentElement;
-                  if (!parent) { return NodeFilter.FILTER_REJECT; }
-                  var tag = parent.tagName;
-                  if (tag === 'SCRIPT' || tag === 'STYLE' || tag === 'MARK') { return NodeFilter.FILTER_REJECT; }
-                  return NodeFilter.FILTER_ACCEPT;
-                }
-              });
-
-              var nodes = [];
-              var combined = '';
-              var node;
-              while ((node = walker.nextNode())) {
-                var piece = norm(node.nodeValue);
-                if (!piece) { continue; }
-                var start = combined.length;
-                combined += (combined ? ' ' : '') + piece;
-                nodes.push({ node: node, start: start, end: combined.length });
-              }
-              var index = combined.indexOf(target);
-              if (index < 0) { return false; }
-              var endIndex = index + target.length;
-
-              // 收集被覆盖的文本节点，逐个包进 <mark>
-              for (var i = 0; i < nodes.length; i++) {
-                var entry = nodes[i];
-                if (entry.end <= index || entry.start >= endIndex) { continue; }
-                var raw = entry.node.nodeValue;
-                var offsetInNode = Math.max(0, index - entry.start);
-                var lengthInNode = Math.min(raw.length, endIndex - entry.start) - offsetInNode;
-                if (lengthInNode <= 0) { continue; }
-                try {
-                  var range = document.createRange();
-                  range.setStart(entry.node, offsetInNode);
-                  range.setEnd(entry.node, offsetInNode + lengthInNode);
-                  var mark = document.createElement('mark');
-                  mark.className = 'lumen-hl';
-                  mark.setAttribute('data-lumen-id', id);
-                  if (/^#[0-9a-fA-F]{6}$/.test(hex)) {
-                    var rgb = [1, 3, 5].map(function (offset) { return parseInt(hex.slice(offset, offset + 2), 16); });
-                    mark.style.setProperty('--lm-highlight-rgb', rgb.join(', '));
-                  }
-                  range.surroundContents(mark);
-                } catch (e) {
-                  // surroundContents 遇到跨元素边界会抛错；跳过这一段，其余照画
-                }
-              }
-              return true;
+              return window.__lumenHighlights.apply(id, quote, hex);
             },
             unhighlight: function (id) {
               var marks = document.querySelectorAll('mark.lumen-hl[data-lumen-id="' + id + '"]');
@@ -322,18 +273,21 @@ final class EPUBController: NSObject, ObservableObject {
               return out;
             },
             markLoading: function (indices) {
-              indices = Array.isArray(indices) ? indices : [];
-              for (var i = 0; i < indices.length; i++) {
-                var el = document.querySelector('[data-lm-p="' + indices[i] + '"]');
-                if (!el) { continue; }
-                if (!el.parentNode) { continue; }
-                var box = document.createElement('div');
-                box.className = 'lm-tr lm-tr-loading';
-                box.setAttribute('data-lm-for', el.getAttribute('data-lm-p') || '');
-                box.textContent = '翻译中…';
-                el.parentNode.insertBefore(box, el.nextSibling);
-              }
-              return indices.length;
+              var update = () => {
+                indices = Array.isArray(indices) ? indices : [];
+                for (var i = 0; i < indices.length; i++) {
+                  var el = document.querySelector('[data-lm-p="' + indices[i] + '"]');
+                  if (!el) { continue; }
+                  if (!el.parentNode) { continue; }
+                  var box = document.createElement('div');
+                  box.className = 'lm-tr lm-tr-loading';
+                  box.setAttribute('data-lm-for', el.getAttribute('data-lm-p') || '');
+                  box.textContent = '翻译中…';
+                  el.parentNode.insertBefore(box, el.nextSibling);
+                }
+                return indices.length;
+              };
+              return window.__lumenLayout ? window.__lumenLayout.preservePosition(update) : update();
             },
             setTranslation: function (index, text, state) {
               var el = document.querySelector('[data-lm-p="' + index + '"]');
@@ -352,12 +306,15 @@ final class EPUBController: NSObject, ObservableObject {
               return true;
             },
             setTranslations: function (updates) {
-              updates = Array.isArray(updates) ? updates : [];
-              for (var i = 0; i < updates.length; i++) {
-                var item = updates[i] || {};
-                this.setTranslation(Number(item.index), String(item.text || ''), String(item.state || 'done'));
-              }
-              return updates.length;
+              var update = () => {
+                updates = Array.isArray(updates) ? updates : [];
+                for (var i = 0; i < updates.length; i++) {
+                  var item = updates[i] || {};
+                  this.setTranslation(Number(item.index), String(item.text || ''), String(item.state || 'done'));
+                }
+                return updates.length;
+              };
+              return window.__lumenLayout ? window.__lumenLayout.preservePosition(update) : update();
             },
             clearTranslations: function () {
               var boxes = document.querySelectorAll('.lm-tr');
@@ -487,7 +444,7 @@ final class EPUBController: NSObject, ObservableObject {
       border-radius: 3px;
       box-decoration-break: clone;
       -webkit-box-decoration-break: clone;
-      padding: 0 1px;
+      padding: 0;
     }
     html.lumen-dark mark.lumen-hl {
       background: rgba(var(--lm-highlight-rgb, 243, 223, 166), 0.38) !important;
@@ -539,6 +496,7 @@ final class EPUBController: NSObject, ObservableObject {
       line-height: 1.85 !important;
       text-align: start !important;
       text-indent: 0 !important;
+      hanging-punctuation: none !important;
       letter-spacing: 0 !important;
       word-spacing: normal !important;
       white-space: pre-line !important;

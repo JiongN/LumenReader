@@ -211,6 +211,44 @@ final class WindowManager: ObservableObject {
         NSApp.activate(ignoringOtherApps: true)
     }
 
+    func openLiteratureLink(_ url: URL) {
+        guard url.host == "open", let components = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return }
+        let query = components.queryItems ?? []
+        func unique(_ name: String) -> String? {
+            let items = query.filter { $0.name == name }
+            return items.count == 1 ? items[0].value : nil
+        }
+        guard let documentID = unique("document"), let annotationID = unique("annotation"),
+              let record = LiteratureSyncService.shared.record(id: documentID) else { return }
+        let locator = unique("locator").flatMap(DocumentLocator.parse(storageKey:)).flatMap { locator -> DocumentLocator? in
+            switch locator {
+            case let .pdf(page, offset): return page >= 0 && offset >= 0 ? locator : nil
+            case let .epub(chapter, _, offset): return chapter >= 0 && offset >= 0 ? locator : nil
+            }
+        }
+        let path = URL(fileURLWithPath: record.documentPath).standardizedFileURL.path
+        openExternally(urls: [URL(fileURLWithPath: path)])
+        guard let session = existingSession(for: path) else { return }
+        Task { @MainActor [weak self, weak session] in
+            for _ in 0..<80 {
+                guard let self, let session, self.existingSession(for: path) === session else { return }
+                if let provider = session.bridge.annotationsProvider, let reveal = session.bridge.revealAnnotation {
+                    let items = await provider()
+                    guard self.existingSession(for: path) === session else { return }
+                    if items.contains(where: { $0.id == annotationID }) {
+                        reveal(annotationID)
+                    } else if let locator {
+                        session.bridge.goTo?(locator)
+                        self.activeWorkspace?.showToast("原批注已无法定位，已跳到所在页或章节", isError: true)
+                    }
+                    return
+                }
+                try? await Task.sleep(for: .milliseconds(100))
+            }
+            self?.activeWorkspace?.showToast("文档尚未完成加载，无法定位批注", isError: true)
+        }
+    }
+
     // MARK: 工作区 / 窗口的生灭
 
     @discardableResult

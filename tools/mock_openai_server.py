@@ -13,10 +13,8 @@
 
     python3 tools/mock_openai_server.py 8777
 
-桩服务会按提示词**分流**：要求「只输出 JSON」的请求（AI 智能目录的第一步）
-返回一段带围栏、带客套话、且夹着越界条目的 JSON——故意做成不干净的样子，
-因为「解析器够不够宽容」正是这条链路最容易出问题的地方；
-其余请求返回一段中文说明文。
+桩服务会按提示词分流：智能目录从候选中返回已有 ID，保留代码围栏以检查格式容错；
+其他旧 JSON 调用保留旧的脏数据 fixture。其余请求返回中文说明文。
 """
 import json
 import os
@@ -35,7 +33,7 @@ REPLY = """这段文字讨论的是**注意力机制**替代循环结构的核�
 
 需要注意，原文并没有给出长序列下的实测对比，这一部分属于作者的推断。"""
 
-# 智能目录第一步的桩响应。刻意做脏：
+# 兼容旧 JSON 调用的桩响应。刻意做脏：
 #   - 前面带一句客套话、外面裹 markdown 围栏（模型十次有八次这样）
 #   - 夹一条 unit=9999 的越界条目（必须被丢掉）
 #   - 夹一条与首条完全重复的条目（必须去重）
@@ -112,6 +110,11 @@ def pick_reply(payload: dict) -> str:
         if message.get("role") != "user":
             continue
         content = message.get("content") or ""
+        if "【原文标题候选】" in content:
+            candidates = json.loads(content.split("【原文标题候选】", 1)[1].strip().splitlines()[0])
+            selected = [{"id": c["id"]} for c in candidates if re.match(
+                r"^(?:第.+[章节篇部]|[一二三四五六七八九十]+、|[（(][一二三四五六七八九十]+[）)]|参考文献|\d+[.、])", c["title"])]
+            return "```json\n" + json.dumps(selected, ensure_ascii=False) + "\n```"
         if "只输出 JSON" in content or "只输出JSON" in content:
             return OUTLINE_REPLY
         break
