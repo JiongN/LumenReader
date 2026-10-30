@@ -55,3 +55,5 @@ GitHub 正式 Release 必须包含 `Lumen-vN.M.P-macOS.zip`，顶层为 `Lumen.a
 - 不把 credentials、真实 PDF、用户聊天或密钥复制进发布包。
 
 每次发布以实际 GitHub tag、Release 资产和 `SHA256SUMS` 核验结果为准；本地构建成功不等于远端发布成功。
+
+macOS 系统代理不会自动由所有命令行客户端继承。本轮 GitHub Release 创建和 API 查询成功，但 gh/curl 直连资产域名超时；按 `scutil --proxy` 的当前配置，仅对下载命令指定本机 HTTP 代理后，实际 ZIP、校验和及构建信息下载复核通过。遇到同类问题先核对当前代理，不固定端口、不关闭 TLS、不改全局 Git 配置。
