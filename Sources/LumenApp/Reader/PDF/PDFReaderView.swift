@@ -2,7 +2,6 @@ import SwiftUI
 import AppKit
 import LumenKit
 import PDFKit
-import Translation
 
 /// 把 PDFKit 的视图塞进 SwiftUI。视图实例由 Controller 持有，
 /// 这里只负责挂载，不做任何状态 diff，避免每帧重建 PDFView。
@@ -72,7 +71,6 @@ struct PDFReaderView: View {
     /// 识别结果弹层
     @State private var ocrSheet: OCRSheetPayload?
     @State private var isOCRRunning = false
-    @State private var translationConfiguration: TranslationSession.Configuration?
 
     /// Keep theme blending local to the reading surface.
     ///
@@ -123,21 +121,13 @@ struct PDFReaderView: View {
                 .environmentObject(state)
         }
         .task(id: document.id) { await prepare() }
-        .translationTask(translationConfiguration) { session in
-            await translation.runApple(session: session, target: reader.translationTargetLanguage)
-        }
+        .background { AppleTranslationTask.forPDFController(translation) }
         .onChange(of: theme.id) { _, _ in
             applyAppearance()
         }
         .onChange(of: reader.pdfOriginalColors) { _, _ in applyAppearance() }
         .onChange(of: reader.pdfCanvasBrightness) { _, _ in applyAppearance() }
         .onChange(of: reader.flowMode) { _, newValue in controller.apply(flowMode: newValue) }
-        .onReceive(translation.$appleSessionRequest.dropFirst()) { _ in
-            guard let source = translation.appleSourceLanguage else { return }
-            translationConfiguration = AppleTranslationConfiguration.next(
-                translationConfiguration, source: source, target: reader.translationTargetLanguage
-            )
-        }
         .onChange(of: isOCRRunning) { _, running in
             bridge.ocrRunningPage = running ? controller.currentPageIndex : nil
             // OCR 状态一变，右键菜单的启用/禁用与文案也要跟着变（识别中 → 禁用）。
@@ -175,7 +165,7 @@ struct PDFReaderView: View {
                                   engineID: reader.translationEngineID,
                                   glossary: reader.translationGlossary,
                                   provider: state.settingsStore.translationProvider)
-        guard !translation.phase.isFailure else { return }
+        guard !Task.isCancelled, !translation.phase.isFailure, translation.phase != .cancelled else { return }
         // `prepare` 会更新文档标题/页数并让上层视图重算。await 之后再提交
         // 一次显示态，避免自动启动时译文已入缓存、开关却回到关闭。
         translation.isVisible = true

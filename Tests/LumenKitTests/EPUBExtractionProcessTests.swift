@@ -21,6 +21,22 @@ struct EPUBExtractionProcessTests {
         #expect(start.duration(to: .now) < .seconds(3))
     }
 
+    @Test func timeoutStopsHelperThatIgnoresTermination() throws {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/sh")
+        process.arguments = ["-c", "trap '' TERM; printf ready; while :; do :; done"]
+        let output = Pipe()
+        process.standardOutput = output
+        try process.run()
+        #expect(try output.fileHandleForReading.read(upToCount: 5) == Data("ready".utf8))
+        let start = ContinuousClock.now
+        #expect(throws: SubprocessDeadline.Failure.timedOut) {
+            try SubprocessDeadline.wait(for: process, timeout: 0.05)
+        }
+        #expect(!process.isRunning)
+        #expect(start.duration(to: .now) < .seconds(3))
+    }
+
     @Test func cancellationStopsProcess() async throws {
         let start = ContinuousClock.now
         let task = Task.detached {

@@ -119,10 +119,8 @@ enum PDFLargeAnnotationSave {
         process.standardOutput = FileHandle.nullDevice; process.standardError = FileHandle.nullDevice
         do { try process.run() }
         catch { throw SaveError.helperLaunch(error.localizedDescription) }
-        let deadline = Date().addingTimeInterval(180)
-        while process.isRunning, Date() < deadline { Thread.sleep(forTimeInterval: 0.02) }
-        if process.isRunning { process.terminate(); process.waitUntilExit(); throw SaveError.write }
-        process.waitUntilExit()
+        do { try SubprocessDeadline.wait(for: process, timeout: 180) }
+        catch SubprocessDeadline.Failure.timedOut { throw SaveError.write }
         guard process.terminationStatus == 0 else { throw SaveError.verify }
         return try PDFFileReplacement.commit(temporary: output, to: url, expected: expected)
     }

@@ -34,8 +34,11 @@ struct AISettingsPane: View {
             providerSection
 
             if let binding = editingProviderBinding {
-                credentialSection(binding)
-                modelSection(binding)
+                Group {
+                    credentialSection(binding)
+                    modelSection(binding)
+                }
+                .id(binding.wrappedValue.id)
             } else {
                 Section {
                     Text("暂无服务商")
@@ -483,9 +486,8 @@ struct AISettingsPane: View {
 
     private var editingProviderBinding: Binding<AIProviderConfig>? {
         let ai = settings.settings.ai
-        guard let id = editingProviderID ?? ai.providers.first?.id,
-              let index = ai.providers.firstIndex(where: { $0.id == id }) else { return nil }
-        return $settings.settings.ai.providers[index]
+        guard let id = editingProviderID ?? ai.providers.first?.id else { return nil }
+        return AIProviderBinding.make(in: $settings.settings.ai.providers, id: id)
     }
 
     private func add(_ preset: AIProviderConfig?) {
@@ -613,5 +615,24 @@ struct LabeledField<Content: View>: View {
             content
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
+    }
+}
+
+/// TextField may read/write its old binding while SwiftUI removes the editor.
+/// Resolve identity on every access: array indices become stale after deletion/reordering.
+@MainActor
+enum AIProviderBinding {
+    static func make(in providers: Binding<[AIProviderConfig]>, id: UUID) -> Binding<AIProviderConfig>? {
+        guard let snapshot = providers.wrappedValue.first(where: { $0.id == id }) else { return nil }
+        return Binding(
+            get: { providers.wrappedValue.first(where: { $0.id == id }) ?? snapshot },
+            set: { value in
+                var current = providers.wrappedValue
+                guard value.id == id,
+                      let index = current.firstIndex(where: { $0.id == id }) else { return }
+                current[index] = value
+                providers.wrappedValue = current
+            }
+        )
     }
 }

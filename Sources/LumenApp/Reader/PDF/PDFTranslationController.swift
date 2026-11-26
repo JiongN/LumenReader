@@ -347,7 +347,8 @@ final class PDFTranslationController: ObservableObject {
     private var preparedParsingOptions = DocumentAIOptions()
     private let material: PDFTranslationMaterial
     /// 递增即表示 SwiftUI 需要创建/刷新一次系统翻译会话。
-    @Published private(set) var appleSessionRequest = 0
+    @Published private(set) var appleRequest: AppleTranslationRequest?
+    private var queuedAppleParagraphs: [PDFParagraph] = []
     private(set) var appleSourceLanguage: String?
 
     /// 这一轮的**文字来源**，必须如实告诉用户。
@@ -421,7 +422,6 @@ final class PDFTranslationController: ObservableObject {
                 || preparedSelection != selection || preparedParsingOptions != parsingOptions || paragraphs.isEmpty else { return }
 
         cancelRun()
-        generation += 1
         self.documentPath = documentPath
         sourceVersion = version
         targetLanguage = normalizedTarget
@@ -475,10 +475,11 @@ final class PDFTranslationController: ObservableObject {
         sourceVersion = "\(savedAttributes?[.size] ?? 0):\(savedAttributes?[.modificationDate] ?? "")"
         guard !all.isEmpty else { phase = .failed("未取得可翻译文字"); return }
         if engineID == AppleSystemTranslation.engineID {
-            appleSourceLanguage = try? await TranslationSourceResolver.shared.resolve(
+            let source = try? await TranslationSourceResolver.shared.resolve(
                 texts: all.filter { TranslationEligibility.skipReason(for: $0, target: normalizedTarget) == nil }.map(\.text),
                 pdfPath: documentPath, pageIndex: selection?.pageIndex ?? preparedPageRange?.lowerBound)
             guard token == generation, !Task.isCancelled else { return }
+            appleSourceLanguage = source
         }
 
         // 先把跳过项定下来，再填缓存命中 —— 顺序反了会让「已跳过」的段落被缓存里的
@@ -524,18 +525,14 @@ final class PDFTranslationController: ObservableObject {
     /// 翻全部还没定局的段落。
     func startAll(engineID: String, target: String,
                   customEngine: (any TranslationEngine)? = nil) {
-        guard runTask == nil else { return }
+        guard runTask == nil, appleRequest == nil else { return }
         let queue = paragraphs.filter { !state(of: $0.id).isSettled }
         guard !queue.isEmpty else {
             phase = .finished
             return
         }
         if engineID == AppleSystemTranslation.engineID {
-            guard appleSourceLanguage != nil else {
-                phase = .failed("无法确定原文语言。请选择包含完整句子的文字，或改用其他翻译引擎。")
-                return
-            }
-            appleSessionRequest &+= 1
+            requestApple(queue, target: target)
             return
         }
         guard let engine = customEngine ?? TranslationEngineCatalog.engine(for: engineID) else {
@@ -553,18 +550,14 @@ final class PDFTranslationController: ObservableObject {
     /// 整篇重来会白烧一遍配额，还可能再撞一次。
     func retryFailed(engineID: String, target: String,
                      customEngine: (any TranslationEngine)? = nil) {
-        guard runTask == nil else { return }
+        guard runTask == nil, appleRequest == nil else { return }
         let stoppedForServiceFailure = phase.isFailure
         let queue = paragraphs.filter {
             state(of: $0.id).isFailed || (stoppedForServiceFailure && !state(of: $0.id).isSettled)
         }
         guard !queue.isEmpty else { return }
         if engineID == AppleSystemTranslation.engineID {
-            guard appleSourceLanguage != nil else {
-                phase = .failed("无法确定原文语言。请选择包含完整句子的文字，或改用其他翻译引擎。")
-                return
-            }
-            appleSessionRequest &+= 1
+            requestApple(queue, target: target)
             return
         }
         guard let engine = customEngine ?? TranslationEngineCatalog.engine(for: engineID) else {
@@ -605,6 +598,11 @@ final class PDFTranslationController: ObservableObject {
         runTask = nil
         preparationTask?.cancel()
         preparationTask = nil
+        appleRequest = nil
+        queuedAppleParagraphs = []
+        for (id, state) in states where state == .translating {
+            states[id] = .pending
+        }
         // 换一代：上一轮迟到的结果会因为 token 不匹配被丢掉，
         // 不会把「已经废弃的译文」写进新状态。
         generation += 1
@@ -678,27 +676,37 @@ final class PDFTranslationController: ObservableObject {
         }
     }
 
-    /// 由 SwiftUI `translationTask` 提供的 Apple 会话。使用官方 batch API，
-    /// `clientIdentifier` 把乱序返回的结果稳定地对回段落与分块。
-    func runApple(session: TranslationSession, target: String) async {
-        guard runTask == nil else { return }
-        let queue = paragraphs.filter { !state(of: $0.id).isSettled || state(of: $0.id).isFailed }
-        guard !queue.isEmpty else { phase = .finished; return }
-        let token = generation
-        let normalizedTarget = TranslationLanguage.target(for: target).id
-
-        runTask = Task { [weak self] in
-            guard let self else { return }
-            await self.runAppleQueue(queue, session: session, token: token, target: normalizedTarget)
-            if token == self.generation { self.runTask = nil }
+    private func requestApple(_ queue: [PDFParagraph], target: String) {
+        guard let source = appleSourceLanguage else {
+            phase = .failed("无法确定原文语言。请选择包含完整句子的文字，或改用其他翻译引擎。")
+            return
         }
-        await runTask?.value
+        queuedAppleParagraphs = queue
+        phase = .running(done: settledCount, total: paragraphs.count)
+        appleRequest = AppleTranslationRequest(source: source, target: TranslationLanguage.target(for: target).id)
+    }
+
+    func failApple(_ error: AppleTranslationFailure, request: AppleTranslationRequest) {
+        guard appleRequest === request else { return }
+        cancelRun()
+        persistCache(force: true)
+        phase = .failed(error.localizedDescription)
+    }
+
+    /// `clientIdentifier` 把乱序返回的结果稳定地对回段落与分块。
+    func runApple(session: TranslationSession, request: AppleTranslationRequest) async {
+        guard appleRequest === request, !Task.isCancelled else { return }
+        request.recordProgress()
+        await runAppleQueue(queuedAppleParagraphs, session: session, token: generation,
+                            request: request, target: request.targetID)
+        if appleRequest === request {
+            queuedAppleParagraphs = []
+            appleRequest = nil
+        }
     }
 
     private func runAppleQueue(_ queue: [PDFParagraph], session: TranslationSession,
-                               token: Int, target: String) async {
-        phase = .running(done: settledCount, total: paragraphs.count)
-
+                               token: Int, request: AppleTranslationRequest, target: String) async {
         // 一批不超过 24 个文本块，避免长书一次建立数千个请求对象。
         var requests: [TranslationSession.Request] = []
         var owners: [String: (paragraphID: String, chunkIndex: Int, chunkCount: Int)] = [:]
@@ -713,14 +721,19 @@ final class PDFTranslationController: ObservableObject {
             do {
                 let responses = try await AppleTranslationBatch.run(current,
                     batch: { items in
+                        request.recordProgress()
                         var responses: [TranslationSession.Response] = []
                         for try await response in session.translate(batch: items) {
                             try Task.checkCancellation()
+                            request.recordProgress()
                             responses.append(response)
                         }
                         return responses
                     },
-                    single: { try await session.translate($0).targetText })
+                    single: {
+                        request.recordProgress()
+                        return try await session.translate($0).targetText
+                    })
                 guard token == generation, !Task.isCancelled else { return CancellationError() }
                 for request in current {
                     guard let clientID = request.clientIdentifier,

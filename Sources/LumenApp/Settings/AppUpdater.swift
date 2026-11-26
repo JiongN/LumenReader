@@ -11,7 +11,8 @@ final class AppUpdater: ObservableObject {
         didSet { defaults.set(automatic, forKey: "automaticUpdateChecks") }
     }
     enum Phase: Equatable {
-        case idle, checking, current, noRelease, preparing, restarting
+        case idle, checking, current, noRelease, restarting
+        case preparing(UpdateInfo)
         case available(UpdateInfo)
         case failed(String)
     }
@@ -19,14 +20,18 @@ final class AppUpdater: ObservableObject {
     private var operation: Task<Void, Never>?
     private var startupTask: Task<Void, Never>?
     private var window: NSWindow?
-    private var worker: Process?
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
         self.automatic = defaults.object(forKey: "automaticUpdateChecks") as? Bool ?? true
     }
 
-    var busy: Bool { [.checking, .preparing, .restarting].contains(phase) }
+    var busy: Bool {
+        switch phase {
+        case .checking, .preparing, .restarting: true
+        default: false
+        }
+    }
 
     func scheduleBackgroundCheck() {
         guard startupTask == nil, !LaunchOptions.isAuditRun,
@@ -69,8 +74,10 @@ final class AppUpdater: ObservableObject {
     }
 
     func cancel() {
-        guard phase == .preparing else { return }
+        guard case .preparing(let info) = phase else { return }
         operation?.cancel()
+        operation = nil
+        phase = .available(info)
     }
 
     func install(_ info: UpdateInfo) {
@@ -78,7 +85,7 @@ final class AppUpdater: ObservableObject {
         let otherInstances = NSRunningApplication.runningApplications(withBundleIdentifier: AppUpdatePackage.bundleIdentifier)
             .filter { $0.processIdentifier != ProcessInfo.processInfo.processIdentifier && $0.bundleURL == Bundle.main.bundleURL }
         guard otherInstances.isEmpty else { phase = .failed("请先关闭其他 Lumen 实例，再进行更新"); return }
-        phase = .preparing
+        phase = .preparing(info)
         let target = Bundle.main.bundleURL
         operation = Task { [weak self] in
             let preparation = Task.detached(priority: .utility) { try await AppUpdatePackage.prepare(info: info, target: target) }
@@ -94,21 +101,20 @@ final class AppUpdater: ObservableObject {
                     var paths = Array(Set(windows.workspaces.flatMap { $0.sessions.map { $0.document.url.path } })).sorted()
                     if let activePath { paths.removeAll { $0 == activePath }; paths.append(activePath) }
                     job.reopenPaths = paths
-                    try await self.startWorker(job, workspace: workspace)
-                    self.phase = .restarting
-                    NSApp.terminate(nil)
+                    try await self.restartWithWorker(job, workspace: workspace)
                 } catch {
                     try? FileManager.default.removeItem(at: workspace)
                     throw error
                 }
             } catch {
-                self?.phase = Task.isCancelled ? .available(info) : .failed(error.localizedDescription)
+                guard !Task.isCancelled else { return }
+                self?.phase = .failed(error.localizedDescription)
             }
             self?.operation = nil
         }
     }
 
-    private func startWorker(_ job: PreparedAppUpdate, workspace: URL) async throws {
+    private func restartWithWorker(_ job: PreparedAppUpdate, workspace: URL) async throws {
         let executable = Bundle.main.bundleURL.appendingPathComponent("Contents/MacOS/LumenUpdateWorker")
         guard FileManager.default.isExecutableFile(atPath: executable.path) else {
             throw AppUpdateError.invalid("应用缺少更新组件，请重新安装完整版本")
@@ -121,12 +127,14 @@ final class AppUpdater: ObservableObject {
         process.standardOutput = FileHandle.nullDevice
         process.standardError = FileHandle.nullDevice
         try process.run()
-        worker = process
         do {
             for _ in 0..<100 {
                 try Task.checkCancellation()
                 if FileManager.default.fileExists(atPath: workspace.appendingPathComponent("ready").path) {
                     defaults.set(workspace.path, forKey: "pendingUpdateWorkspace")
+                    phase = .restarting
+                    // AppKit may enter a nested event loop while pending saves drain.
+                    DispatchQueue.main.async { NSApp.terminate(nil) }
                     return
                 }
                 if !process.isRunning { break }
@@ -135,7 +143,6 @@ final class AppUpdater: ObservableObject {
             throw AppUpdateError.invalid("更新组件未就绪，应用未退出")
         } catch {
             if process.isRunning { process.terminate() }
-            worker = nil
             throw error
         }
     }

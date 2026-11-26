@@ -17,8 +17,7 @@ final class EPUBTranslationController: ObservableObject {
     @Published private(set) var completedCount = 0
     @Published private(set) var failureCount = 0
     @Published private(set) var errorMessage: String?
-    @Published private(set) var appleSessionRequest = 0
-    private(set) var appleSourceLanguage: String?
+    @Published private(set) var appleRequest: AppleTranslationRequest?
 
     var onFinish: ((_ failed: Int) -> Void)?
     var onError: ((_ message: String) -> Void)?
@@ -30,6 +29,8 @@ final class EPUBTranslationController: ObservableObject {
         let cacheKey: String
     }
 
+    private let paragraphLoadLimit: Duration
+    private var paragraphLoadTimeout: Task<Void, Never>?
     private var task: Task<Void, Never>?
     private var generation = 0
     private var queuedAppleItems: [Item] = []
@@ -40,6 +41,10 @@ final class EPUBTranslationController: ObservableObject {
 
     private static let concurrency = 4
     private static let saveEvery = 8
+
+    init(paragraphLoadLimit: Duration = .seconds(20)) {
+        self.paragraphLoadLimit = paragraphLoadLimit
+    }
 
     func start(
         documentPath: String,
@@ -60,8 +65,6 @@ final class EPUBTranslationController: ObservableObject {
         completedCount = 0
         failureCount = 0
         errorMessage = nil
-        queuedAppleItems = []
-        appleSourceLanguage = nil
         self.apply = apply
 
         let normalizedTarget = TranslationLanguage.target(for: target).id
@@ -73,11 +76,19 @@ final class EPUBTranslationController: ObservableObject {
         self.cacheURL = cacheURL
         cache = TranslationCache.load(from: cacheURL)
 
+        paragraphLoadTimeout = Task { [weak self, paragraphLoadLimit] in
+            do { try await Task.sleep(for: paragraphLoadLimit) }
+            catch { return }
+            guard let self, token == self.generation else { return }
+            self.cancelRun()
+            self.finishWithError("读取 EPUB 正文超时。可重试翻译或重新打开章节。")
+        }
+
         task = Task { [weak self] in
-            guard let self else { return }
             do {
                 let texts = try await paragraphs()
-                guard token == self.generation, !Task.isCancelled else { return }
+                guard let self, token == self.generation, !Task.isCancelled else { return }
+                self.cancelParagraphLoadTimeout()
                 guard !texts.isEmpty else {
                     self.finishWithError("当前章节没有识别到可翻译的正文段落。")
                     return
@@ -113,18 +124,16 @@ final class EPUBTranslationController: ObservableObject {
                     self.finish(failed: 0)
                     return
                 }
-                markLoading(queue.map(\.index))
-
                 if engineID == AppleSystemTranslation.engineID {
-                    self.appleSourceLanguage = try await TranslationSourceResolver.shared.resolve(texts: items.map(\.text))
+                    let source = try await TranslationSourceResolver.shared.resolve(texts: items.map(\.text))
                     guard token == self.generation, !Task.isCancelled else { return }
-                    guard self.appleSourceLanguage != nil else {
+                    guard let source else {
                         self.finishWithError("无法确定原文语言，请改用其他翻译引擎。")
                         return
                     }
                     self.queuedAppleItems = queue
                     self.task = nil
-                    self.appleSessionRequest &+= 1
+                    self.appleRequest = AppleTranslationRequest(source: source, target: normalizedTarget)
                     return
                 }
 
@@ -134,28 +143,31 @@ final class EPUBTranslationController: ObservableObject {
                         : "所选翻译引擎不可用。")
                     return
                 }
+                markLoading(queue.map(\.index))
                 await self.run(queue, engine: engine, target: normalizedTarget, token: token)
-            } catch is CancellationError {
-                return
             } catch {
-                guard token == self.generation else { return }
+                guard let self, token == self.generation, !Task.isCancelled else { return }
+                self.cancelParagraphLoadTimeout()
                 self.finishWithError(Self.describe(error))
             }
         }
     }
 
-    func runApple(session: TranslationSession, target: String) async {
-        let items = queuedAppleItems
-        guard !items.isEmpty, task == nil else { return }
-        queuedAppleItems = []
-        let token = generation
-        let normalizedTarget = TranslationLanguage.target(for: target).id
-        task = Task { [weak self] in
-            guard let self else { return }
-            await self.runApple(items, session: session, target: normalizedTarget, token: token)
-            if token == self.generation { self.task = nil }
+    func runApple(session: TranslationSession, request: AppleTranslationRequest) async {
+        guard appleRequest === request, !Task.isCancelled else { return }
+        request.recordProgress()
+        await runApple(queuedAppleItems, session: session, request: request, token: generation)
+        if appleRequest === request {
+            queuedAppleItems = []
+            appleRequest = nil
         }
-        await task?.value
+    }
+
+    func failApple(_ error: AppleTranslationFailure, request: AppleTranslationRequest) {
+        guard appleRequest === request else { return }
+        cancelRun()
+        persistCache()
+        finishWithError(error.localizedDescription)
     }
 
     func stop() {
@@ -170,10 +182,17 @@ final class EPUBTranslationController: ObservableObject {
 
     func retry() { retryAction?() }
 
+    private func cancelParagraphLoadTimeout() {
+        paragraphLoadTimeout?.cancel()
+        paragraphLoadTimeout = nil
+    }
+
     private func cancelRun() {
+        cancelParagraphLoadTimeout()
         task?.cancel()
         task = nil
         queuedAppleItems = []
+        appleRequest = nil
         generation &+= 1
     }
 
@@ -214,7 +233,7 @@ final class EPUBTranslationController: ObservableObject {
     }
 
     private func runApple(_ items: [Item], session: TranslationSession,
-                          target: String, token: Int) async {
+                          request: AppleTranslationRequest, token: Int) async {
         for item in items {
             guard token == generation, !Task.isCancelled else { return }
             do {
@@ -222,6 +241,7 @@ final class EPUBTranslationController: ObservableObject {
                 let chunks = try await TranslationTextSplitter.splitInBackground(item.text)
                 guard token == generation, !Task.isCancelled else { return }
                 for chunk in chunks {
+                    request.recordProgress()
                     let response = try await session.translate(chunk)
                     guard token == generation, !Task.isCancelled else { return }
                     guard !response.targetText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
@@ -229,9 +249,14 @@ final class EPUBTranslationController: ObservableObject {
                     }
                     translated.append(response.targetText)
                 }
-                consume(.success(TranslationTextSplitter.join(translated, target: target)), for: item)
+                consume(.success(TranslationTextSplitter.join(translated, target: request.targetID)), for: item)
             } catch {
                 guard token == generation, !Task.isCancelled else { return }
+                if AppleTranslationBatch.stopsQueue(error) {
+                    persistCache()
+                    finishWithError(Self.describe(error))
+                    return
+                }
                 consume(.failure(error), for: item)
             }
         }

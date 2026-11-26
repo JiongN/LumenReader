@@ -71,6 +71,9 @@ struct PDFTranslationPane: View {
             content
         }
         .background(DS.Palette.surfaceSunken)
+        .background {
+            if selectionOnly { AppleTranslationTask.forPDFController(controller) }
+        }
         .task(id: taskIdentity) { await prepareAndStart(reset: false) }
         .onDisappear { controller.stop() }
         .onChange(of: selectionMode) { _, enabled in if !enabled { locatedSelection = nil } }

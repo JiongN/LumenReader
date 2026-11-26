@@ -37,8 +37,7 @@ public enum AppleSystemTranslation {
         id: engineID,
         displayName: "Apple 系统翻译",
         requiresNetwork: false,
-        note: "使用 macOS 官方翻译框架；语言包下载后可在本机处理。"
-            + "首次使用某个语言对时，系统可能会请求下载语言包。"
+        note: "使用 macOS 已安装的语言包，在本机完成翻译。"
     )
 }
 

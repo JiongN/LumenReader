@@ -1,7 +1,6 @@
 import SwiftUI
 import WebKit
 import LumenKit
-import Translation
 
 /// WKWebView 挂载点。视图实例由 Controller 持有，这里不做任何重建。
 struct WebViewRepresentable: NSViewRepresentable {
@@ -30,7 +29,6 @@ struct EPUBReaderView: View {
     @StateObject private var translation = EPUBTranslationController()
     @State private var store: ReadingStateStore?
     @State private var source: EPUBDocumentSource?
-    @State private var translationConfiguration: TranslationSession.Configuration?
 
     init(document: OpenDocument, theme: ReadingTheme, reader: ReaderSettings) {
         self.document = document
@@ -57,11 +55,15 @@ struct EPUBReaderView: View {
             }
         }
         .task(id: document.id) { await prepare() }
-        .translationTask(translationConfiguration) { session in
-            await translation.runApple(
-                session: session,
-                target: state.settingsStore.reader.translationTargetLanguage
-            )
+        .background {
+            if let request = translation.appleRequest {
+                AppleTranslationTask(request: request) { session in
+                    await translation.runApple(session: session, request: request)
+                } fail: { error in
+                    translation.failApple(error, request: request)
+                }
+                .id(request.id)
+            }
         }
         // **只留一条。** `ReaderSettings` 里就包含 `themeID`，所以换主题必然也表现为
         // `reader` 变化；原来另有一条 `.onChange(of: theme.id)` 也调 `applyTheme`，
@@ -83,12 +85,6 @@ struct EPUBReaderView: View {
         }
         .onChange(of: translationIdentity) { _, _ in
             if reader.epubTranslateEnabled { startTranslation() }
-        }
-        .onReceive(translation.$appleSessionRequest.dropFirst()) { _ in
-            guard let source = translation.appleSourceLanguage else { return }
-            translationConfiguration = AppleTranslationConfiguration.next(
-                translationConfiguration, source: source, target: reader.translationTargetLanguage
-            )
         }
         .onReceive(controller.$chapterLoadRevision.dropFirst()) { _ in
             refreshTranslationIfEnabled()
@@ -321,7 +317,8 @@ struct EPUBReaderView: View {
 
     /// 打开开关：翻译当前这一章。
     private func startTranslation() {
-        guard state.settingsStore.reader.epubTranslateEnabled, !bridge.selectionTranslationMode else { return }
+        guard state.activeSessionID == session.id, state.settingsStore.reader.epubTranslateEnabled,
+              !bridge.selectionTranslationMode else { return }
         let settings = state.settingsStore
         let target = settings.reader.translationTargetLanguage
         let engineID = settings.reader.translationEngineID

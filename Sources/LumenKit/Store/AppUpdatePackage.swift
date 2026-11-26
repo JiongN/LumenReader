@@ -17,6 +17,7 @@ public enum AppUpdatePackage {
     public static let bundleIdentifier = "com.jn.lumen"
 
     public static func prepare(info: UpdateInfo, target: URL) async throws -> (PreparedAppUpdate, URL) {
+        try Task.checkCancellation()
         guard let asset = info.installAsset,
               UpdateAsset.trustedURL(asset.url, tag: info.tagName, name: "Lumen-\(info.tagName)-macOS.zip") else {
             throw AppUpdateError.invalid("该版本缺少可校验的安装包，请查看发布页")
@@ -34,7 +35,11 @@ public enum AppUpdatePackage {
             var request = URLRequest(url: asset.url)
             request.timeoutInterval = 120
             request.setValue("Lumen-Updater", forHTTPHeaderField: "User-Agent")
-            let (download, response) = try await URLSession.shared.download(for: request)
+            let configuration = URLSessionConfiguration.ephemeral
+            configuration.timeoutIntervalForResource = 180
+            let session = URLSession(configuration: configuration)
+            defer { session.invalidateAndCancel() }
+            let (download, response) = try await session.download(for: request)
             defer { try? FileManager.default.removeItem(at: download) }
             guard let http = response as? HTTPURLResponse, http.statusCode == 200,
                   let final = http.url, final.scheme == "https",
@@ -45,6 +50,7 @@ public enum AppUpdatePackage {
             let archive = workspace.appendingPathComponent("update.zip")
             try FileManager.default.moveItem(at: download, to: archive)
             try asset.verify(file: archive)
+            try Task.checkCancellation()
             // Same bounded ZIP preflight as EPUB: no traversal, symlinks, special
             // files, encryption, duplicate paths or >512 MiB expanded content.
             do { try EPUBArchiveSafety.validate(archive) }
@@ -55,6 +61,7 @@ public enum AppUpdatePackage {
                                            arguments: ["-x", "-k", archive.path, unpacked.path])
             let candidate = unpacked.appendingPathComponent("Lumen.app", isDirectory: true)
             try validateCandidate(candidate, version: info.version.display, certificate: certificate)
+            try Task.checkCancellation()
             let job = PreparedAppUpdate(candidatePath: candidate.path, targetPath: target.path,
                                         version: info.version.display, originalBuild: original.build,
                                         certificate: certificate, parentPID: ProcessInfo.processInfo.processIdentifier)

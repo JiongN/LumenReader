@@ -14,6 +14,7 @@ struct TabBar: View {
     @EnvironmentObject private var state: AppState
 
     static let height: CGFloat = 40
+    private static let addButtonID = "add-tab"
 
     /// 左侧给红黄绿交通灯留的横向空位（标题栏透明、交通灯悬浮在标签同一行）。
     static let trafficLightInset: CGFloat = 70
@@ -61,6 +62,9 @@ struct TabBar: View {
                             .id("home")
                     }
 
+                    addButton
+                        .id(Self.addButtonID)
+
                     TitlebarDragArea()
                         .frame(minWidth: 24, maxWidth: .infinity, maxHeight: .infinity)
                 }
@@ -69,19 +73,17 @@ struct TabBar: View {
                 .frame(height: Self.height)
               }
               .onChange(of: state.activeSessionID) { _, id in
-                  if let id { scroll.scrollTo(id.uuidString) }
+                  if id != nil { revealSelection(using: scroll) }
               }
               .onChange(of: state.homeTabIsActive) { _, active in
-                  if active { scroll.scrollTo("home", anchor: .trailing) }
+                  if active { revealSelection(using: scroll) }
               }
-              .onChange(of: proxy.size.width) { _, _ in
-                  scroll.scrollTo(state.homeTabIsActive ? "home" : state.activeSessionID?.uuidString ?? "", anchor: .center)
+              .onChange(of: proxy.size.width, initial: true) { _, _ in
+                  revealSelection(using: scroll, anchor: .center)
               }
               }
             }
             .clipped()
-
-            addButton.padding(.horizontal, DS.Space.xs)
 
             Divider()
 
@@ -99,6 +101,15 @@ struct TabBar: View {
         }
     }
 
+
+    private func revealSelection(using scroll: ScrollViewProxy, anchor: UnitPoint? = nil) {
+        if state.homeTabIsActive || state.activeSessionID == state.sessions.last?.id {
+            // Reveal both the last tab and the adjacent control when the strip overflows.
+            scroll.scrollTo(Self.addButtonID, anchor: .trailing)
+        } else if let id = state.activeSessionID {
+            scroll.scrollTo(id.uuidString, anchor: anchor)
+        }
+    }
 
     /// 顶栏右侧的操作按钮：外观 / 复制 / 沉浸 / AI 面板。
     /// 窗口不再有独立的工具栏行，这些动作统一收进这一条标签栏。
@@ -193,6 +204,7 @@ struct TabBar: View {
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .accessibilityLabel("新建标签页")
         .help("新建标签页（回到主页）")
     }
 }

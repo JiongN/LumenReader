@@ -20,7 +20,6 @@ enum EPUBExtractionProcess {
             throw EPUBError.extractionFailed("无法建立解包日志通道")
         }
         try process.run()
-        let deadline = ContinuousClock.now.advanced(by: .seconds(timeout))
         var log = Data()
         var buffer = [UInt8](repeating: 0, count: 8192)
         func drain() {
@@ -30,30 +29,11 @@ enum EPUBExtractionProcess {
             }
         }
         do {
-            while process.isRunning {
-                try Task.checkCancellation()
-                guard ContinuousClock.now < deadline else {
-                    throw EPUBError.extractionFailed("解包超过时限，请检查文件是否损坏")
-                }
-                drain()
-                Thread.sleep(forTimeInterval: 0.02)
-            }
-            process.waitUntilExit()
-            drain()
-            try Task.checkCancellation()
-        } catch {
-            if process.isRunning {
-                process.terminate()
-                let grace = ContinuousClock.now.advanced(by: .seconds(1))
-                while process.isRunning && ContinuousClock.now < grace {
-                    drain()
-                    Thread.sleep(forTimeInterval: 0.02)
-                }
-                if process.isRunning { kill(process.processIdentifier, SIGKILL) }
-            }
-            process.waitUntilExit()
-            throw error
+            try SubprocessDeadline.wait(for: process, timeout: timeout, drain: drain)
+        } catch SubprocessDeadline.Failure.timedOut {
+            throw EPUBError.extractionFailed("解包超过时限，请检查文件是否损坏")
         }
+        drain()
         guard process.terminationStatus == 0 else {
             let detail = String(decoding: log, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
             throw EPUBError.extractionFailed(detail.isEmpty ? "ditto 退出码 \(process.terminationStatus)" : detail)

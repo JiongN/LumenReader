@@ -68,7 +68,7 @@ struct UpdateCheckSection: View {
                     .font(DS.Typo.callout)
                 }
             }
-            if updater.phase == .preparing {
+            if case .preparing = updater.phase {
                 Button("取消下载") { updater.cancel() }
             }
             Text("每天检查 GitHub 正式版；更新前核验校验值与签名，保存完成后重启。")

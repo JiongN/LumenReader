@@ -99,10 +99,8 @@ enum LiteratureAnnotationReader {
         process.standardOutput = FileHandle.nullDevice
         process.standardError = FileHandle.nullDevice
         try process.run()
-        let deadline = Date().addingTimeInterval(180)
-        while process.isRunning && Date() < deadline { Thread.sleep(forTimeInterval: 0.05) }
-        if process.isRunning { process.terminate(); process.waitUntilExit(); throw LiteratureReadError.unavailable }
-        process.waitUntilExit()
+        do { try SubprocessDeadline.wait(for: process, timeout: 180) }
+        catch SubprocessDeadline.Failure.timedOut { throw LiteratureReadError.unavailable }
         guard process.terminationStatus == 0,
               ((try output.resourceValues(forKeys: [.fileSizeKey])).fileSize ?? Int.max) <= 32 * 1_048_576 else {
             throw LiteratureReadError.unavailable

@@ -25,8 +25,11 @@ func reopen(_ app: URL, documents: [String] = []) -> Bool {
         arguments += ["--env", "LUMEN_TEST_DATA=" + root]
     }
     process.arguments = arguments + documents.filter { FileManager.default.fileExists(atPath: $0) }
-    do { try process.run(); process.waitUntilExit(); return process.terminationStatus == 0 }
-    catch { return false }
+    do {
+        try process.run()
+        try SubprocessDeadline.wait(for: process, timeout: 15)
+        return process.terminationStatus == 0
+    } catch { return false }
 }
 do {
     let values = try file.resourceValues(forKeys: [.fileSizeKey, .isSymbolicLinkKey])
