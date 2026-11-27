@@ -289,18 +289,21 @@ struct EPUBReaderView: View {
         }
 
         bridge.goTo = { [weak controller] locator in controller?.go(to: locator) }
+        bridge.goToOutlinePosition = { [weak controller] locator, position in
+            controller?.go(to: locator, outlinePosition: position)
+        }
+        controller.onNavigationError = { [weak state] message in state?.showToast(message, isError: true) }
         bridge.revealEvidence = { [weak controller] citation in controller?.revealEvidence(citation) }
         bridge.goToNextUnit = { [weak controller] in controller?.goToNextChapter() }
         bridge.goToPreviousUnit = { [weak controller] in controller?.goToPreviousChapter() }
 
         wireAnnotations(controller: controller)
 
-        bridge.revealSearchHit = { [weak controller] index in
-            // EPUB 的搜索命中定位就是跳到那一章：章内高亮要等 DOM 就绪，
-            // 而 `go(to:)` 是异步导航，这里没有可靠的「加载完成」回执，
-            // 硬塞一个延迟去画高亮只会时灵时不灵。跳到位、由读者自己找那一段。
-            guard index >= 0, index < bridge.searchResults.count else { return }
-            controller?.go(to: bridge.searchResults[index].locator)
+        bridge.revealSearchHit = { [weak controller, weak bridge] index in
+            guard let bridge, bridge.searchResults.indices.contains(index) else { return }
+            let hit = bridge.searchResults[index]
+            let quote = hit.snippet.trimmingCharacters(in: CharacterSet(charactersIn: "…"))
+            controller?.revealText(quote, at: hit.locator)
         }
 
         bridge.currentContextProvider = { [weak controller] in
@@ -554,20 +557,8 @@ struct EPUBReaderView: View {
         }
 
         bridge.outlineSourceProvider = {
-            var candidates: [SmartOutlineCandidate] = []
-            func append(_ nodes: [OutlineNode], depth: Int) {
-                for node in nodes {
-                    guard case .epub(let chapter, let anchor, _) = node.locator else { continue }
-                    candidates.append(.init(id: "epub-\(candidates.count)", title: node.title,
-                        unitIndex: chapter, depth: depth, anchor: anchor))
-                    append(node.children, depth: depth + 1)
-                }
-            }
-            append(source.outline, depth: 0)
-            if candidates.isEmpty {
-                candidates = source.chapters.map { .init(id: "epub-\($0.index)", title: $0.displayTitle, unitIndex: $0.index, depth: 0) }
-            }
-            return SmartOutlineSource(candidates: candidates, unitCount: source.chapters.count)
+            let extraction = Task.detached(priority: .utility) { try source.smartOutlineSource() }
+            return try await withTaskCancellationHandler { try await extraction.value } onCancel: { extraction.cancel() }
         }
 
         bridge.sectionTextProvider = { start, end in

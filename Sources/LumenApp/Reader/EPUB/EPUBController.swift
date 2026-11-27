@@ -24,9 +24,14 @@ final class EPUBController: NSObject, ObservableObject {
     private var currentChapterIndex = 0
     private var isLoadingChapter = false
     /// 待跳转的锚点。导航是异步的，所以要在发起加载时记下来，等 didFinish 再执行。
-    private var pendingAnchor: String = ""
-    private var pendingEvidence: (chapter: Int, quote: String)?
+    private var pendingAnchor = ""
+    private var pendingOutlinePosition: OutlinePosition?
+    private var chapterNavigation: WKNavigation?
+    private var loadedChapterIndex: Int?
+    private var jumpID = UUID()
+    private var pendingTextJump: (chapter: Int, quote: String)?
 
+    var onNavigationError: ((String) -> Void)?
     var onLoadError: ((String) -> Void)?
     var onSelection: ((ReaderSelection?) -> Void)?
     /// 选区的来源是否为「拖动划选」（false = 单击）。
@@ -100,7 +105,7 @@ final class EPUBController: NSObject, ObservableObject {
             }
             self.webView.configuration.userContentController.add(rules)
             self.resourcePolicyReady = true
-            if self.isLoadingChapter { self.loadCurrentChapter(anchor: self.pendingAnchor) }
+            if self.isLoadingChapter { self.loadCurrentChapter(index: self.currentChapterIndex, anchor: self.pendingAnchor, position: self.pendingOutlinePosition) }
         }
     }
 
@@ -161,16 +166,21 @@ final class EPUBController: NSObject, ObservableObject {
             },
             text: function () { return document.body ? document.body.innerText : ''; },
             scrollToAnchor: function (anchor) {
-              if (!anchor) { window.scrollTo(0, 0); return true; }
-              var el = document.getElementById(anchor) || document.querySelector('[name="' + anchor + '"]');
-              if (el) {
-                el.scrollIntoView({ block: 'start' });
-                if (window.__lumenLayout) window.__lumenLayout.rememberNavigation();
-                return true;
-              }
-              return false;
+              if (!anchor) { window.__lumenLayout.navigate(null); return true; }
+              var el = document.getElementById(anchor)
+                || Array.from(document.querySelectorAll('[name]')).find(e => e.getAttribute('name') === anchor);
+              if (!el) { return false; }
+              window.__lumenLayout.navigate(el);
+              return true;
             },
-            scrollTop: function () { window.scrollTo(0, 0); },
+            scrollToHeading: function (index, title) {
+              var el = document.querySelectorAll('body h1,body h2,body h3,body h4,body h5,body h6')[index];
+              var text = el && el.textContent.replace(/\\s+/g, ' ').trim();
+              if (!el || text !== title) { return false; }
+              window.__lumenLayout.navigate(el);
+              return true;
+            },
+            scrollTop: function () { window.__lumenLayout.navigate(null); },
             // ── 批注高亮 ──
             //
             // 用「引文匹配」而不是字符偏移：EPUB 重新排版（换字号、换字体会重排）
@@ -225,8 +235,13 @@ final class EPUBController: NSObject, ObservableObject {
                     ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT;
                 }
               });
-              var text = '', positions = [], node;
+              var text = '', positions = [], node, previousBlock;
               while ((node = walker.nextNode())) {
+                var block = node.parentElement.closest('p,div,li,td,th,section,article,blockquote,h1,h2,h3,h4,h5,h6,figcaption');
+                if (text && !text.endsWith(' ') && block !== previousBlock) {
+                  text += ' '; positions.push({ node: node, offset: 0 });
+                }
+                previousBlock = block;
                 var raw = node.nodeValue || '';
                 for (var i = 0; i < raw.length; i++) {
                   var c = /\\s/.test(raw[i]) ? ' ' : raw[i];
@@ -241,7 +256,7 @@ final class EPUBController: NSObject, ObservableObject {
               range.setStart(a.node, a.offset); range.setEnd(b.node, b.offset + 1);
               var selection = window.getSelection();
               selection.removeAllRanges(); selection.addRange(range);
-              a.node.parentElement.scrollIntoView({ block: 'center' });
+              window.__lumenLayout.navigate(a.node.parentElement, range);
               return true;
             },
             // ── 逐段翻译 ──
@@ -521,6 +536,8 @@ extension EPUBController {
 
     func load(source: EPUBDocumentSource, startAt chapterIndex: Int, anchor: String) {
         self.source = source
+        loadedChapterIndex = nil
+        chapterNavigation = nil
         currentChapterIndex = min(max(chapterIndex, 0), source.chapters.count - 1)
         loadCurrentChapter(anchor: anchor)
     }
@@ -529,48 +546,80 @@ extension EPUBController {
 
     var chapterTitles: [String] { source?.chapters.map(\.displayTitle) ?? [] }
 
-    func go(to locator: DocumentLocator) {
-        pendingEvidence = nil
-        guard let source else { return }
-        let target = min(max(locator.chapterIndex, 0), source.chapters.count - 1)
-        var anchor = ""
-        if case .epub(_, let value, _) = locator { anchor = value }
-        loadCurrentChapter(index: target, anchor: anchor)
+    func go(to locator: DocumentLocator, outlinePosition: OutlinePosition? = nil) {
+        guard case .epub(let index, let anchor, _) = locator,
+              let source, source.chapters.indices.contains(index) else { return }
+        pendingTextJump = nil
+        jumpID = UUID()
+        if loadedChapterIndex == index && !isLoadingChapter {
+            jumpInChapter(anchor: anchor, position: outlinePosition)
+        } else if index == currentChapterIndex && isLoadingChapter {
+            pendingAnchor = anchor
+            pendingOutlinePosition = outlinePosition
+        } else {
+            loadCurrentChapter(index: index, anchor: anchor, position: outlinePosition)
+        }
+    }
+
+    private func jumpInChapter(anchor: String, position: OutlinePosition?) {
+        let call: String
+        if case .epubHeading(let index, let title) = position {
+            call = "scrollToHeading(\(index), \(Self.jsString(title)))"
+        } else {
+            call = "scrollToAnchor(\(Self.jsString(anchor)))"
+        }
+        let request = jumpID
+        webView.evaluateJavaScript("window.__lumen && window.__lumen.\(call);") { [weak self] result, _ in
+            guard let self, self.jumpID == request, (result as? Bool) != true else { return }
+            self.onNavigationError?("找不到目录指定的位置，当前章节仍可阅读。")
+        }
     }
 
     func revealEvidence(_ citation: DocumentCitation) {
         guard let quote = citation.quote else { go(to: citation.locator); return }
-        let chapter = citation.locator.chapterIndex
-        if chapter == currentChapterIndex && !isLoadingChapter { revealQuote(quote) }
-        else {
-            go(to: citation.locator)
-            pendingEvidence = (chapter, quote)
+        revealText(quote, at: citation.locator)
+    }
+
+    func revealText(_ quote: String, at locator: DocumentLocator) {
+        guard let source, source.chapters.indices.contains(locator.chapterIndex) else { return }
+        let chapter = locator.chapterIndex
+        if chapter == loadedChapterIndex && !isLoadingChapter {
+            jumpID = UUID()
+            revealQuote(quote)
+        } else {
+            go(to: locator)
+            pendingTextJump = (chapter, quote)
         }
     }
 
     private func revealQuote(_ quote: String) {
-        webView.evaluateJavaScript("window.__lumen && window.__lumen.revealQuote(\(Self.jsString(quote)));")
+        let request = jumpID
+        webView.evaluateJavaScript("window.__lumen && window.__lumen.revealQuote(\(Self.jsString(quote)));") { [weak self] value, _ in
+            guard let self, self.jumpID == request, (value as? Bool) != true else { return }
+            self.onNavigationError?("已打开对应章节，未在当前版面找到原文。")
+        }
     }
 
     func goToNextChapter() {
         guard let source, currentChapterIndex + 1 < source.chapters.count else { return }
-        loadCurrentChapter(index: currentChapterIndex + 1, anchor: "")
+        go(to: .epub(chapterIndex: currentChapterIndex + 1, anchor: "", charOffset: 0))
     }
 
     func goToPreviousChapter() {
         guard currentChapterIndex > 0 else { return }
-        loadCurrentChapter(index: currentChapterIndex - 1, anchor: "")
+        go(to: .epub(chapterIndex: currentChapterIndex - 1, anchor: "", charOffset: 0))
     }
 
     private func loadCurrentChapter(anchor: String = "") {
         loadCurrentChapter(index: currentChapterIndex, anchor: anchor)
     }
 
-    private func loadCurrentChapter(index: Int, anchor: String) {
+    private func loadCurrentChapter(index: Int, anchor: String, position: OutlinePosition? = nil) {
         guard let source, index >= 0, index < source.chapters.count else { return }
         currentChapterIndex = index
         isLoadingChapter = true
         pendingAnchor = anchor
+        pendingOutlinePosition = position
         if let error = resourcePolicyError {
             isLoadingChapter = false
             onLoadError?(error)
@@ -585,9 +634,7 @@ extension EPUBController {
         }
         // /private/tmp 与 /tmp 指向同一目录，但 WebKit 的文件读取授权按 URL
         // 路径生效。章节 URL 已由 resourceURL 解析符号链接；根目录必须同样解析。
-        webView.loadFileURL(chapter.fileURL, allowingReadAccessTo: source.rootURL.resolvingSymlinksInPath())
-
-        pendingAnchor = anchor
+        chapterNavigation = webView.loadFileURL(chapter.fileURL, allowingReadAccessTo: source.rootURL.resolvingSymlinksInPath())
     }
 
     func applyTheme(_ theme: ReadingTheme, reader: ReaderSettings) {
@@ -770,21 +817,20 @@ extension EPUBController {
 extension EPUBController: WKNavigationDelegate {
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        guard let navigation, chapterNavigation === navigation else { return }
+        chapterNavigation = nil
+        loadedChapterIndex = currentChapterIndex
         if LaunchOptions.flag("--epub-layout-report") { NSLog("[Lumen][epub-load] didFinish") }
         isLoadingChapter = false
         applyTheme(theme, reader: reader)
         applyTranslationTextSize(translationTextSize)
-        if !pendingAnchor.isEmpty {
-            let anchor = pendingAnchor
-            pendingAnchor = ""
-            webView.evaluateJavaScript("window.__lumen && window.__lumen.scrollToAnchor(\(Self.jsString(anchor)));")
-        } else {
-            webView.evaluateJavaScript("window.__lumen && window.__lumen.scrollTop();")
-        }
+        jumpInChapter(anchor: pendingAnchor, position: pendingOutlinePosition)
+        pendingAnchor = ""
+        pendingOutlinePosition = nil
         // 章节是新 DOM，批注高亮必须重画一遍（上一次包裹的 <mark> 已随旧文档消失）
         applyHighlights()
-        if let pending = pendingEvidence {
-            pendingEvidence = nil
+        if let pending = pendingTextJump {
+            pendingTextJump = nil
             if pending.chapter == currentChapterIndex { revealQuote(pending.quote) }
         }
         if LaunchOptions.flag("--epub-layout-report") {
@@ -800,15 +846,17 @@ extension EPUBController: WKNavigationDelegate {
     }
 
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
-        reportLoadFailure(error)
+        reportLoadFailure(error, navigation: navigation)
     }
 
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
-        reportLoadFailure(error)
+        reportLoadFailure(error, navigation: navigation)
     }
 
-    private func reportLoadFailure(_ error: Error) {
-        guard (error as NSError).code != NSURLErrorCancelled else { return }
+    private func reportLoadFailure(_ error: Error, navigation: WKNavigation?) {
+        guard let navigation, chapterNavigation === navigation else { return }
+        chapterNavigation = nil
+        loadedChapterIndex = nil
         if LaunchOptions.flag("--epub-layout-report") {
             NSLog("[Lumen][epub-load] navigation failed: %@", error.localizedDescription)
         }
@@ -817,6 +865,8 @@ extension EPUBController: WKNavigationDelegate {
     }
 
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+        chapterNavigation = nil
+        loadedChapterIndex = nil
         isLoadingChapter = false
         onLoadError?("阅读进程已停止，请重新打开当前章节。")
     }
@@ -848,12 +898,8 @@ extension EPUBController: WKNavigationDelegate {
                 // Cross-chapter links must update chapter state before scrolling to their anchor.
                 let path = url.standardizedFileURL.resolvingSymlinksInPath().path
                 if let chapter = source.chapters.first(where: { $0.fileURL.path == path }) {
-                    let anchor = url.fragment?.removingPercentEncoding ?? url.fragment ?? ""
-                    if chapter.index != currentChapterIndex {
-                        loadCurrentChapter(index: chapter.index, anchor: anchor)
-                    } else if !anchor.isEmpty {
-                        webView.evaluateJavaScript("window.__lumen && window.__lumen.scrollToAnchor(\(Self.jsString(anchor)));")
-                    }
+                    let anchor = URLComponents(url: url, resolvingAgainstBaseURL: false)?.fragment ?? ""
+                    go(to: .epub(chapterIndex: chapter.index, anchor: anchor, charOffset: 0))
                 }
                 decisionHandler(.cancel)
                 return
@@ -885,8 +931,11 @@ extension EPUBController: WKNavigationDelegate {
 extension EPUBController: WKScriptMessageHandler {
 
     func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
-        guard let body = message.body as? [String: Any],
-              let type = body["type"] as? String else { return }
+        guard message.frameInfo.isMainFrame,
+              let source, source.chapters.indices.contains(currentChapterIndex),
+              message.frameInfo.request.url?.path == source.chapters[currentChapterIndex].fileURL.path,
+              let body = message.body as? [String: Any], let type = body["type"] as? String,
+              !isLoadingChapter || type == "columns" else { return }
 
         switch type {
         case "selection":

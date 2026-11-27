@@ -146,6 +146,15 @@ final class ReaderBridge: ObservableObject {
     var documentContextProgressProvider: ((@escaping @Sendable (DocumentExtractionProgress) -> Void) async throws -> DocumentContext)?
     /// 跳转到指定位置
     var goTo: ((DocumentLocator) -> Void)?
+    var goToOutlinePosition: ((DocumentLocator, OutlinePosition) -> Void)?
+
+    func navigate(to locator: DocumentLocator, outlinePosition: OutlinePosition? = nil) {
+        if let outlinePosition, let goToOutlinePosition {
+            goToOutlinePosition(locator, outlinePosition)
+        } else {
+            goTo?(locator)
+        }
+    }
     /// 上一 / 下一单元（页或章）
     var goToNextUnit: (() -> Void)?
     var goToPreviousUnit: (() -> Void)?
@@ -248,6 +257,7 @@ final class ReaderBridge: ObservableObject {
         documentContextProgressProvider = nil
         slicesProvider = nil
         goTo = nil
+        goToOutlinePosition = nil
         goToNextUnit = nil
         goToPreviousUnit = nil
         performSearch = nil

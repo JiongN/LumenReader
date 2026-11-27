@@ -18,6 +18,7 @@ public struct SmartOutlineEntry: Codable, Sendable, Equatable, Identifiable {
     /// 所以「没有摘要」是一个正常且常见的状态，不是一个待修复的空值。
     public var summary: String?
     public var anchor: String?
+    public var position: OutlinePosition?
 
     public init(
         id: String = UUID().uuidString,
@@ -25,7 +26,8 @@ public struct SmartOutlineEntry: Codable, Sendable, Equatable, Identifiable {
         unitIndex: Int,
         depth: Int = 0,
         summary: String? = nil,
-        anchor: String? = nil
+        anchor: String? = nil,
+        position: OutlinePosition? = nil
     ) {
         self.id = id
         self.title = title
@@ -33,6 +35,7 @@ public struct SmartOutlineEntry: Codable, Sendable, Equatable, Identifiable {
         self.depth = depth
         self.summary = summary
         self.anchor = anchor
+        self.position = position
     }
 }
 

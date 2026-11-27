@@ -531,6 +531,9 @@ struct PDFReaderView: View {
         }
 
         bridge.goTo = { [weak controller] locator in controller?.go(to: locator) }
+        bridge.goToOutlinePosition = { [weak controller] locator, position in
+            controller?.go(to: locator.pageIndex, position: position)
+        }
         bridge.goToNextUnit = { [weak controller] in controller?.goToNextPage() }
         bridge.goToPreviousUnit = { [weak controller] in controller?.goToPreviousPage() }
         bridge.zoomIn = { [weak controller] in controller?.stepZoom(by: 1.2) }

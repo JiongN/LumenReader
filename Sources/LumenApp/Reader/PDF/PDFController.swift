@@ -58,7 +58,7 @@ final class PDFController: NSObject, ObservableObject {
     private var panelRestoreGeneration = UUID()
     /// A page request made while a panel is restoring must run after its old
     /// viewport anchor has been reapplied, or the restore scrolls back over it.
-    private var pendingPageJump: Int?
+    private var pendingPageJump: (page: Int, position: OutlinePosition?)?
 
     func connectViewport(_ state: PDFViewportState) {
         viewportState = state
@@ -303,7 +303,7 @@ final class PDFController: NSObject, ObservableObject {
         guard panelAdjustments.isEmpty, resizeAnchor == nil,
               let target = pendingPageJump else { return }
         pendingPageJump = nil
-        go(to: target)
+        go(to: target.page, position: target.position)
     }
 
     /// OCR 结果缓存。按页存，识别过一次就不再重复花钱——
@@ -722,33 +722,28 @@ final class PDFController: NSObject, ObservableObject {
         }
     }
 
-    nonisolated private static func buildOutline(from parent: PDFOutline, document: PDFDocument, depth: Int) -> [OutlineNode] {
-        guard depth < 8 else { return [] }
+    nonisolated static func buildOutline(from parent: PDFOutline, document: PDFDocument, depth: Int, nesting: Int = 0) -> [OutlineNode] {
+        guard nesting < 8 else { return [] }
         var nodes: [OutlineNode] = []
         for index in 0..<min(parent.numberOfChildren, 5000) {
             guard !Task.isCancelled else { break }
             guard let child = parent.child(at: index) else { continue }
-            let pageIndex = Self.pageIndex(of: child, in: document) ?? 0
-            let grandChildren = buildOutline(from: child, document: document, depth: depth + 1)
+            let destination = child.destination ?? (child.action as? PDFActionGoTo)?.destination
+            guard let destination, let page = destination.page,
+                  (0..<document.pageCount).contains(document.index(for: page)) else {
+                nodes.append(contentsOf: buildOutline(from: child, document: document, depth: depth, nesting: nesting + 1))
+                continue
+            }
+            let pageIndex = document.index(for: page)
             nodes.append(OutlineNode(
                 title: (child.label ?? "未命名").trimmingCharacters(in: .whitespacesAndNewlines),
                 locator: .pdf(page: pageIndex, charOffset: 0),
-                children: grandChildren,
-                depth: depth
+                children: buildOutline(from: child, document: document, depth: depth + 1, nesting: nesting + 1),
+                depth: depth,
+                position: .pdfDestination(destination.point)
             ))
         }
         return nodes
-    }
-
-    nonisolated private static func pageIndex(of outline: PDFOutline, in document: PDFDocument) -> Int? {
-        if let destination = outline.destination, let page = destination.page {
-            return document.index(for: page)
-        }
-        // 有些 PDF 的目录项用 GoTo action 而不是 destination
-        if let goTo = outline.action as? PDFActionGoTo, let page = goTo.destination.page {
-            return document.index(for: page)
-        }
-        return nil
     }
 
     // MARK: - 命令
@@ -758,16 +753,43 @@ final class PDFController: NSObject, ObservableObject {
         return doc.index(for: page)
     }
 
-    func go(to pageIndex: Int) {
+    func go(to pageIndex: Int, position: OutlinePosition? = nil) {
         guard let doc = document, pageIndex >= 0, pageIndex < doc.pageCount,
               let page = doc.page(at: pageIndex) else { return }
         clearInteraction()
         if !panelAdjustments.isEmpty || resizeAnchor != nil {
-            pendingPageJump = pageIndex
+            pendingPageJump = (pageIndex, position)
             return
         }
         suppressCallbacks = true
-        view.go(to: page)
+        let pageBounds = page.bounds(for: view.displayBox)
+        switch position {
+        case .pdfDestination(let point):
+            let hasX = point.x.isFinite && abs(point.x) < CGFloat(Float.greatestFiniteMagnitude)
+            let hasY = point.y.isFinite && abs(point.y) < CGFloat(Float.greatestFiniteMagnitude)
+            if hasX || hasY {
+                let target = CGPoint(x: hasX ? min(max(point.x, pageBounds.minX), pageBounds.maxX) : pageBounds.minX,
+                                     y: hasY ? min(max(point.y, pageBounds.minY), pageBounds.maxY) : pageBounds.maxY)
+                let destination = PDFDestination(page: page, at: target)
+                destination.zoom = view.scaleFactor
+                view.go(to: destination)
+            } else {
+                view.go(to: page)
+            }
+        case .pdfHeading(let heading) where !heading.isEmpty && !heading.isInfinite
+            && heading.minX.isFinite && heading.minY.isFinite && heading.maxX.isFinite && heading.maxY.isFinite:
+            let bounds = heading.insetBy(dx: -12, dy: -12).intersection(pageBounds)
+            if bounds.isEmpty {
+                view.go(to: page)
+            } else {
+                if readingFlowMode == .paged, !view.visiblePages.contains(where: { $0 === page }) {
+                    view.go(to: page)
+                }
+                view.go(to: bounds, on: page)
+            }
+        default:
+            view.go(to: page)
+        }
         suppressCallbacks = false
         publishPosition()
         // PDFKit may omit a clip-bounds notification for a programmatic jump.

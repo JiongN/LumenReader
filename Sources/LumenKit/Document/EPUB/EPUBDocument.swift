@@ -206,30 +206,25 @@ public final class EPUBDocumentSource: DocumentSource, @unchecked Sendable {
         let navHref = manifest.first { $0.value.properties.contains("nav") }?.value.href
         let ncxHref = manifest.first { $0.value.mediaType.contains("dtbncx") }?.value.href
 
-        var titleMap: [String: String] = [:]
-        var rawOutline: [(title: String, href: String, depth: Int)] = []
-
+        let paths = Set(chapters.map { $0.fileURL.path })
+        var rawOutline: [NavigationEntry] = []
         if let navHref {
             let navURL = try Self.resourceURL(navHref, relativeTo: opfDirectory, root: rootURL)
-            (rawOutline, titleMap) = Self.parseNav(navURL, relativeTo: opfDirectory)
+            rawOutline = Self.parseNav(navURL, root: rootURL)
         }
-        if rawOutline.isEmpty, let ncxHref {
+        if !rawOutline.contains(where: { paths.contains($0.path) }), let ncxHref {
             let ncxURL = try Self.resourceURL(ncxHref, relativeTo: opfDirectory, root: rootURL)
-            (rawOutline, titleMap) = Self.parseNCX(ncxURL, relativeTo: opfDirectory)
+            rawOutline = Self.parseNCX(ncxURL, root: rootURL)
         }
 
-        // 把拿到的标题补回章节
+        var titleMap: [String: String] = [:]
+        for entry in rawOutline where !entry.title.isEmpty {
+            if titleMap[entry.path] == nil || entry.fragment.isEmpty { titleMap[entry.path] = entry.title }
+        }
         chapters = chapters.map { chapter in
-            let key = Self.normalizePath(chapter.href)
-            let title = titleMap[key] ?? Self.firstHeading(in: chapter.fileURL) ?? ""
-            return EPUBChapter(
-                id: chapter.id,
-                index: chapter.index,
-                href: chapter.href,
-                fileURL: chapter.fileURL,
-                mediaType: chapter.mediaType,
-                title: title
-            )
+            let title = titleMap[chapter.fileURL.path] ?? Self.firstHeading(in: chapter.fileURL) ?? ""
+            return EPUBChapter(id: chapter.id, index: chapter.index, href: chapter.href, fileURL: chapter.fileURL,
+                               mediaType: chapter.mediaType, title: title)
         }
 
         self.chapters = chapters
@@ -242,25 +237,28 @@ public final class EPUBDocumentSource: DocumentSource, @unchecked Sendable {
         )
 
         // 目录项 → 通用 DocumentLocator
-        self.outline = Self.buildOutline(
-            raw: rawOutline,
-            chapters: chapters,
-            opfDirectory: opfDirectory
-        )
+        self.outline = Self.buildOutline(raw: rawOutline, chapters: chapters)
     }
 
     // MARK: - 目录解析
 
-    static func navigationHref(_ href: String, from document: URL, relativeTo base: URL) -> String {
-        guard let resolved = URL(string: href, relativeTo: document)?.absoluteURL else { return href }
-        let prefix = base.standardizedFileURL.path + "/"
-        let path = resolved.standardizedFileURL.path
-        guard path.hasPrefix(prefix) else { return href }
-        return String(path.dropFirst(prefix.count)) + (resolved.fragment.map { "#" + $0 } ?? "")
+    private struct NavigationEntry {
+        let title: String
+        let path: String
+        let fragment: String
+        let depth: Int
     }
 
-    private static func parseNav(_ url: URL, relativeTo base: URL) -> ([(String, String, Int)], [String: String]) {
-        guard let document = try? XMLDocument(contentsOf: url, options: [.nodeLoadExternalEntitiesNever]) else { return ([], [:]) }
+    static func navigationTarget(_ href: String, from document: URL, root: URL) -> (path: String, fragment: String)? {
+        guard let target = URL(string: href, relativeTo: document)?.absoluteURL, target.isFileURL,
+              target.host == nil || target.host == "" || target.host == "localhost" else { return nil }
+        let path = target.standardizedFileURL.resolvingSymlinksInPath().path
+        guard path.hasPrefix(root.standardizedFileURL.resolvingSymlinksInPath().path + "/") else { return nil }
+        return (path, URLComponents(url: target, resolvingAgainstBaseURL: false)?.fragment ?? "")
+    }
+
+    private static func parseNav(_ url: URL, root: URL) -> [NavigationEntry] {
+        guard let document = try? XMLDocument(contentsOf: url, options: [.nodeLoadExternalEntitiesNever]) else { return [] }
 
         // 优先取 epub:type="toc" 的 nav，没有就取第一个 nav
         let navs = (try? document.nodes(forXPath: "//*[local-name()='nav']")) ?? []
@@ -268,22 +266,19 @@ public final class EPUBDocumentSource: DocumentSource, @unchecked Sendable {
             (element.attributes ?? []).contains { $0.localName == "type" && ($0.stringValue ?? "").contains("toc") }
         } ?? navs.compactMap { $0 as? XMLElement }.first
 
-        guard let toc else { return ([], [:]) }
+        guard let toc else { return [] }
 
-        var entries: [(String, String, Int)] = []
-        var titleMap: [String: String] = [:]
+        var entries: [NavigationEntry] = []
 
         func walk(_ list: XMLElement, depth: Int) {
             guard depth < 8 else { return }
             let children = (try? list.nodes(forXPath: "*[local-name()='li']")) ?? []
             for case let li as XMLElement in children {
                 if let anchor = (try? li.nodes(forXPath: "*[local-name()='a']").first) as? XMLElement,
-                   let href = anchor.attr("href") {
+                   let href = anchor.attr("href"),
+                   let target = navigationTarget(href, from: url, root: root) {
                     let title = (anchor.stringValue ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-                    let resolved = navigationHref(href, from: url, relativeTo: base)
-                    entries.append((title, resolved, depth))
-                    let path = normalizePath(resolved.components(separatedBy: "#").first ?? resolved)
-                    if !title.isEmpty { titleMap[path] = title }
+                    entries.append(.init(title: title, path: target.path, fragment: target.fragment, depth: depth))
                 }
                 if let nested = (try? li.nodes(forXPath: "*[local-name()='ol']").first) as? XMLElement {
                     walk(nested, depth: depth + 1)
@@ -295,14 +290,13 @@ public final class EPUBDocumentSource: DocumentSource, @unchecked Sendable {
             walk(list, depth: 0)
         }
 
-        return (entries, titleMap)
+        return entries
     }
 
-    private static func parseNCX(_ url: URL, relativeTo base: URL) -> ([(String, String, Int)], [String: String]) {
-        guard let document = try? XMLDocument(contentsOf: url, options: [.nodeLoadExternalEntitiesNever]) else { return ([], [:]) }
+    private static func parseNCX(_ url: URL, root: URL) -> [NavigationEntry] {
+        guard let document = try? XMLDocument(contentsOf: url, options: [.nodeLoadExternalEntitiesNever]) else { return [] }
 
-        var entries: [(String, String, Int)] = []
-        var titleMap: [String: String] = [:]
+        var entries: [NavigationEntry] = []
 
         func walk(_ element: XMLElement, depth: Int) {
             guard depth < 8 else { return }
@@ -311,11 +305,9 @@ public final class EPUBDocumentSource: DocumentSource, @unchecked Sendable {
                 let title = ((try? point.nodes(forXPath: "*[local-name()='navLabel']/*[local-name()='text']").first) as? XMLElement)?
                     .stringValue?
                     .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-                if let src = ((try? point.nodes(forXPath: "*[local-name()='content']").first) as? XMLElement)?.attr("src") {
-                    let resolved = navigationHref(src, from: url, relativeTo: base)
-                    entries.append((title, resolved, depth))
-                    let path = normalizePath(resolved.components(separatedBy: "#").first ?? resolved)
-                    if !title.isEmpty { titleMap[path] = title }
+                if let src = ((try? point.nodes(forXPath: "*[local-name()='content']").first) as? XMLElement)?.attr("src"),
+                   let target = navigationTarget(src, from: url, root: root) {
+                    entries.append(.init(title: title, path: target.path, fragment: target.fragment, depth: depth))
                 }
                 walk(point, depth: depth + 1)
             }
@@ -324,36 +316,20 @@ public final class EPUBDocumentSource: DocumentSource, @unchecked Sendable {
         if let root = ((try? document.nodes(forXPath: "//*[local-name()='navMap']").first) as? XMLElement) {
             walk(root, depth: 0)
         }
-        return (entries, titleMap)
+        return entries
     }
 
-    private static func buildOutline(
-        raw: [(title: String, href: String, depth: Int)],
-        chapters: [EPUBChapter],
-        opfDirectory: URL
-    ) -> [OutlineNode] {
-        guard !raw.isEmpty else {
-            // 没有 nav 也没有 NCX：退化成按章节顺序的平铺目录
-            return chapters.map {
-                OutlineNode(title: $0.displayTitle, locator: .epub(chapterIndex: $0.index, anchor: "", charOffset: 0))
-            }
-        }
-
-        // href → chapterIndex
+    private static func buildOutline(raw: [NavigationEntry], chapters: [EPUBChapter]) -> [OutlineNode] {
         var indexByPath: [String: Int] = [:]
-        for chapter in chapters {
-            indexByPath[normalizePath(chapter.href)] = chapter.index
+        for chapter in chapters where indexByPath[chapter.fileURL.path] == nil {
+            indexByPath[chapter.fileURL.path] = chapter.index
         }
-
         var cursor = 0
-        // 从最浅的一层开始递归，这样即使目录整体从 depth=1 起算也能正确成树
-        let baseDepth = raw.map(\.depth).min() ?? 0
-        return buildTree(
-            raw: raw,
-            cursor: &cursor,
-            depth: baseDepth,
-            indexByPath: indexByPath
-        )
+        let nodes = buildTree(raw: raw, cursor: &cursor, depth: raw.map(\.depth).min() ?? 0,
+                              indexByPath: indexByPath)
+        return nodes.isEmpty ? chapters.map {
+            OutlineNode(title: $0.displayTitle, locator: .epub(chapterIndex: $0.index, anchor: "", charOffset: 0))
+        } : nodes
     }
 
     /// 用递归下降把「前序遍历 + 深度」的扁平列表还原成树。
@@ -361,7 +337,7 @@ public final class EPUBDocumentSource: DocumentSource, @unchecked Sendable {
     /// nav / NCX 天然是前序展开的，深度只保证「子一定比父深」，不保证连续，
     /// 所以判断父子关系的依据是「下一个深度是否大于当前节点深度」，而不是等于 +1。
     private static func buildTree(
-        raw: [(title: String, href: String, depth: Int)],
+        raw: [NavigationEntry],
         cursor: inout Int,
         depth: Int,
         indexByPath: [String: Int]
@@ -374,12 +350,9 @@ public final class EPUBDocumentSource: DocumentSource, @unchecked Sendable {
 
             cursor += 1
 
-            let pieces = entry.href.components(separatedBy: "#")
-            let pathPart = pieces.first ?? entry.href
-            let anchor = pieces.count > 1 ? pieces[1] : ""
             let children = buildTree(raw: raw, cursor: &cursor,
                                      depth: entry.depth + 1, indexByPath: indexByPath)
-            guard let chapterIndex = indexByPath[normalizePath(pathPart)] else {
+            guard let chapterIndex = indexByPath[entry.path] else {
                 nodes.append(contentsOf: children)
                 continue
             }
@@ -387,7 +360,7 @@ public final class EPUBDocumentSource: DocumentSource, @unchecked Sendable {
             nodes.append(OutlineNode(
                 title: title,
                 locator: .epub(chapterIndex: chapterIndex,
-                               anchor: anchor.removingPercentEncoding ?? anchor, charOffset: 0),
+                               anchor: entry.fragment, charOffset: 0),
                 children: children, depth: depth
             ))
         }
@@ -507,11 +480,37 @@ public final class EPUBDocumentSource: DocumentSource, @unchecked Sendable {
         return text.isEmpty || text.count > 120 ? nil : text
     }
 
-    static func normalizePath(_ path: String) -> String {
-        var value = path
-        if let decoded = value.removingPercentEncoding { value = decoded }
-        while value.hasPrefix("./") { value.removeFirst(2) }
-        return value
+    package func smartOutlineSource() throws -> SmartOutlineSource {
+        var candidates: [SmartOutlineCandidate] = []
+        var tocAnchors: [Int: [String: Set<String>]] = [:]
+        for node in outline.flatMap(\.flattened) {
+            guard case .epub(let chapter, let anchor, _) = node.locator else { continue }
+            candidates.append(.init(id: "toc-\(candidates.count)", title: node.title,
+                                    unitIndex: chapter, depth: node.depth, anchor: anchor))
+            tocAnchors[chapter, default: [:]][SmartOutlineHeadings.normalized(node.title), default: []].insert(anchor)
+        }
+        let headingNames = (1...6).map { "local-name()='h\($0)'" }.joined(separator: " or ")
+        for chapter in chapters {
+            try Task.checkCancellation()
+            autoreleasepool {
+                guard let document = try? XMLDocument(contentsOf: chapter.fileURL, options: [.nodeLoadExternalEntitiesNever]),
+                      let headings = try? document.nodes(forXPath: "//*[local-name()='body']//*[\(headingNames)]") else { return }
+                for (index, node) in headings.enumerated() {
+                    guard let heading = node as? XMLElement,
+                          let title = heading.stringValue?.split(whereSeparator: \.isWhitespace).joined(separator: " "),
+                          !title.isEmpty, title.count <= 150,
+                          let tag = heading.localName, let level = tag.last?.wholeNumberValue else { continue }
+                    let anchors = tocAnchors[chapter.index]?[SmartOutlineHeadings.normalized(title)] ?? []
+                    if let id = heading.attr("id"), anchors.contains(id) { continue }
+                    if index == 0, anchors.contains("") { continue }
+                    candidates.append(.init(id: "heading-\(chapter.index)-\(index)", title: title,
+                                            unitIndex: chapter.index, depth: max(0, level - 1),
+                                            position: .epubHeading(index: index, title: title)))
+                }
+            }
+        }
+        candidates.sort { $0.unitIndex < $1.unitIndex }
+        return .init(candidates: candidates, unitCount: chapters.count)
     }
 
     // MARK: - DocumentSource

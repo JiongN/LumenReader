@@ -28,7 +28,7 @@ public enum DocumentLocator: Codable, Sendable, Equatable, Hashable {
         case .pdf(let page, _):
             return "第 \(page + 1) 页"
         case .epub(let chapterIndex, _, _):
-            if chapterIndex < chapterTitles.count, !chapterTitles[chapterIndex].isEmpty {
+            if chapterTitles.indices.contains(chapterIndex), !chapterTitles[chapterIndex].isEmpty {
                 return chapterTitles[chapterIndex]
             }
             return "第 \(chapterIndex + 1) 章"
@@ -53,8 +53,8 @@ public enum DocumentLocator: Codable, Sendable, Equatable, Hashable {
             guard let page = Int(parts[1]), let offset = Int(parts[2]) else { return nil }
             return .pdf(page: page, charOffset: offset)
         case "epub":
-            guard parts.count >= 4, let chapter = Int(parts[1]), let offset = Int(parts[3]) else { return nil }
-            return .epub(chapterIndex: chapter, anchor: parts[2], charOffset: offset)
+            guard parts.count >= 4, let chapter = Int(parts[1]), let last = parts.last, let offset = Int(last) else { return nil }
+            return .epub(chapterIndex: chapter, anchor: parts[2..<(parts.count - 1)].joined(separator: ":"), charOffset: offset)
         default:
             return nil
         }
@@ -118,17 +118,26 @@ public struct SearchHit: Identifiable, Sendable, Equatable {
 
 // MARK: - 目录
 
+/// A document-local outline target, resolved from the source rather than the model.
+public enum OutlinePosition: Codable, Sendable, Equatable {
+    case pdfDestination(CGPoint)
+    case pdfHeading(CGRect)
+    case epubHeading(index: Int, title: String)
+}
+
 public struct OutlineNode: Identifiable, Sendable, Equatable {
     public let id: UUID
     public var title: String
     public var locator: DocumentLocator
+    public var position: OutlinePosition?
     public var children: [OutlineNode]
     public var depth: Int
 
-    public init(id: UUID = UUID(), title: String, locator: DocumentLocator, children: [OutlineNode] = [], depth: Int = 0) {
+    public init(id: UUID = UUID(), title: String, locator: DocumentLocator, children: [OutlineNode] = [], depth: Int = 0, position: OutlinePosition? = nil) {
         self.id = id
         self.title = title
         self.locator = locator
+        self.position = position
         self.children = children
         self.depth = depth
     }

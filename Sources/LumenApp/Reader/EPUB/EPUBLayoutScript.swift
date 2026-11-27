@@ -19,6 +19,7 @@ enum EPUBLayoutScript {
       margin: 28px !important;
       padding: 0 !important;
       column-count: var(--lm-effective-columns, 1) !important;
+      column-width: calc(100vw / var(--lm-effective-columns, 1) - 56px) !important;
       column-gap: 56px !important;
       column-fill: auto !important;
       overflow: visible !important;
@@ -29,13 +30,19 @@ enum EPUBLayoutScript {
 
     static let javascript = #"""
     (() => {
-      let anchor = null, anchorTop = 0, resizeFrame = 0, wheelTotal = 0, lastTurn = 0;
-      let restoring = false;
+      let anchor = null, anchorPosition = null, anchorTop = 0, resizeFrame = 0, wheelTotal = 0, lastTurn = 0;
+      let restoring = false, navigationScroll = null;
+      const firstRect = target => Array.from(target.getClientRects()).find(r => r.width > 0 && r.height > 0)
+        || target.getBoundingClientRect();
       const root = document.documentElement;
       const paged = () => root.classList.contains('lumen-paged');
       const maxX = () => Math.max(0, root.scrollWidth - innerWidth);
       const remember = (force = false) => {
         if (restoring && force !== true) return;
+        if (navigationScroll) {
+          if (Math.abs(scrollX - navigationScroll.x) < 1 && Math.abs(scrollY - navigationScroll.y) < 1) return;
+          navigationScroll = null;
+        }
         const x = Math.min(innerWidth / 2, 60), y = 40;
         let candidate = document.elementFromPoint(x, y);
         if (!candidate || candidate === root || candidate === document.body) {
@@ -46,21 +53,43 @@ enum EPUBLayoutScript {
         }
         if (candidate && candidate !== document.body && candidate !== root) {
           anchor = candidate;
+          anchorPosition = candidate;
           anchorTop = candidate.getBoundingClientRect().top;
         }
       };
       const restore = () => {
         if (!anchor || !anchor.isConnected) { remember(); return; }
         restoring = true;
-        const rect = anchor.getBoundingClientRect();
-        if (paged()) {
-          const page = Math.floor(Math.max(0, scrollX + rect.left - 28) / innerWidth);
-          window.scrollTo(Math.min(maxX(), page * innerWidth), 0);
-        } else {
-          window.scrollTo(0, Math.max(0, scrollY + rect.top - anchorTop));
-        }
+        const rect = firstRect(anchorPosition || anchor);
+        if (paged()) scrollToSpread(rect);
+        else window.scrollTo({ left: 0, top: Math.max(0, scrollY + rect.top - anchorTop), behavior: "instant" });
+        if (navigationScroll) navigationScroll = {x: scrollX, y: scrollY};
         requestAnimationFrame(() => { restoring = false; remember(); });
       };
+      function scrollToSpread(rect) {
+        const page = Math.floor(Math.max(0, scrollX + rect.left - 28 + 0.5) / Math.max(innerWidth, 1));
+        window.scrollTo({ left: Math.min(maxX(), page * innerWidth), top: 0, behavior: "instant" });
+      }
+      function navigate(element, position = element) {
+        if (!element) {
+          anchor = null;
+          anchorPosition = null;
+          anchorTop = 0;
+          navigationScroll = null;
+          window.scrollTo({ left: 0, top: 0, behavior: "instant" });
+          remember(true);
+          return;
+        }
+        if (paged()) {
+          scrollToSpread(firstRect(position));
+        } else {
+          window.scrollTo({ left: 0, top: Math.max(0, scrollY + firstRect(position).top), behavior: "instant" });
+        }
+        anchor = element;
+        anchorPosition = position;
+        anchorTop = firstRect(position).top;
+        navigationScroll = {x: scrollX, y: scrollY};
+      }
       let lastReportedColumns = -1;
       function apply() {
         const style = getComputedStyle(root);
@@ -95,8 +124,7 @@ enum EPUBLayoutScript {
         restore();
         return result;
       };
-      const rememberNavigation = () => remember(true);
-      window.__lumenLayout = { apply, remember, rememberNavigation, preservePosition, turn, paged };
+      window.__lumenLayout = { apply, remember, navigate, preservePosition, turn, paged };
       window.addEventListener('scroll', remember, {passive: true});
       window.addEventListener('resize', () => {
         cancelAnimationFrame(resizeFrame);

@@ -445,7 +445,7 @@ final class AppState: ObservableObject {
 
     /// 跳到第 `index` 个单元（0-based；PDF 是页、EPUB 是章）。
     @discardableResult
-    func jump(toUnit index: Int, epubAnchor: String = "") -> Int? {
+    func jump(toUnit index: Int, epubAnchor: String = "", outlinePosition: OutlinePosition? = nil) -> Int? {
         let total = bridge.unitCount
         guard total > 0 else { return nil }
 
@@ -460,7 +460,7 @@ final class AppState: ObservableObject {
             graphReturnJumpTask?.cancel()
             if session.document.kind == .pdf {
                 // PDFController queues this until panel anchor restoration finishes.
-                session.bridge.goTo?(locator)
+                session.bridge.navigate(to: locator, outlinePosition: outlinePosition)
             } else {
                 let sessionID = session.id
                 graphReturnJumpTask = Task { @MainActor [weak self] in
@@ -468,12 +468,12 @@ final class AppState: ObservableObject {
                     guard let self, !Task.isCancelled,
                           self.activeSession?.id == sessionID,
                           !session.showsLiteratureGraph else { return }
-                    session.bridge.goTo?(locator)
+                    session.bridge.navigate(to: locator, outlinePosition: outlinePosition)
                 }
             }
         } else {
             graphReturnJumpTask?.cancel()
-            bridge.goTo?(locator)
+            bridge.navigate(to: locator, outlinePosition: outlinePosition)
         }
         return clamped
     }
@@ -493,12 +493,25 @@ final class AppState: ObservableObject {
         open(url: entry.url)
     }
 
+    @discardableResult
+    func jump(toOutlineNode node: OutlineNode) -> Int? {
+        let index: Int
+        let anchor: String
+        switch (document?.kind, node.locator) {
+        case (.pdf, .pdf(let page, _)): (index, anchor) = (page, "")
+        case (.epub, .epub(let chapter, let fragment, _)): (index, anchor) = (chapter, fragment)
+        default: return nil
+        }
+        guard (0..<bridge.unitCount).contains(index) else { return nil }
+        return jump(toUnit: index, epubAnchor: anchor, outlinePosition: node.position)
+    }
+
     // MARK: 智能目录
 
     @discardableResult
     func jump(toOutlineEntry entry: SmartOutlineEntry) -> Int? {
         guard smartOutline.validateSource(), entry.unitIndex >= 0, entry.unitIndex < bridge.unitCount else { return nil }
-        return jump(toUnit: entry.unitIndex, epubAnchor: entry.anchor ?? "")
+        return jump(toUnit: entry.unitIndex, epubAnchor: entry.anchor ?? "", outlinePosition: entry.position)
     }
 
     /// 目录条目叫「第几页」还是「第几章」，由桥上报的文档类型决定。

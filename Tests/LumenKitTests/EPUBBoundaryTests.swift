@@ -62,7 +62,10 @@ struct EPUBBoundaryTests {
     @Test func nestedTOCResolvesRelativeToNavigationFile() {
         let base = URL(fileURLWithPath: "/book/OPS")
         let nav = base.appendingPathComponent("Navigation/nav.xhtml")
-        #expect(EPUBDocumentSource.navigationHref("../Text/chapter%202.xhtml#section", from: nav, relativeTo: base) == "Text/chapter 2.xhtml#section")
+        let target = EPUBDocumentSource.navigationTarget("../../Text/chapter%20%23%202.xhtml#part%3A%E4%B8%80%2520%23tail", from: nav, root: base.deletingLastPathComponent())
+        #expect(target?.path == "/book/Text/chapter # 2.xhtml")
+        #expect(target?.fragment == "part:一%20#tail")
+        #expect(EPUBDocumentSource.navigationTarget("../../../elsewhere.xhtml", from: nav, root: base.deletingLastPathComponent()) == nil)
     }
     @Test func versionRejectsEmptyOrSignedComponents() {
         for value in ["1..2", "1.", ".1", "+1.2.3", "1.+2.3"] {

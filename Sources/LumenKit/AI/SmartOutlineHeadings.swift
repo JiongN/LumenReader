@@ -7,13 +7,15 @@ public struct SmartOutlineCandidate: Sendable, Equatable, Codable {
     public var unitIndex: Int
     public var depth: Int
     public var anchor: String?
+    public var position: OutlinePosition?
 
-    public init(id: String, title: String, unitIndex: Int, depth: Int, anchor: String? = nil) {
+    public init(id: String, title: String, unitIndex: Int, depth: Int, anchor: String? = nil, position: OutlinePosition? = nil) {
         self.id = id; self.title = title; self.unitIndex = unitIndex; self.depth = depth; self.anchor = anchor
+        self.position = position
     }
 
     public var entry: SmartOutlineEntry {
-        .init(title: title, unitIndex: unitIndex, depth: depth, anchor: anchor)
+        .init(title: title, unitIndex: unitIndex, depth: depth, anchor: anchor, position: position)
     }
 }
 
@@ -65,6 +67,7 @@ public enum SmartOutlineHeadings {
             // are removed across pages by the PDF reader before they reach the model.
             let capitals = isolatedCapitalHeading(line, among: usable, bodyHeight: bodyHeight)
             guard explicitDepth != nil || capitals || ((emphasized.contains(plain) || line.height >= bodyHeight * 1.18) && plain.count <= 80) else { continue }
+            var headingBounds = line.bounds
             var previous = line
             for _ in 0..<3 {
                 let following = usable.filter {
@@ -78,6 +81,7 @@ public enum SmartOutlineHeadings {
                             && next.text.range(of: "[。；;，,：:]", options: .regularExpression) == nil)),
                       normalized(next.text).count < 60 else { break }
                 title += " " + next.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                headingBounds = headingBounds.union(next.bounds)
                 previous = next
             }
             // CJK extraction commonly inserts visual spaces between every glyph.
@@ -85,7 +89,7 @@ public enum SmartOutlineHeadings {
                 with: "", options: .regularExpression)
             if result.contains(where: { normalized($0.title).contains(plain) }) { continue }
             result.append(.init(id: "p\(line.pageIndex)-\(result.count)", title: title,
-                unitIndex: line.pageIndex, depth: explicitDepth ?? 0))
+                unitIndex: line.pageIndex, depth: explicitDepth ?? 0, position: .pdfHeading(headingBounds)))
         }
         return result
     }

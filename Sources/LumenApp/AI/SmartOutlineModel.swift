@@ -354,7 +354,7 @@ final class SmartOutlineModel: ObservableObject {
     // MARK: - 工具
 
     private static func cacheVersion(path: String) -> String? {
-        (try? DocumentSourceVersion.current(path: path)).map { "outline-headings-3:" + $0 }
+        (try? DocumentSourceVersion.current(path: path)).map { "outline-headings-4:" + $0 }
     }
 
     private func complete(messages: [AIMessage], config: AIProviderConfig) async throws -> String {

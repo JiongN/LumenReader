@@ -204,13 +204,13 @@ struct OutlineRow: View {
 
     let node: OutlineNode
 
-    @EnvironmentObject private var bridge: ReaderBridge
+    @EnvironmentObject private var state: AppState
     @State private var isHovering = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 1) {
             Button {
-                bridge.goTo?(node.locator)
+                state.jump(toOutlineNode: node)
             } label: {
                 HStack(spacing: DS.Space.xs) {
                     RoundedRectangle(cornerRadius: 1)
